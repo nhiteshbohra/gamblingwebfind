@@ -1,0 +1,227 @@
+# ┌─────────────────────────────────────────────────────────────────────────────┐
+# │  dorks.txt — Google Dork Queries for Gambling/Betting Website Discovery    │
+# │  Lines starting with # are comments and will be skipped.                   │
+# │  Add your own dork queries below (one per line).                           │
+# │  Generated from 120+ gambling/betting keywords.                            │
+# └─────────────────────────────────────────────────────────────────────────────┘
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# RUMMY
+# ═══════════════════════════════════════════════════════════════════════════════
+intitle:"Rummy" "play now" "real cash"
+intitle:"Cash Rummy" "deposit" "withdraw"
+intitle:"Online Rummy" "register" "bonus"
+intitle:"Play Rummy" "download" "real money"
+intitle:"Indian Rummy" "win cash" "tournament"
+intitle:"13 Card Rummy" "play online"
+intitle:"Points Rummy" "real money" "play"
+intitle:"Pool Rummy" "cash" "tournament"
+intitle:"Deals Rummy" "play online" "win"
+intitle:"Rummy Tournament" "register" "prize"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TEEN PATTI / 3 PATTI
+# ═══════════════════════════════════════════════════════════════════════════════
+intitle:"Teen Patti" "real cash" "play online"
+intitle:"Teen Patti Gold" "download" "real money"
+intitle:"3 Patti" "online" "cash" "play"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# POKER
+# ═══════════════════════════════════════════════════════════════════════════════
+intitle:"Poker" "real money" "play online"
+intitle:"Texas Holdem" "online" "real money"
+intitle:"Omaha Poker" "play" "tournament"
+intitle:"Live Poker" "real money" "table"
+intitle:"Poker Tournament" "register" "prize pool"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CASINO
+# ═══════════════════════════════════════════════════════════════════════════════
+intitle:"Casino" "play now" "sign up" "bonus"
+intitle:"Online Casino" "register" "deposit" "bonus"
+intitle:"Live Casino" "real dealer" "play"
+intitle:"Real Money Casino" "slots" "deposit"
+intitle:"Mobile Casino" "download" "play"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SLOTS / JACKPOT
+# ═══════════════════════════════════════════════════════════════════════════════
+intitle:"Slots" "play online" "jackpot" "free spins"
+intitle:"Slot Machine" "real money" "play"
+intitle:"Jackpot" "win" "play" "casino"
+intitle:"Progressive Jackpot" "win big" "slots"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TABLE GAMES
+# ═══════════════════════════════════════════════════════════════════════════════
+intitle:"Roulette" "online" "real money" "play"
+intitle:"Blackjack" "online" "real money" "play"
+intitle:"Baccarat" "online" "live" "real money"
+intitle:"Craps" "online" "real money" "play"
+intitle:"Sic Bo" "online" "real money"
+intitle:"Dragon Tiger" "online" "real money" "play"
+intitle:"Andar Bahar" "online" "real money" "play"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SPORTS BETTING
+# ═══════════════════════════════════════════════════════════════════════════════
+intitle:"Sports Betting" "odds" "bet now"
+intitle:"Sportsbook" "live betting" "odds"
+intitle:"Bookmaker" "betting" "odds" "register"
+intitle:"Live Betting" "in-play" "odds"
+intitle:"In-Play Betting" "live odds" "bet"
+intitle:"Betting" "deposit" "odds" "bet now"
+intitle:"Bet Now" "register" "odds" "deposit"
+intitle:"Bet Slip" "place bet" "odds"
+intitle:"Betting Odds" "sportsbook" "live"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CRICKET / IPL / SPECIFIC SPORTS BETTING
+# ═══════════════════════════════════════════════════════════════════════════════
+intitle:"Cricket Betting" "odds" "IPL" "bet"
+intitle:"IPL Betting" "cricket odds" "bet now"
+intitle:"T20 Betting" "cricket" "odds" "live"
+intitle:"Football Betting" "odds" "live" "bet"
+intitle:"Soccer Betting" "odds" "bet" "live"
+intitle:"Tennis Betting" "odds" "live" "bet"
+intitle:"Horse Racing" "betting" "odds" "bet"
+intitle:"Greyhound Racing" "betting" "odds"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# FANTASY SPORTS
+# ═══════════════════════════════════════════════════════════════════════════════
+intitle:"Fantasy Sports" "win cash" "contest"
+intitle:"Fantasy Cricket" "real money" "contest"
+intitle:"Fantasy Football" "cash" "contest" "win"
+intitle:"Fantasy League" "real money" "play"
+intitle:"Fantasy Gaming" "cash contest" "win"
+intitle:"Win Cash" "contest" "fantasy"
+intitle:"Cash Contest" "fantasy" "play" "win"
+intitle:"Mega Contest" "fantasy" "prize"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# LOTTERY / LUCKY DRAW
+# ═══════════════════════════════════════════════════════════════════════════════
+intitle:"Lottery" "online" "buy ticket" "win"
+intitle:"Online Lottery" "draw" "results" "play"
+intitle:"Lucky Draw" "win" "prize" "register"
+intitle:"Scratch Card" "online" "win" "play"
+intitle:"Bingo" "online" "real money" "play"
+intitle:"Keno" "online" "real money" "play"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# COLOR PREDICTION / CRASH / INSTANT GAMES
+# ═══════════════════════════════════════════════════════════════════════════════
+intitle:"Color Prediction" "game" "earn money"
+intitle:"WinGo" "color prediction" "earn"
+intitle:"Parity Game" "prediction" "earn money"
+intitle:"Number Prediction" "game" "real money"
+intitle:"Aviator" "game" "play" "real money"
+intitle:"Crash Game" "play" "win" "real money"
+intitle:"Mines" "game" "real money" "play"
+intitle:"Plinko" "game" "real money" "casino"
+intitle:"Lucky Wheel" "spin" "win" "real money"
+intitle:"Dice" "game" "real money" "play"
+intitle:"Fish Game" "casino" "play" "win"
+intitle:"Arcade Casino" "game" "real money"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ESPORTS / VIRTUAL SPORTS
+# ═══════════════════════════════════════════════════════════════════════════════
+intitle:"Esports Betting" "odds" "bet" "live"
+intitle:"Virtual Sports" "betting" "play" "bet"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CRYPTO CASINO / CRYPTO BETTING
+# ═══════════════════════════════════════════════════════════════════════════════
+intitle:"Crypto Casino" "bitcoin" "play" "deposit"
+intitle:"Bitcoin Casino" "play" "deposit" "bonus"
+intitle:"Ethereum Casino" "play" "deposit"
+intitle:"USDT Casino" "play" "deposit" "bonus"
+intitle:"Crypto Betting" "bitcoin" "odds" "bet"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# REAL MONEY / CASH GAMES
+# ═══════════════════════════════════════════════════════════════════════════════
+intitle:"Real Money" "games" "play" "win"
+intitle:"Real Money Games" "play online" "download"
+intitle:"Win Real Money" "game" "play" "download"
+intitle:"Earn Money" "game" "play" "online"
+intitle:"Play and Win" "real money" "cash"
+intitle:"Cash Prize" "game" "win" "play"
+intitle:"Daily Winnings" "play" "real money"
+intitle:"Real Cash" "game" "play" "win"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# DEPOSIT / WITHDRAWAL / PAYMENT KEYWORDS
+# ═══════════════════════════════════════════════════════════════════════════════
+intitle:"Instant Withdrawal" "casino" OR "betting" OR "rummy"
+intitle:"Fast Withdrawal" "casino" OR "betting" OR "game"
+intitle:"Instant Deposit" "casino" OR "betting" OR "play"
+inurl:"/deposit" "casino" OR "betting" "bonus"
+inurl:"/withdraw" "casino" OR "betting" "instant"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# BONUS / PROMO KEYWORDS (strong gambling indicators)
+# ═══════════════════════════════════════════════════════════════════════════════
+intitle:"Deposit Bonus" "casino" OR "betting" "register"
+intitle:"Welcome Bonus" "casino" OR "betting" "sign up"
+intitle:"Sign Up Bonus" "casino" OR "betting" "free"
+intitle:"No Deposit Bonus" "casino" "free" "play"
+intitle:"Cashback Bonus" "casino" OR "betting"
+intitle:"Referral Bonus" "casino" OR "betting" OR "rummy"
+intitle:"Loyalty Bonus" "casino" OR "betting" "VIP"
+intitle:"VIP Program" "casino" OR "betting" "rewards"
+intitle:"Promo Code" "casino" OR "betting" "bonus"
+intitle:"Affiliate Program" "casino" OR "betting" "earn"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# GENERIC GAMBLING TERMS
+# ═══════════════════════════════════════════════════════════════════════════════
+intitle:"Gambling" "online" "real money" "play"
+intitle:"Wager" "online" "real money" "bet"
+intitle:"Wagering" "requirements" "bonus" "casino"
+intitle:"Odds" "betting" "sportsbook" "live"
+intitle:"Payout" "casino" OR "betting" "fast"
+intitle:"Jackpot Winner" "casino" "won" "prize"
+intitle:"High Roller" "casino" "VIP" "bonus"
+intitle:"Live Dealer" "casino" "play" "real"
+intitle:"Online Gaming" "real money" "play" "win"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# DOMAIN TLD TARGETING
+# ═══════════════════════════════════════════════════════════════════════════════
+site:.bet "casino" OR "betting" OR "odds"
+site:.casino "play" OR "bonus" OR "slots"
+site:.poker "tournament" OR "register"
+site:.games "casino" OR "slot" OR "betting"
+site:.win "casino" OR "betting" OR "prize"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# APP / APK DOWNLOADS (illegal gambling apps)
+# ═══════════════════════════════════════════════════════════════════════════════
+intitle:"download" "betting app" "APK" "real money"
+intitle:"casino app" "download" "android" "APK"
+intitle:"rummy app" "download" "real cash" "APK"
+intitle:"teen patti" "download" "APK" "real money"
+"betting APK" "install" "real money" "download"
+"color prediction app" "download" "earn money"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# INDIA-SPECIFIC GAMBLING (Satta / Matka)
+# ═══════════════════════════════════════════════════════════════════════════════
+intitle:"satta" "matka" "result" "guessing"
+intitle:"online satta" "play" "result"
+intitle:"matka result" "guessing" "panel chart"
+intitle:"satta king" "result" "today"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# COMBINED MULTI-KEYWORD DORKS (high precision)
+# ═══════════════════════════════════════════════════════════════════════════════
+"deposit" "withdraw" "bonus" inurl:"/play" -wikipedia -review
+"register" "deposit" "real money" inurl:"/casino"
+"sign up" "bonus" "play now" inurl:"/betting"
+"UPI deposit" "casino" OR "betting" OR "rummy"
+"paytm" "deposit" "betting" OR "casino" OR "rummy"
+"responsible gaming" "18+" "deposit" "withdraw"

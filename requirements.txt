@@ -1,0 +1,19 @@
+# ──────────────────────────────────────────────────────────────
+# requirements.txt — Gambling Website Hunter dependencies
+# Install with:  pip install -r requirements.txt
+# ──────────────────────────────────────────────────────────────
+
+# HTTP requests
+requests>=2.31.0
+
+# HTML parsing
+beautifulsoup4>=4.12.0
+
+# WHOIS lookups
+python-whois>=0.9.4
+
+# Google dorking (search scraping)
+googlesearch-python>=1.2.0
+
+# Browser screenshots (headless Chromium)
+playwright>=1.40.0

@@ -1,0 +1,23 @@
+2026-08-07 18:01:06 [INFO] gambling_hunter: Loaded 2 domains from test_domains.txt
+2026-08-07 18:01:06 [INFO] gambling_hunter: ═══ Phase 2a: DNS Resolution ═══
+2026-08-07 18:01:06 [INFO] gambling_hunter:   [1/2] example.com → 104.20.23.154
+2026-08-07 18:01:06 [INFO] gambling_hunter:   [2/2] google.com → 142.250.118.100
+2026-08-07 18:01:06 [INFO] gambling_hunter:   Resolved 2/2 domains
+2026-08-07 18:01:06 [INFO] gambling_hunter: ═══ Phase 3: Liveness Check ═══
+2026-08-07 18:01:06 [INFO] liveness: Checking liveness for 2 domain(s) with 10 threads...
+2026-08-07 18:01:06 [INFO] liveness:   [1/2] ✅ example.com → UP (200) [245ms]
+2026-08-07 18:01:06 [INFO] liveness:   [2/2] ✅ google.com → REDIRECT (200) [876ms]
+2026-08-07 18:01:06 [INFO] liveness: 
+📊 Results: 2 UP / 0 DOWN out of 2 domains
+2026-08-07 18:01:06 [INFO] gambling_hunter:   2 live domains saved to E:\New folder\fromiptodomains\output\live_domains.txt
+2026-08-07 18:01:06 [INFO] gambling_hunter: ═══ Phase 4: Intelligence Gathering ═══
+2026-08-07 18:01:06 [INFO] intel: [1/2] Processing example.com...
+2026-08-07 18:01:06 [INFO] intel: 📊 Gathering intel: example.com
+2026-08-07 18:01:09 [INFO] intel:   ✅ example.com: title='Example Domain...' | ip=104.20.23.154 (Canada) | server=cloudflare
+2026-08-07 18:01:10 [INFO] intel: [2/2] Processing google.com...
+2026-08-07 18:01:10 [INFO] intel: 📊 Gathering intel: google.com
+2026-08-07 18:01:13 [INFO] intel:   ✅ google.com: title='Google...' | ip=142.250.118.101 (United States) | server=gws
+2026-08-07 18:01:13 [INFO] gambling_hunter: ═══ Phase 5: Screenshots SKIPPED (--no-screenshot) ═══
+2026-08-07 18:01:13 [INFO] gambling_hunter: ═══ Phase 6: CSV Export ═══
+2026-08-07 18:01:13 [INFO] gambling_hunter:   📄 CSV report saved: E:\New folder\fromiptodomains\output\gambling_report_20260807_180113.csv
+2026-08-07 18:01:13 [INFO] gambling_hunter:   📊 Total domains in report: 2
