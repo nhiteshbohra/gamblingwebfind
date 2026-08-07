@@ -1,102 +1,75 @@
-#!/usr/bin/env python3
 """
-config.py — Central configuration for the Gambling Website Detection Tool.
+config.py — Central configuration file for Gambling Site Discovery & Intelligence Platform.
 """
 
 import os
+from pathlib import Path
 
-# ─── Directories ──────────────────────────────────────────────────────────────
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-OUTPUT_DIR = os.path.join(BASE_DIR, "output")
-SCREENSHOT_DIR = os.path.join(OUTPUT_DIR, "screenshots")
+# Base Paths
+BASE_DIR = Path(__file__).resolve().parent
+DATA_DIR = BASE_DIR / "data"
+SCREENSHOTS_DIR = BASE_DIR / "screenshots"
+LOGS_DIR = BASE_DIR / "logs"
 
-# Create output directories on import
-os.makedirs(OUTPUT_DIR, exist_ok=True)
-os.makedirs(SCREENSHOT_DIR, exist_ok=True)
+# Ensure output directories exist
+for folder in [DATA_DIR, SCREENSHOTS_DIR, LOGS_DIR]:
+    folder.mkdir(parents=True, exist_ok=True)
 
-# ─── HTTP Settings ────────────────────────────────────────────────────────────
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
-    "Mozilla/5.0 (X11; Linux x86_64; rv:126.0) Gecko/20100101 Firefox/126.0",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36 Edg/125.0.0.0",
-]
+# CSV File Paths
+DISCOVERED_CSV = DATA_DIR / "discovered_domains.csv"
+CLASSIFIED_CSV = DATA_DIR / "classified_domains.csv"
+IP_MAPPING_CSV = DATA_DIR / "ip_mapping.csv"
+SITE_INTEL_CSV = DATA_DIR / "site_intelligence.csv"
 
-DEFAULT_TIMEOUT = 15  # seconds
-MAX_RETRIES = 2
-RETRY_DELAY = 2  # seconds between retries
+# SearXNG & Search Settings
+SEARXNG_URL = os.environ.get("SEARXNG_URL", "http://localhost:8080")
+SEARXNG_ENGINES = ["google", "bing", "duckduckgo"]
+MAX_RESULTS_PER_KEYWORD = 150
+MAX_SEARCH_PAGES = 15  # Crawl up to 15 pages of search results per keyword/dork query
+KEYWORDS_FILE = BASE_DIR / "keywords.txt"
+DORKS_FILE = BASE_DIR / "dorks.txt"
 
-# ─── Rate Limiting ────────────────────────────────────────────────────────────
-DORK_DELAY_MIN = 10  # seconds between Google dork queries
-DORK_DELAY_MAX = 30
-REQUEST_DELAY = 1.0  # seconds between general HTTP requests
-REVERSE_IP_DELAY = 1.5  # seconds between reverse IP lookups
-LIVENESS_TIMEOUT = 10  # seconds per domain liveness check
-WHOIS_DELAY = 2.0  # seconds between WHOIS lookups
+# Daemon & Automation Settings
+DAEMON_CYCLE_DELAY = 60  # seconds pause between continuous execution cycles
+AUTO_EXPAND_KEYWORDS = True  # Automatically discover new gambling keywords from confirmed sites
 
-# ─── Concurrency ──────────────────────────────────────────────────────────────
-LIVENESS_THREADS = 10
-INTEL_THREADS = 5
-SCREENSHOT_CONCURRENT = 3
+# Network & Request Settings
+REQUEST_TIMEOUT = 10  # seconds
+CONCURRENT_THREADS = 10
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/118.0.0.0 Safari/537.36"
+)
 
-# ─── Screenshot Settings ──────────────────────────────────────────────────────
-SCREENSHOT_WIDTH = 1920
-SCREENSHOT_HEIGHT = 1080
-SCREENSHOT_TIMEOUT = 30000  # milliseconds (Playwright uses ms)
-
-# ─── Dorking ──────────────────────────────────────────────────────────────────
-MAX_DORK_RESULTS_PER_QUERY = 50
-
-# Domains to exclude from dork results (noise)
-DORK_EXCLUDE_DOMAINS = {
-    "google.com", "google.co.in", "youtube.com", "wikipedia.org",
-    "facebook.com", "twitter.com", "x.com", "instagram.com",
-    "linkedin.com", "reddit.com", "quora.com", "medium.com",
-    "amazon.com", "flipkart.com", "github.com", "stackoverflow.com",
-    "apple.com", "microsoft.com", "bbc.com", "cnn.com",
-    "timesofindia.indiatimes.com", "ndtv.com", "thehindu.com",
-    "news18.com", "hindustantimes.com", "indianexpress.com",
-    "play.google.com", "apps.apple.com",
+HTTP_HEADERS = {
+    "User-Agent": USER_AGENT,
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.5",
 }
 
-# ─── Reverse IP Sources ──────────────────────────────────────────────────────
-REVERSE_IP_SOURCES = ["hackertarget", "rapiddns"]
+# Reverse IP API Keys (Optional - default uses free endpoints HackerTarget & RapidDNS)
+SECURITYTRAILS_API_KEY = os.environ.get("SECURITYTRAILS_API_KEY", "")
+SHODAN_API_KEY = os.environ.get("SHODAN_API_KEY", "")
 
-# ─── Geo IP ───────────────────────────────────────────────────────────────────
-GEO_IP_API = "http://ip-api.com/json/{ip}?fields=status,country,city,isp,org,as"
-GEO_IP_RATE_LIMIT = 45  # max requests per minute (free tier)
+# Playwright Screenshot Settings
+SCREENSHOT_VIEWPORT = {"width": 1280, "height": 800}
+SCREENSHOT_TIMEOUT = 25000  # milliseconds
+SCREENSHOT_WAIT_UNTIL = "networkidle"
 
-# ─── CSV Column Order ────────────────────────────────────────────────────────
-CSV_COLUMNS = [
-    "domain",
-    "ip",
-    "reverse_ip_domain_count",
-    "reverse_ip_domains",
-    "status",
-    "http_code",
-    "response_time_ms",
-    "final_url",
-    "page_title",
-    "meta_description",
-    "meta_keywords",
-    "content_language",
-    "server",
-    "technologies",
-    "ssl_issuer",
-    "ssl_expiry",
-    "whois_registrar",
-    "whois_created",
-    "whois_expires",
-    "whois_country",
-    "ip_country",
-    "ip_city",
-    "ip_isp",
-    "screenshot_path",
-    "discovery_source",
-    "scan_timestamp",
+# Classification Keyword Rules & Weights
+GAMBLING_POSITIVE_KEYWORDS = [
+    "casino", "betting", "satta", "matka", "teen patti", "poker", "roulette",
+    "slot", "sportsbook", "wager", "jackpot", "odds", "deposit bonus", "bet",
+    "rummy", "andar bahar", "color prediction", "baccarat", "bookmaker",
+    "live dealer", "withdrawal", "register now", "claim bonus", "play for cash"
 ]
 
-# ─── Logging ──────────────────────────────────────────────────────────────────
-LOG_FILE = os.path.join(OUTPUT_DIR, "scan_log.txt")
-LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
-LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
+NON_GAMBLING_NEGATIVE_KEYWORDS = [
+    "gambling addiction", "responsible gambling", "helpline", "wikipedia",
+    "news", "article", "review site", "forum", "blog", "government",
+    "police", "legal notice", "court", "lawyer", "law firm", "treatment center"
+]
+
+# Classification threshold (0 to 1)
+GAMBLING_CONFIDENCE_THRESHOLD = 0.4

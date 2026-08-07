@@ -1,0 +1,17 @@
+domain,is_gambling,confidence_score,title,classification_reason,checked_at
+getb8.us,False,0.2,Just a moment...,Matched positive keywords: bet,2026-08-07T15:55:18.695163+00:00
+poki.com,False,0.0,Free Online Games at Poki - Play Now!,"Matched positive keywords: bet | Matched negative keywords: article, blog, police",2026-08-07T15:55:18.822109+00:00
+gamblingmeter.net,False,0.35,Top 10 Online Gambling Sites and USA Casinos in 2026,"Matched positive keywords: casino, betting, poker, roulette, slot | Matched negative keywords: responsible gambling, helpline, article",2026-08-07T15:55:19.306761+00:00
+gamblingsage.org,True,0.4,Top Online Gambling Sites USA | Play & Win Real Money in 2026,"Matched positive keywords: casino, betting, poker, roulette, slot | Matched negative keywords: responsible gambling, article",2026-08-07T15:55:19.520249+00:00
+gamblingchooser.com,False,0.35,Best Online Casinos for Real Money 2026,"Matched positive keywords: casino, betting, poker, roulette, slot | Matched negative keywords: responsible gambling, helpline, article",2026-08-07T15:55:19.838048+00:00
+wikipedia.org,False,0.0,Wikipedia,"Matched positive keywords: bet | Matched negative keywords: wikipedia, news, article",2026-08-07T15:55:20.094593+00:00
+casinosns.com,False,0.2,,Matched positive keywords: domain:casino,2026-08-07T15:55:20.504880+00:00
+pokerstars.com,False,0.2,Access Denied,Matched positive keywords: domain:poker,2026-08-07T15:55:20.611903+00:00
+bonus.com,False,0.0,Attention Required! | Cloudflare,No definitive gambling indicators found,2026-08-07T15:55:21.022298+00:00
+fanduel.com,False,0.0,ERROR: The request could not be satisfied,No definitive gambling indicators found,2026-08-07T15:55:21.072878+00:00
+draftkings.com,False,0.0,Access Denied,No definitive gambling indicators found,2026-08-07T15:55:21.186797+00:00
+betmgm.com,True,0.45,betmgm.com,Matched positive keywords: domain:bet,2026-08-07T15:55:21.770043+00:00
+gamblingauthority.org,True,0.4,Top 10 Online Gambling Sites for Real Money in 2026,"Matched positive keywords: casino, betting, poker, roulette, slot | Matched negative keywords: responsible gambling, article",2026-08-07T15:55:31.303644+00:00
+getbets.us,True,0.5,,"Homepage unreachable, but domain matches gambling keywords: bet",2026-08-07T15:55:37.668880+00:00
+opengambling.co,False,0.0,,Failed to reach domain homepage (unreachable/timed out),2026-08-07T15:55:37.715706+00:00
+casino.org,True,0.5,,"Homepage unreachable, but domain matches gambling keywords: casino",2026-08-07T15:55:40.576248+00:00

@@ -1,0 +1,6 @@
+2026-08-07 22:00:56,228 [INFO] Added 2 keywords to F:\projects\gamblingwebfind\keywords.txt
+2026-08-07 22:00:56,228 [INFO] Added 4 dorks to F:\projects\gamblingwebfind\dorks.txt
+2026-08-07 22:09:16,876 [INFO] Starting discovery phase across 110 queries up to 5 pages.
+2026-08-07 22:12:03,574 [INFO] Starting directory scraping across 5 sites.
+2026-08-07 22:17:22,623 [INFO] Directory Crawler complete. Found 48 domains.
+2026-08-07 22:17:22,630 [INFO] Discovery complete. Added 368 records to F:\projects\gamblingwebfind\data\discovered_domains.csv
