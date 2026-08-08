@@ -1,0 +1,53 @@
+# SearXNG settings — tuned for Presence crawler (web search only, JSON API enabled)
+use_default_settings: true
+
+server:
+  secret_key: "presence_searxng_secret_key_gambling_crawler"
+  limiter: false
+
+search:
+  safe_search: 0
+  formats:
+    - html
+    - json
+
+engines:
+  # Enable general web engines only
+  - name: google
+    engine: google
+    categories: general
+    disabled: false
+  - name: bing
+    engine: bing
+    categories: general
+    disabled: false
+  - name: duckduckgo
+    engine: duckduckgo
+    categories: general
+    disabled: false
+
+  # Disable image engines
+  - name: google images
+    disabled: true
+  - name: bing images
+    disabled: true
+  - name: flickr
+    disabled: true
+  - name: deviantart
+    disabled: true
+
+  # Disable video engines
+  - name: youtube
+    disabled: true
+  - name: vimeo
+    disabled: true
+  - name: dailymotion
+    disabled: true
+  - name: google videos
+    disabled: true
+
+  # Disable map engines
+  - name: openstreetmap
+    disabled: true
+  - name: google maps
+    disabled: true

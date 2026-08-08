@@ -1,0 +1,13 @@
+searxng_base_url: "http://127.0.0.1:8080"
+searxng_page_delay_seconds: 1.0
+max_pages_per_keyword: 4
+fetch_timeout_seconds: 10
+per_domain_delay_seconds: 2.0
+classification_threshold: 0.55
+max_new_keywords_per_page: 5
+liveness_recheck_interval_hours: 72
+csv_export_interval_minutes: 30
+max_concurrent_fetches: 20
+stall_alert_minutes: 30
+db_path: "data/presence.db"
+csv_output_path: "data/presence_gambling_sites.csv"

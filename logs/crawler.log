@@ -1,0 +1,153 @@
+
+--- SESSION STARTED AT 2026-08-08T02:32:49.970997 ---
+[Watchdog] SearXNG at http://127.0.0.1:8080 is unreachable. Restarting container...
+[ALERT] SearXNG health check failed. Attempting docker compose restart.
+time="2026-08-08T02:47:54+05:30" level=warning msg="F:\\projects\\gamblingwebfind\\docker-compose.yml: the attribute `version` is obsolete, it will be ignored, please remove it to avoid potential confusion"
+ Container presence_searxng Restarting 
+ Container presence_searxng Started 
+Exception in callback _ProactorBasePipeTransport._call_connection_lost(None)
+handle: <Handle _ProactorBasePipeTransport._call_connection_lost(None)>
+Traceback (most recent call last):
+  File "F:\softwares\python\Lib\asyncio\events.py", line 84, in _run
+    self._context.run(self._callback, *self._args)
+  File "F:\softwares\python\Lib\asyncio\proactor_events.py", line 165, in _call_connection_lost
+    self._sock.shutdown(socket.SHUT_RDWR)
+ConnectionResetError: [WinError 10054] An existing connection was forcibly closed by the remote host
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+F:\projects\gamblingwebfind\core\classifier.py:19: MarkupResemblesLocatorWarning: The input looks more like a filename than markup. You may want to open this file and pass the filehandle into Beautiful Soup.
+  soup = BeautifulSoup(html, 'html.parser')
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+
+--- SESSION STARTED AT 2026-08-08T12:31:48.805312 ---
+[Watchdog] SearXNG at http://127.0.0.1:8080 is unreachable. Restarting container...
+[ALERT] SearXNG health check failed. Attempting docker compose restart.
+time="2026-08-08T12:46:51+05:30" level=warning msg="F:\\projects\\gamblingwebfind\\docker-compose.yml: the attribute `version` is obsolete, it will be ignored, please remove it to avoid potential confusion"
+ Container presence_searxng Restarting 
+ Container presence_searxng Started 
+[ALERT] Stall detected: no new pending URLs in the last 30 minutes.
+
+--- SESSION STARTED AT 2026-08-08T15:01:17.508231 ---
+Fatal error on SSL protocol
+protocol: <asyncio.sslproto.SSLProtocol object at 0x0000023C8B71A0C0>
+transport: <_ProactorSocketTransport closing fd=980>
+Traceback (most recent call last):
+  File "F:\softwares\python\Lib\asyncio\sslproto.py", line 733, in _do_read
+    self._do_read__copied()
+  File "F:\softwares\python\Lib\asyncio\sslproto.py", line 778, in _do_read__copied
+    chunk = self._sslobj.read(self.max_size)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\softwares\python\Lib\ssl.py", line 859, in read
+    v = self._sslobj.read(len)
+        ^^^^^^^^^^^^^^^^^^^^^^
+MemoryError
