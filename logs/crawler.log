@@ -151,3 +151,34 @@ Traceback (most recent call last):
     v = self._sslobj.read(len)
         ^^^^^^^^^^^^^^^^^^^^^^
 MemoryError
+
+--- SESSION STARTED AT 2026-08-08T16:59:43.144739 ---
+[Watchdog] SearXNG at http://127.0.0.1:8080 is unreachable. Restarting container...
+[ALERT] SearXNG health check failed. Attempting docker compose restart.
+time="2026-08-08T17:31:16+05:30" level=warning msg="F:\\projects\\gamblingwebfind\\docker-compose.yml: the attribute `version` is obsolete, it will be ignored, please remove it to avoid potential confusion"
+ Container presence_searxng Restarting 
+ Container presence_searxng Started 
+F:\projects\gamblingwebfind\core\classifier.py:39: MarkupResemblesLocatorWarning: The input looks more like a filename than markup. You may want to open this file and pass the filehandle into Beautiful Soup.
+  """Return visible text + title + meta description content, all lowercased."""
+[Watchdog] SearXNG at http://127.0.0.1:8080 is unreachable. Restarting container...
+[ALERT] SearXNG health check failed. Attempting docker compose restart.
+time="2026-08-08T18:25:52+05:30" level=warning msg="F:\\projects\\gamblingwebfind\\docker-compose.yml: the attribute `version` is obsolete, it will be ignored, please remove it to avoid potential confusion"
+ Container presence_searxng Restarting 
+ Container presence_searxng Started 
+[Watchdog] SearXNG at http://127.0.0.1:8080 is unreachable. Restarting container...
+[ALERT] SearXNG health check failed. Attempting docker compose restart.
+time="2026-08-08T19:46:38+05:30" level=warning msg="F:\\projects\\gamblingwebfind\\docker-compose.yml: the attribute `version` is obsolete, it will be ignored, please remove it to avoid potential confusion"
+ Container presence_searxng Restarting 
+ Container presence_searxng Started 
+F:\softwares\python\Lib\html\parser.py:171: XMLParsedAsHTMLWarning: It looks like you're parsing an XML document using an HTML parser. If this really is an HTML document (maybe it's XHTML?), you can ignore or filter this warning. If it's XML, you should know that using an XML parser will be more reliable. To parse this document as XML, make sure you have the lxml package installed, and pass the keyword argument `features="xml"` into the BeautifulSoup constructor.
+  k = self.parse_starttag(i)
+[Watchdog] SearXNG at http://127.0.0.1:8080 is unreachable. Restarting container...
+[ALERT] SearXNG health check failed. Attempting docker compose restart.
+time="2026-08-08T20:10:04+05:30" level=warning msg="F:\\projects\\gamblingwebfind\\docker-compose.yml: the attribute `version` is obsolete, it will be ignored, please remove it to avoid potential confusion"
+ Container presence_searxng Restarting 
+ Container presence_searxng Started 
+[Watchdog] SearXNG at http://127.0.0.1:8080 is unreachable. Restarting container...
+[ALERT] SearXNG health check failed. Attempting docker compose restart.
+time="2026-08-08T20:36:28+05:30" level=warning msg="F:\\projects\\gamblingwebfind\\docker-compose.yml: the attribute `version` is obsolete, it will be ignored, please remove it to avoid potential confusion"
+ Container presence_searxng Restarting 
+ Container presence_searxng Started 
