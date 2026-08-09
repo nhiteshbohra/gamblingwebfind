@@ -11,3 +11,5 @@ max_concurrent_fetches: 20
 stall_alert_minutes: 30
 db_path: "data/presence.db"
 csv_output_path: "data/presence_gambling_sites.csv"
+strict_classification_threshold: 0.75
+strict_batch_concurrency: 250

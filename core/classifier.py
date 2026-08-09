@@ -94,3 +94,66 @@ def classify(html: str, domain: str = "", url: str = "", threshold=0.55):
     confidence_score = max(0.0, min(round(score, 2), 1.0))
     is_gambling = confidence_score >= threshold
     return is_gambling, confidence_score, matched_reasons
+
+
+def classify_strict(html: str, url: str = "", threshold: float = 0.75):
+    """Stricter classifier for bulk verification of pre-existing domain lists.
+
+    Hard rules (checked before scoring):
+    - .gov / .edu domains are auto-rejected — confirmed false-positive sources.
+    - Empty HTML returns False immediately.
+
+    Score rules (vs. classify()):
+    - Requires confidence_score >= threshold (default 0.75, vs 0.55 normal).
+    - Requires AT LEAST 2 distinct strong-tier signal matches (score alone
+      cannot carry the result through medium/structural accumulation).
+
+    Returns the same (is_gambling, confidence_score, matched_reasons) tuple
+    so all existing consumers work without changes.
+    """
+    if not html:
+        return False, 0.0, ["empty_html"]
+
+    # Hard-exclude government and academic domains — never real-money operators
+    url_lower = url.lower()
+    if url_lower.endswith('.gov') or '/.gov' in url_lower or '.gov/' in url_lower \
+            or url_lower.endswith('.edu') or '/.edu' in url_lower or '.edu/' in url_lower:
+        return False, 0.0, ["hard_excluded:gov_edu"]
+    # Also catch via tld extraction
+    try:
+        import tldextract
+        ext = tldextract.extract(url)
+        if ext.suffix in ('gov', 'edu') or ext.domain.endswith('.gov') or ext.domain.endswith('.edu'):
+            return False, 0.0, ["hard_excluded:gov_edu"]
+    except Exception:
+        pass  # ponytail: tldextract optional here; string check above is the real guard
+
+    text = _extract_text(html)
+    matched_reasons = []
+    score = 0.0
+    strong_count = 0
+
+    for sig in STRONG_SIGNALS:
+        if sig in text:
+            score += 0.25
+            strong_count += 1
+            matched_reasons.append(f"strong:{sig}")
+
+    for sig in MEDIUM_SIGNALS:
+        if sig in text:
+            score += 0.10
+            matched_reasons.append(f"medium:{sig}")
+
+    for sig in STRUCTURAL_SIGNALS:
+        if sig in text:
+            score += 0.15
+            matched_reasons.append(f"structural:{sig}")
+
+    for sig in NEGATIVE_SIGNALS:
+        if sig in text:
+            score -= 0.15
+            matched_reasons.append(f"negative:{sig}")
+
+    confidence_score = max(0.0, min(round(score, 2), 1.0))
+    is_gambling = confidence_score >= threshold and strong_count >= 2
+    return is_gambling, confidence_score, matched_reasons

@@ -182,3 +182,8 @@ time="2026-08-08T20:10:04+05:30" level=warning msg="F:\\projects\\gamblingwebfin
 time="2026-08-08T20:36:28+05:30" level=warning msg="F:\\projects\\gamblingwebfind\\docker-compose.yml: the attribute `version` is obsolete, it will be ignored, please remove it to avoid potential confusion"
  Container presence_searxng Restarting 
  Container presence_searxng Started 
+[Watchdog] SearXNG at http://127.0.0.1:8080 is unreachable. Restarting container...
+[ALERT] SearXNG health check failed. Attempting docker compose restart.
+time="2026-08-08T20:58:46+05:30" level=warning msg="F:\\projects\\gamblingwebfind\\docker-compose.yml: the attribute `version` is obsolete, it will be ignored, please remove it to avoid potential confusion"
+ Container presence_searxng Restarting 
+ Container presence_searxng Started 

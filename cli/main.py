@@ -1,8 +1,11 @@
 import os
 import sys
+import csv
+import time
 import yaml
 import asyncio
 import argparse
+import codecs
 
 # Add root project dir to path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -35,6 +38,14 @@ async def async_main():
 
     import_p = subparsers.add_parser("import-domains", help="Import domains/URLs from a .txt file")
     import_p.add_argument("file", type=str, help="Path to .txt file, one domain or URL per line")
+
+    vb = subparsers.add_parser("verify-batch", help="Bulk-verify a CSV of pre-existing domains (1M+ capable)")
+    vb.add_argument("input", type=str, help="Input CSV path (first column = domain)")
+    vb.add_argument("--output", type=str, required=True, help="Output CSV path for strict-verified domains")
+    vb.add_argument("--excel-output", type=str, default="output.xlsx", help="Multi-sheet Excel output file (.xlsx)")
+
+    ee = subparsers.add_parser("export-excel", help="Export multi-sheet partitioned Excel workbook")
+    ee.add_argument("--output", type=str, default="output.xlsx", help="Excel output file path (.xlsx)")
 
     args = parser.parse_args()
 
@@ -111,8 +122,163 @@ async def async_main():
         result = await db.import_urls(parsed)
         print(f"[Presence] Imported: {result['new']} new, {result['skipped']} already known (skipped)")
 
+    elif args.command == "verify-batch":
+        await _run_verify_batch(args, db, settings)
+
+    elif args.command == "export-excel":
+        from storage.excel_exporter import ExcelExporter
+        excel_path = getattr(args, 'output', 'output.xlsx')
+        exporter = ExcelExporter(db_path=settings.get('db_path', 'data/presence.db'), output_path=excel_path)
+        stats = exporter.export()
+        print(f"[Presence] Multi-sheet Excel exported to {stats['file']}: "
+              f"Verified={stats['verified']}, Rejected={stats['rejected']}, "
+              f"Dead={stats['dead']}, Blocked={stats['blocked']}")
+
     else:
         parser.print_help()
+
+
+async def _run_verify_batch(args, db, settings):
+    """One-off bulk verification against a static CSV of pre-existing domains.
+
+    Three outcomes per domain: dead / strict-verified / rejected.
+    Resumable: skips rows already processed with verification_tier='strict'.
+    Runs standalone — not through the scheduler.
+    """
+    from core.dedup import normalize_url, extract_domain
+    from core.fetcher import fetch
+    from core.classifier import classify_strict
+    from tqdm import tqdm
+
+    threshold = settings.get('strict_classification_threshold', 0.75)
+    concurrency = settings.get('strict_batch_concurrency', 150)
+    timeout = settings.get('fetch_timeout_seconds', 10)
+    per_domain_delay = settings.get('per_domain_delay_seconds', 2.0)
+
+    # Read CSV: utf-8-sig strips BOM, row 0 skipped unconditionally as header
+    domains = []
+    with open(args.input, 'r', encoding='utf-8-sig', newline='') as f:
+        reader = csv.reader(f)
+        for i, row in enumerate(reader):
+            if i == 0:
+                continue  # always skip header row, regardless of content
+            # Take first non-empty column value only
+            domain_val = next((c.strip() for c in row if c.strip()), None)
+            if domain_val:
+                domains.append(domain_val)
+
+    total = len(domains)
+    print(f"[verify-batch] Loaded {total} domains from {args.input}")
+    print(f"[verify-batch] Concurrency={concurrency}, threshold={threshold}")
+
+    # Output CSV: open in append mode so Ctrl-C + resume doesn't lose rows
+    out_path = args.output
+    write_header = not os.path.exists(out_path) or os.path.getsize(out_path) == 0
+    out_f = open(out_path, 'a', newline='', encoding='utf-8')
+    writer = csv.writer(out_f)
+    if write_header:
+        writer.writerow(['url', 'domain', 'confidence_score', 'matched_signals', 'checked_at'])
+    counts = {'dead': 0, 'verified': 0, 'rejected': 0, 'blocked': 0, 'skipped': 0}
+    processed = 0
+    start_time = time.monotonic()
+    sem = asyncio.Semaphore(concurrency)
+    lock = asyncio.Lock()  # protects CSV writer + counts + processed
+
+    pbar = tqdm(total=total, desc="Verify Batch", unit="dom", dynamic_ncols=True)
+
+    async def handle_domain(raw_domain):
+        nonlocal processed
+        if not raw_domain.lower().startswith(('http://', 'https://')):
+            raw_domain = 'https://' + raw_domain
+        url = normalize_url(raw_domain)
+        domain = extract_domain(url)
+
+        # Resumability gate: skip if already fully settled by verify-batch
+        # ('blocked' is NOT in the settled set — it stays eligible for re-run)
+        if await db.is_strict_processed(url):
+            async with lock:
+                counts['skipped'] += 1
+                processed += 1
+                pbar.update(1)
+                pbar.set_postfix(ver=counts['verified'], rej=counts['rejected'], dead=counts['dead'], blk=counts['blocked'], skip=counts['skipped'], refresh=False)
+            return
+
+        # Slow-retry loop for connection_failed: up to 3 total attempts, 30s between
+        # (separate from fetcher.py's fast connection-level retries)
+        result = None
+        for slow_attempt in range(3):
+            result = await fetch(url, domain, db, timeout_seconds=timeout,
+                                 per_domain_delay=per_domain_delay, retries=2)
+            if result.html or result.failure_type != 'connection_failed':
+                break
+            if slow_attempt < 2:
+                await asyncio.sleep(30)
+
+        # Route by failure_type
+        if result.html:
+            # Successful fetch — run classifier
+            is_gambling, score, reasons = classify_strict(result.html, url=url, threshold=threshold)
+            if is_gambling:
+                await db.upsert_strict_result(url, domain, 'verified', score, reasons)
+                async with lock:
+                    counts['verified'] += 1
+                    processed += 1
+                    checked_at = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+                    writer.writerow([url, domain, score, '|'.join(reasons), checked_at])
+                    out_f.flush()
+                    pbar.update(1)
+                    pbar.set_postfix(ver=counts['verified'], rej=counts['rejected'], dead=counts['dead'], blk=counts['blocked'], skip=counts['skipped'], refresh=False)
+            else:
+                await db.upsert_strict_result(url, domain, 'rejected', score, reasons)
+                async with lock:
+                    counts['rejected'] += 1
+                    processed += 1
+                    pbar.update(1)
+                    pbar.set_postfix(ver=counts['verified'], rej=counts['rejected'], dead=counts['dead'], blk=counts['blocked'], skip=counts['skipped'], refresh=False)
+        elif result.failure_type == 'blocked':
+            # Bot-blocked: store as 'blocked', not dead — eligible for future re-run
+            await db.upsert_strict_result(url, domain, 'blocked')
+            async with lock:
+                counts['blocked'] += 1
+                processed += 1
+                pbar.update(1)
+                pbar.set_postfix(ver=counts['verified'], rej=counts['rejected'], dead=counts['dead'], blk=counts['blocked'], skip=counts['skipped'], refresh=False)
+        else:
+            # dead_confirmed or connection_failed after all retries → dead
+            await db.upsert_strict_result(url, domain, 'dead')
+            async with lock:
+                counts['dead'] += 1
+                processed += 1
+                pbar.update(1)
+                pbar.set_postfix(ver=counts['verified'], rej=counts['rejected'], dead=counts['dead'], blk=counts['blocked'], skip=counts['skipped'], refresh=False)
+
+    async def bounded(raw_domain):
+        async with sem:
+            await handle_domain(raw_domain)
+
+    await asyncio.gather(*[bounded(d) for d in domains])
+    pbar.close()
+    out_f.close()
+
+    elapsed = time.monotonic() - start_time
+    print(f"\n[verify-batch] Done in {elapsed:.0f}s | "
+          f"dead={counts['dead']} verified={counts['verified']} "
+          f"rejected={counts['rejected']} blocked={counts['blocked']} "
+          f"skipped(already-done)={counts['skipped']}")
+    print(f"[verify-batch] Strict-verified results written to: {out_path}")
+
+    # Auto-export partitioned multi-sheet Excel workbook (.xlsx)
+    try:
+        from storage.excel_exporter import ExcelExporter
+        excel_out = getattr(args, 'excel_output', 'output.xlsx')
+        exporter = ExcelExporter(db_path=settings.get('db_path', 'data/presence.db'), output_path=excel_out)
+        stats = exporter.export()
+        print(f"[verify-batch] Multi-sheet Excel workbook exported to: {stats['file']} "
+              f"(Verified: {stats['verified']}, Rejected: {stats['rejected']}, Dead: {stats['dead']}, Blocked: {stats['blocked']})")
+    except Exception as e:
+        print(f"[verify-batch] Excel export warning: {e}")
+
+
 
 def main():
     try:
