@@ -16,14 +16,14 @@ def get_db_stats():
     try:
         conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
         cur = conn.cursor()
-        cur.execute("SELECT status, COUNT(*) FROM strict_results GROUP BY status")
+        cur.execute("SELECT status, COUNT(*) FROM urls GROUP BY status")
         counts = dict(cur.fetchall())
         conn.close()
         ver = counts.get('verified', 0)
         rej = counts.get('rejected', 0)
         dead = counts.get('dead', 0)
         blk = counts.get('blocked', 0)
-        total_processed = sum(counts.values())
+        total_processed = ver + rej + dead + blk
         return total_processed, ver, rej, dead, blk
     except Exception as e:
         print(f"[AutoPush] Warning querying DB: {e}")
@@ -43,7 +43,11 @@ def save_state(state):
         json.dump(state, f, indent=2)
 
 def ordinal(n):
-    return "%d%s" % (n, "tsnkrhd"[n%5*(n%100//10!=1)::4])
+    if 11 <= (n % 100) <= 13:
+        suffix = 'th'
+    else:
+        suffix = {1: 'st', 2: 'nd', 3: 'rd'}.get(n % 10, 'th')
+    return f"{n}{suffix}"
 
 def do_push():
     state = load_state()
@@ -72,8 +76,20 @@ def do_push():
     print(f"[AutoPush] Commit Message:\n{commit_msg}")
     print(f"==================================================")
 
-    # Add changes to git
-    subprocess.run(["git", "add", "."], check=False)
+    # Stage specific safe files
+    files_to_add = [
+        "auto_git_push.py",
+        "push_state.json",
+        ".gitignore",
+        "output.csv",
+        "output.xlsx",
+        "cli/",
+        "config/",
+        "core/",
+        "storage/",
+        "requirements.txt"
+    ]
+    subprocess.run(["git", "add"] + files_to_add, check=False)
 
     # Commit
     commit_res = subprocess.run(["git", "commit", "-m", commit_msg], capture_output=True, text=True)
@@ -95,19 +111,17 @@ def do_push():
 
 def run_hourly_loop():
     print("[AutoPush] Hourly automated Git push worker started.")
-    print("[AutoPush] Performing initial Push #1 now...")
-    do_push()
-
     while True:
-        print("[AutoPush] Sleeping for 1 hour (3600s) until next push...")
-        time.sleep(3600)
         try:
             do_push()
         except Exception as e:
-            print(f"[AutoPush] Error during scheduled push: {e}")
+            print(f"[AutoPush] Error during push: {e}")
+        print("[AutoPush] Sleeping for 1 hour (3600s) until next push...")
+        time.sleep(3600)
 
 if __name__ == "__main__":
     if "--loop" in sys.argv:
         run_hourly_loop()
     else:
         do_push()
+
