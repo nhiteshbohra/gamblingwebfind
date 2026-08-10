@@ -227,18 +227,14 @@ class Database:
             new_count += 1
         return {"new": new_count, "skipped": skipped_count}
 
-    async def is_strict_processed(self, url: str) -> bool:
-        """Return True if this URL is fully settled by verify-batch (resumability gate).
-        'blocked' is intentionally excluded — blocked domains stay eligible for re-run
-        once a better check method (headless browser, different IP) is available.
-        """
+    async def get_settled_urls_set(self) -> set:
+        """Return set of normalized URLs already settled (verified, rejected, or dead)."""
         async with self._connect() as db:
             async with db.execute(
-                "SELECT 1 FROM urls WHERE url = ? AND verification_tier = 'strict'"
-                " AND status IN ('dead', 'verified', 'rejected')",
-                (url,)
+                "SELECT url FROM urls WHERE status IN ('dead', 'verified', 'rejected')"
             ) as cursor:
-                return (await cursor.fetchone()) is not None
+                rows = await cursor.fetchall()
+                return {r[0] for r in rows}
 
     async def upsert_strict_result(self, url: str, domain: str, status: str,
                                    confidence_score: float = 0.0, reasons=None):

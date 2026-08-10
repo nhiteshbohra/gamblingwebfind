@@ -159,9 +159,9 @@ async def _run_verify_batch(args, db, settings):
     from tqdm import tqdm
 
     threshold = settings.get('strict_classification_threshold', 0.75)
-    concurrency = settings.get('strict_batch_concurrency', 150)
-    timeout = settings.get('fetch_timeout_seconds', 10)
-    per_domain_delay = settings.get('per_domain_delay_seconds', 2.0)
+    concurrency = settings.get('strict_batch_concurrency', 300)
+    timeout = settings.get('fetch_timeout_seconds', 6)
+    per_domain_delay = settings.get('per_domain_delay_seconds', 0.0)
 
     # Read CSV: utf-8-sig strips BOM, row 0 skipped unconditionally as header
     domains = []
@@ -178,6 +178,10 @@ async def _run_verify_batch(args, db, settings):
     total = len(domains)
     print(f"[verify-batch] Loaded {total} domains from {args.input}")
     print(f"[verify-batch] Concurrency={concurrency}, threshold={threshold}")
+
+    print(f"[verify-batch] Loading settled domains into memory...")
+    settled_urls = await db.get_settled_urls_set()
+    print(f"[verify-batch] Loaded {len(settled_urls)} pre-settled domains into memory.")
 
     # Output CSV: open in append mode so Ctrl-C + resume doesn't lose rows
     out_path = args.output
@@ -201,9 +205,8 @@ async def _run_verify_batch(args, db, settings):
         url = normalize_url(raw_domain)
         domain = extract_domain(url)
 
-        # Resumability gate: skip if already fully settled by verify-batch
-        # ('blocked' is NOT in the settled set — it stays eligible for re-run)
-        if await db.is_strict_processed(url):
+        # Resumability gate: nanosecond memory set check (0 SQL overhead)
+        if url in settled_urls:
             async with lock:
                 counts['skipped'] += 1
                 processed += 1
@@ -211,16 +214,15 @@ async def _run_verify_batch(args, db, settings):
                 pbar.set_postfix(ver=counts['verified'], rej=counts['rejected'], dead=counts['dead'], blk=counts['blocked'], skip=counts['skipped'], refresh=False)
             return
 
-        # Slow-retry loop for connection_failed: up to 3 total attempts, 30s between
-        # (separate from fetcher.py's fast connection-level retries)
+        # Fast retry loop for connection_failed: up to 2 attempts, 1s between
         result = None
-        for slow_attempt in range(3):
+        for slow_attempt in range(2):
             result = await fetch(url, domain, db, timeout_seconds=timeout,
-                                 per_domain_delay=per_domain_delay, retries=2)
+                                 per_domain_delay=per_domain_delay, retries=1)
             if result.html or result.failure_type != 'connection_failed':
                 break
-            if slow_attempt < 2:
-                await asyncio.sleep(30)
+            if slow_attempt < 1:
+                await asyncio.sleep(1)
 
         # Route by failure_type
         if result.html:
