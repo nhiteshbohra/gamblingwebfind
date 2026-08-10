@@ -44,3 +44,37 @@ def extract_keywords(html: str, max_keywords=5, stopwords_file="config/stopwords
 
     return extracted
 
+
+def extract_dorks(html: str, domain: str = "", stopwords_file="config/stopwords.txt") -> list:
+    """Extract candidate dork queries from page HTML and domain.
+    Generates intitle:, inurl: search dorks.
+    """
+    if not html:
+        return []
+    soup = BeautifulSoup(html, 'html.parser')
+    for script in soup(["script", "style"]):
+        script.decompose()
+
+    text = soup.get_text(separator=' ').lower()
+    words = re.findall(r'\b[a-z]{3,15}\b', text)
+    stopwords = load_stopwords(stopwords_file)
+
+    filtered = [w for w in words if w not in stopwords]
+    bigrams = [f"{filtered[i]} {filtered[i+1]}" for i in range(len(filtered) - 1)]
+
+    counts = Counter(bigrams)
+    top_phrases = [phrase for phrase, _ in counts.most_common(3)]
+
+    dorks = []
+    for phrase in top_phrases:
+        dorks.append(f'intitle:"{phrase}"')
+        dorks.append(f'"{phrase}" "login"')
+        dorks.append(f'"{phrase}" "bonus"')
+
+    if domain:
+        clean_name = domain.replace('.com', '').replace('.org', '').replace('.net', '').replace('.in', '').split('.')[0]
+        if len(clean_name) >= 3:
+            dorks.append(f'inurl:"{clean_name}"')
+
+    return list(dict.fromkeys(dorks))
+

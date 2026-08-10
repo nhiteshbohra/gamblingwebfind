@@ -71,10 +71,10 @@ def do_push():
         f"Push {push_count}"
     )
 
-    print(f"==================================================")
+    print("==================================================")
     print(f"[AutoPush] Preparing Push #{push_count} at {now.strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"[AutoPush] Commit Message:\n{commit_msg}")
-    print(f"==================================================")
+    print("==================================================")
 
     # Regenerate fresh multi-sheet output.xlsx Excel workbook before staging
     try:

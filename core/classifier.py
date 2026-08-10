@@ -1,4 +1,3 @@
-import urllib.parse
 from bs4 import BeautifulSoup
 
 EXCLUDED_DOMAINS = {

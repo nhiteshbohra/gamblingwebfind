@@ -1,6 +1,5 @@
 import os
 import json
-import sqlite3
 import aiosqlite
 from storage.models import CREATE_TABLES_SQL, MIGRATE_SQL
 
@@ -55,12 +54,18 @@ class Database:
             await self.insert_keywords([(term, 'seed', None) for term in seed_terms])
 
     async def insert_keywords(self, keyword_tuples):
-        """keyword_tuples: list of (term, source, source_url)"""
+        """keyword_tuples: list of (term, source, source_url) or (term, source, source_url, type)"""
+        normalized = []
+        for item in keyword_tuples:
+            if len(item) == 3:
+                normalized.append((item[0], item[1], item[2], 'keyword'))
+            else:
+                normalized.append((item[0], item[1], item[2], item[3]))
         async with self._write_lock:
             async with self._connect() as db:
                 await db.executemany(
-                    "INSERT OR IGNORE INTO keywords (term, source, source_url) VALUES (?, ?, ?)",
-                    keyword_tuples
+                    "INSERT OR IGNORE INTO keywords (term, source, source_url, type) VALUES (?, ?, ?, ?)",
+                    normalized
                 )
                 await db.commit()
 
@@ -255,3 +260,32 @@ class Database:
                     (url, domain, status, confidence_score, reasons_str)
                 )
                 await db.commit()
+
+    async def update_enrichment(self, url_id: int, ssl_data: dict, whois_data: dict):
+        async with self._write_lock:
+            async with self._connect() as db:
+                await db.execute(
+                    """UPDATE urls SET 
+                       ssl_issuer = ?, ssl_valid_from = ?, ssl_valid_to = ?,
+                       whois_registrar = ?, whois_created_date = ?, whois_expiry_date = ?
+                       WHERE id = ?""",
+                    (
+                        ssl_data.get('ssl_issuer', ''),
+                        ssl_data.get('ssl_valid_from', ''),
+                        ssl_data.get('ssl_valid_to', ''),
+                        whois_data.get('whois_registrar', ''),
+                        whois_data.get('whois_created_date', ''),
+                        whois_data.get('whois_expiry_date', ''),
+                        url_id
+                    )
+                )
+                await db.commit()
+
+    async def get_unenriched_verified_urls(self, limit=100):
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT id, url, domain FROM urls WHERE status = 'verified' AND (ssl_issuer IS NULL AND whois_registrar IS NULL) LIMIT ?",
+                (limit,)
+            ) as cursor:
+                return await cursor.fetchall()

@@ -69,18 +69,19 @@ class FetchResult:
 
 async def fetch(url: str, domain: str, db, timeout_seconds=10, per_domain_delay=2.0, retries=2) -> FetchResult:
     # Per-domain rate limiting: delay if domain was fetched too recently
-    last_fetched = await db.get_last_domain_fetch_time(domain)
-    if last_fetched:
-        try:
-            last_dt = datetime.fromisoformat(last_fetched)
-            # SQLite CURRENT_TIMESTAMP is UTC naive; make comparable
-            if last_dt.tzinfo is None:
-                last_dt = last_dt.replace(tzinfo=timezone.utc)
-            elapsed = (datetime.now(timezone.utc) - last_dt).total_seconds()
-            if elapsed < per_domain_delay:
-                await asyncio.sleep(per_domain_delay - elapsed)
-        except (ValueError, TypeError):
-            pass  # Malformed timestamp; proceed without delay
+    if per_domain_delay > 0:
+        last_fetched = await db.get_last_domain_fetch_time(domain)
+        if last_fetched:
+            try:
+                last_dt = datetime.fromisoformat(last_fetched)
+                # SQLite CURRENT_TIMESTAMP is UTC naive; make comparable
+                if last_dt.tzinfo is None:
+                    last_dt = last_dt.replace(tzinfo=timezone.utc)
+                elapsed = (datetime.now(timezone.utc) - last_dt).total_seconds()
+                if elapsed < per_domain_delay:
+                    await asyncio.sleep(per_domain_delay - elapsed)
+            except (ValueError, TypeError):
+                pass  # Malformed timestamp; proceed without delay
 
     headers = {'User-Agent': random.choice(USER_AGENTS)}
     timeout = aiohttp.ClientTimeout(total=timeout_seconds)

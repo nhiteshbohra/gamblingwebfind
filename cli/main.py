@@ -5,7 +5,6 @@ import time
 import yaml
 import asyncio
 import argparse
-import codecs
 
 # Add root project dir to path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -46,6 +45,10 @@ async def async_main():
 
     ee = subparsers.add_parser("export-excel", help="Export multi-sheet partitioned Excel workbook")
     ee.add_argument("--output", type=str, default="output.xlsx", help="Excel output file path (.xlsx)")
+
+    ep = subparsers.add_parser("enrich-pending", help="Enrich verified sites with WHOIS & SSL metadata")
+    ep.add_argument("--concurrency", type=int, default=3, help="Max parallel WHOIS/SSL queries (default: 3)")
+    ep.add_argument("--limit", type=int, default=100, help="Max domains to enrich per run (default: 100)")
 
     args = parser.parse_args()
 
@@ -133,6 +136,11 @@ async def async_main():
         print(f"[Presence] Multi-sheet Excel exported to {stats['file']}: "
               f"Verified={stats['verified']}, Rejected={stats['rejected']}, "
               f"Dead={stats['dead']}, Blocked={stats['blocked']}")
+
+    elif args.command == "enrich-pending":
+        from core.enrich import enrich_pending_verified
+        count = await enrich_pending_verified(db, concurrency=args.concurrency, limit=args.limit)
+        print(f"[Presence] Intelligence Enrichment: enriched {count} verified domain(s).")
 
     else:
         parser.print_help()
