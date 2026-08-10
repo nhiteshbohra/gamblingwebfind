@@ -23,7 +23,7 @@ class ExcelExporter:
         query_verified = """
         SELECT url, domain, confidence_score, classification_reasons as matched_signals, verified_at as checked_at
         FROM urls
-        WHERE status = 'verified' AND verification_tier = ?
+        WHERE status = 'verified' AND (verification_tier = ? OR verification_tier IS NULL)
         ORDER BY verified_at DESC
         """
         df_verified = pd.read_sql_query(query_verified, conn, params=(tier,))
@@ -32,7 +32,7 @@ class ExcelExporter:
         query_rejected = """
         SELECT url, domain, confidence_score, classification_reasons as matched_signals, last_checked_at as checked_at
         FROM urls
-        WHERE status = 'rejected' AND verification_tier = ?
+        WHERE status = 'rejected' AND (verification_tier = ? OR verification_tier IS NULL)
         ORDER BY last_checked_at DESC
         """
         df_rejected = pd.read_sql_query(query_rejected, conn, params=(tier,))
@@ -41,7 +41,7 @@ class ExcelExporter:
         query_dead = """
         SELECT url, domain, last_checked_at as checked_at
         FROM urls
-        WHERE status = 'dead' AND verification_tier = ?
+        WHERE status = 'dead' AND (verification_tier = ? OR verification_tier IS NULL)
         ORDER BY last_checked_at DESC
         """
         df_dead = pd.read_sql_query(query_dead, conn, params=(tier,))
@@ -50,7 +50,7 @@ class ExcelExporter:
         query_blocked = """
         SELECT url, domain, last_checked_at as checked_at
         FROM urls
-        WHERE status = 'blocked' AND verification_tier = ?
+        WHERE status = 'blocked' AND (verification_tier = ? OR verification_tier IS NULL)
         ORDER BY last_checked_at DESC
         """
         df_blocked = pd.read_sql_query(query_blocked, conn, params=(tier,))

@@ -76,6 +76,15 @@ def do_push():
     print(f"[AutoPush] Commit Message:\n{commit_msg}")
     print(f"==================================================")
 
+    # Regenerate fresh multi-sheet output.xlsx Excel workbook before staging
+    try:
+        from storage.excel_exporter import ExcelExporter
+        exporter = ExcelExporter(db_path=DB_PATH, output_path="output.xlsx")
+        stats = exporter.export()
+        print(f"[AutoPush] Excel workbook output.xlsx updated: Verified={stats['verified']}, Rejected={stats['rejected']}, Dead={stats['dead']}, Blocked={stats['blocked']}")
+    except Exception as e:
+        print(f"[AutoPush] Excel export warning: {e}")
+
     # Stage specific safe files
     files_to_add = [
         "auto_git_push.py",
