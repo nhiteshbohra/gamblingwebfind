@@ -17,6 +17,7 @@ ENV/
 # --- Presence runtime data (rebuilt by the app, never hand-edited) ---
 data/
 logs/
+output/
 *.db-journal
 *.sqlite
 *.sqlite3
