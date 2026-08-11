@@ -131,17 +131,20 @@ class Database:
 
     async def touch_domain(self, domain, confirmed=False):
         async with self._write_lock:
-            async with self._connect() as db:
-                await db.execute(
-                    """INSERT INTO domains (domain, last_fetched_at, fetch_count, confirmed_count) 
-                       VALUES (?, CURRENT_TIMESTAMP, 1, ?)
-                       ON CONFLICT(domain) DO UPDATE SET 
-                       last_fetched_at = CURRENT_TIMESTAMP,
-                       fetch_count = fetch_count + 1,
-                       confirmed_count = confirmed_count + ?""",
-                    (domain, 1 if confirmed else 0, 1 if confirmed else 0)
-                )
-                await db.commit()
+            try:
+                async with self._connect() as db:
+                    await db.execute(
+                        """INSERT INTO domains (domain, last_fetched_at, fetch_count, confirmed_count) 
+                           VALUES (?, CURRENT_TIMESTAMP, 1, ?)
+                           ON CONFLICT(domain) DO UPDATE SET 
+                           last_fetched_at = CURRENT_TIMESTAMP,
+                           fetch_count = fetch_count + 1,
+                           confirmed_count = confirmed_count + ?""",
+                        (domain, 1 if confirmed else 0, 1 if confirmed else 0)
+                    )
+                    await db.commit()
+            except Exception:
+                pass  # Bookkeeping write; swallow transient lock errors
 
     async def get_url_id(self, url) -> int | None:
         async with self._connect() as db:
@@ -244,18 +247,25 @@ class Database:
         reasons_str = json.dumps(reasons) if reasons is not None else None
         verified_at_expr = ", verified_at = CURRENT_TIMESTAMP" if status == 'verified' else ""
         async with self._write_lock:
-            async with self._connect() as db:
-                await db.execute(
-                    "INSERT INTO urls (url, domain, status, confidence_score, classification_reasons,"
-                    " last_checked_at, verification_tier) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, 'strict')"
-                    " ON CONFLICT(url) DO UPDATE SET status = excluded.status,"
-                    " confidence_score = excluded.confidence_score,"
-                    " classification_reasons = excluded.classification_reasons,"
-                    " last_checked_at = CURRENT_TIMESTAMP,"
-                    " verification_tier = 'strict'" + verified_at_expr,
-                    (url, domain, status, confidence_score, reasons_str)
-                )
-                await db.commit()
+            for attempt in range(3):
+                try:
+                    async with self._connect() as db:
+                        await db.execute(
+                            "INSERT INTO urls (url, domain, status, confidence_score, classification_reasons,"
+                            " last_checked_at, verification_tier) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, 'strict')"
+                            " ON CONFLICT(url) DO UPDATE SET status = excluded.status,"
+                            " confidence_score = excluded.confidence_score,"
+                            " classification_reasons = excluded.classification_reasons,"
+                            " last_checked_at = CURRENT_TIMESTAMP,"
+                            " verification_tier = 'strict'" + verified_at_expr,
+                            (url, domain, status, confidence_score, reasons_str)
+                        )
+                        await db.commit()
+                        break
+                except Exception as e:
+                    if attempt == 2:
+                        raise e
+                    await asyncio.sleep(0.5 * (attempt + 1))
 
     async def update_enrichment(self, url_id: int, ssl_data: dict, whois_data: dict):
         async with self._write_lock:

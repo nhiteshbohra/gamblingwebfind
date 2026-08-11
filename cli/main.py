@@ -50,6 +50,12 @@ async def async_main():
     ep.add_argument("--concurrency", type=int, default=3, help="Max parallel WHOIS/SSL queries (default: 3)")
     ep.add_argument("--limit", type=int, default=100, help="Max domains to enrich per run (default: 100)")
 
+    docx_p = subparsers.add_parser("generate-docx-report", help="Generate compact clickable 2-target-per-page Word (.docx) report with screenshots")
+    docx_p.add_argument("--input", type=str, default="output.csv", help="Input CSV file or DB source")
+    docx_p.add_argument("--output", type=str, default="data/presence_report.docx", help="Output .docx file path")
+    docx_p.add_argument("--concurrency", type=int, default=3, help="Screenshot capture concurrency")
+    docx_p.add_argument("--limit", type=int, default=50, help="Max targets to include in report")
+
     args = parser.parse_args()
 
     settings = load_settings()
@@ -142,8 +148,60 @@ async def async_main():
         count = await enrich_pending_verified(db, concurrency=args.concurrency, limit=args.limit)
         print(f"[Presence] Intelligence Enrichment: enriched {count} verified domain(s).")
 
+    elif args.command == "generate-docx-report":
+        await _run_generate_docx_report(args, db, settings)
+
     else:
         parser.print_help()
+
+
+async def _run_generate_docx_report(args, db, settings):
+    from core.screenshot_capturer import ScreenshotCapturer
+    from storage.docx_report_generator import DocxReportGenerator
+    from tqdm import tqdm
+
+    input_path = args.input
+    output_path = args.output
+    concurrency = args.concurrency
+    limit = args.limit
+
+    urls_to_process = []
+    if os.path.exists(input_path):
+        with open(input_path, 'r', encoding='utf-8-sig', newline='') as f:
+            reader = csv.reader(f)
+            for i, row in enumerate(reader):
+                if i == 0 and row and ('url' in row[0].lower() or 'domain' in row[0].lower()):
+                    continue
+                if row and row[0].strip():
+                    url_val = row[0].strip()
+                    if not url_val.lower().startswith(('http://', 'https://')):
+                        url_val = 'https://' + url_val
+                    urls_to_process.append(url_val)
+                if limit and len(urls_to_process) >= limit:
+                    break
+    else:
+        verified_rows = await db.get_verified_live_rows()
+        for r in verified_rows[:limit]:
+            urls_to_process.append(r['url'])
+
+    if not urls_to_process:
+        print(f"[DocxReport] No targets found to report.")
+        return
+
+    print(f"[DocxReport] Capturing screenshots and building report for {len(urls_to_process)} target(s)...")
+    capturer = ScreenshotCapturer(viewport_width=1280, viewport_height=720, quality=68, timeout_seconds=10)
+    report = DocxReportGenerator(output_path=output_path)
+    pbar = tqdm(total=len(urls_to_process), desc="Docx Report", unit="site")
+
+    items = [(i + 1, url) for i, url in enumerate(urls_to_process)]
+    results = await capturer.capture_urls_batch(items, concurrency=concurrency, on_progress=lambda: pbar.update(1))
+    pbar.close()
+
+    for idx, url, img_buf in results:
+        report.add_target(url=url, image_buffer=img_buf, index=idx)
+
+    saved = report.save()
+    print(f"[DocxReport] Word document successfully created: {saved} ({len(results)} targets included).")
 
 
 async def _run_verify_batch(args, db, settings):

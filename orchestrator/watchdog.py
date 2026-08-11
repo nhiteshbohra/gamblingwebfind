@@ -7,7 +7,7 @@ logger = logging.getLogger(__name__)
 
 
 def alert(message: str):
-    # ponytail: stub — wire to email/webhook when needed
+    # ponytail: log-only alerting (wire email/webhook if push alerts needed)
     logger.warning(f"[ALERT] {message}")
 
 
@@ -63,7 +63,7 @@ async def start_watchdog(db, settings, scheduler_factory=None):
             is_healthy = await check_searxng_health(searxng_url)
             if not is_healthy:
                 logger.warning(f"[Watchdog] SearXNG at {searxng_url} is unreachable. Restarting container...")
-                alert(f"SearXNG health check failed. Attempting docker compose restart.")
+                alert("SearXNG health check failed. Attempting docker compose restart.")
                 subprocess.run(["docker", "compose", "restart", "searxng"], check=False)
 
             # 3. Scheduler crash detection + restart

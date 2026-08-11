@@ -1,7 +1,7 @@
 import re
 from core.fetcher import fetch
 from core.classifier import classify
-from core.keyword_extractor import extract_keywords
+from core.keyword_extractor import extract_keywords, extract_dorks
 from core.dedup import extract_domain
 
 async def _get_existing_keyword_terms(db) -> set:
@@ -49,7 +49,13 @@ async def process_url(url_row, db, settings):
         filtered_new = [kw for kw in all_new if kw and len(kw) >= 3 and kw not in existing]
 
         if filtered_new:
-            await db.insert_keywords([(kw, 'extracted', url) for kw in filtered_new])
+            await db.insert_keywords([(kw, 'extracted', url, 'keyword') for kw in filtered_new])
+
+        # Extract & insert candidate search-engine dorks
+        extracted_dorks = extract_dorks(result.html, domain=domain)
+        filtered_dorks = [dork for dork in extracted_dorks if dork not in existing]
+        if filtered_dorks:
+            await db.insert_keywords([(dork, 'extracted', url, 'dork') for dork in filtered_dorks])
     else:
         await db.mark_status(url_id, 'rejected', confidence_score=score, reasons=reasons)
 
