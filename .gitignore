@@ -30,6 +30,7 @@ data/presence.db
 # --- Config secrets (keep settings.yaml tracked, but not any env/secret file) ---
 .env
 .env.*
+!.env.example
 *.secret.yaml
 config/settings.local.yaml
 
