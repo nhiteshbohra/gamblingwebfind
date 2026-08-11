@@ -114,22 +114,20 @@ def import_excel():
                 )
             )
 
-            # 2. checked_domains operation
+            # 2. checked_domains operation (strict 7-field schema)
             checked_doc = {
+                "_id": dom,
                 "domain": dom,
                 "url": url,
                 "status": status_val,
                 "reason": reasons,
                 "screenshot_taken": False,
                 "screenshot_failed_reason": None,
-                "exported": False,
-                "checked_at": checked_at_str,
-                "last_updated_at": now_iso,
             }
             checked_ops.append(
                 UpdateOne(
                     {"_id": dom},
-                    {"$set": checked_doc, "$setOnInsert": {"first_seen_at": now_iso}},
+                    {"$set": checked_doc},
                     upsert=True,
                 )
             )
