@@ -36,4 +36,4 @@ async def run_liveness_batch(db, settings):
             # Find the url_id to mark dead
             url_id = await db.get_url_id(url)
             if url_id:
-                await db.mark_status(url_id, 'dead', reasons=['liveness_check_failed'])
+                await db.record_classification(url=url, domain=row['domain'], status='dead', reasons=['liveness_check_failed'], url_id=url_id)

@@ -1,6 +1,6 @@
 import os
-import sqlite3
 import pandas as pd
+from storage.db import get_urls_export_df
 
 class ExcelExporter:
     def __init__(self, db_path="data/presence.db", output_path="output.xlsx"):
@@ -16,58 +16,21 @@ class ExcelExporter:
           - Dead: Unreachable / dead domains after retries
           - Blocked: Cloudflare / CAPTCHA / bot-blocked domains
         """
-        conn = sqlite3.connect(self.db_path)
-        
-        # 1. Verified Sheet
-        query_verified = """
-        SELECT url, domain, confidence_score, classification_reasons as matched_signals, verified_at as checked_at
-        FROM urls
-        WHERE status = 'verified'
-        ORDER BY verified_at DESC
-        """
-        df_verified = pd.read_sql_query(query_verified, conn)
+        df_verified = get_urls_export_df(self.db_path, 'verified')
+        df_rejected = get_urls_export_df(self.db_path, 'rejected')
+        df_dead = get_urls_export_df(self.db_path, 'dead')
+        df_blocked = get_urls_export_df(self.db_path, 'blocked')
 
-        # 2. Rejected Sheet
-        query_rejected = """
-        SELECT url, domain, confidence_score, classification_reasons as matched_signals, last_checked_at as checked_at
-        FROM urls
-        WHERE status = 'rejected'
-        ORDER BY last_checked_at DESC
-        """
-        df_rejected = pd.read_sql_query(query_rejected, conn)
-
-        # 3. Dead Sheet
-        query_dead = """
-        SELECT url, domain, last_checked_at as checked_at
-        FROM urls
-        WHERE status = 'dead'
-        ORDER BY last_checked_at DESC
-        """
-        df_dead = pd.read_sql_query(query_dead, conn)
-
-        # 4. Blocked Sheet
-        query_blocked = """
-        SELECT url, domain, last_checked_at as checked_at
-        FROM urls
-        WHERE status = 'blocked'
-        ORDER BY last_checked_at DESC
-        """
-        df_blocked = pd.read_sql_query(query_blocked, conn)
-
-        conn.close()
-
-        # Write to multi-sheet Excel workbook
         with pd.ExcelWriter(self.output_path, engine='openpyxl') as writer:
             df_verified.to_excel(writer, sheet_name='Verified', index=False)
             df_rejected.to_excel(writer, sheet_name='Rejected', index=False)
             df_dead.to_excel(writer, sheet_name='Dead', index=False)
             df_blocked.to_excel(writer, sheet_name='Blocked', index=False)
 
-        stats = {
-            'verified': len(df_verified),
-            'rejected': len(df_rejected),
-            'dead': len(df_dead),
-            'blocked': len(df_blocked),
-            'file': self.output_path
+        return {
+            "file": self.output_path,
+            "verified": len(df_verified),
+            "rejected": len(df_rejected),
+            "dead": len(df_dead),
+            "blocked": len(df_blocked),
         }
-        return stats

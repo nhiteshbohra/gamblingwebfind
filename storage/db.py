@@ -1,6 +1,7 @@
 import os
 import json
 import aiosqlite
+import pandas as pd
 from storage.models import CREATE_TABLES_SQL, MIGRATE_SQL
 
 import asyncio
@@ -111,23 +112,7 @@ class Database:
             ) as cursor:
                 return await cursor.fetchall()
 
-    async def mark_status(self, url_id, status, confidence_score=0.0, reasons=None):
-        reasons_str = json.dumps(reasons) if reasons is not None else None
-        async with self._write_lock:
-            async with self._connect() as db:
-                if status == 'verified':
-                    await db.execute(
-                        """UPDATE urls SET status = ?, confidence_score = ?, classification_reasons = ?, 
-                           last_checked_at = CURRENT_TIMESTAMP, verified_at = CURRENT_TIMESTAMP WHERE id = ?""",
-                        (status, confidence_score, reasons_str, url_id)
-                    )
-                else:
-                    await db.execute(
-                        """UPDATE urls SET status = ?, confidence_score = ?, classification_reasons = ?, 
-                           last_checked_at = CURRENT_TIMESTAMP WHERE id = ?""",
-                        (status, confidence_score, reasons_str, url_id)
-                    )
-                await db.commit()
+
 
     async def touch_domain(self, domain, confirmed=False):
         async with self._write_lock:
@@ -230,36 +215,57 @@ class Database:
             new_count += 1
         return {"new": new_count, "skipped": skipped_count}
 
-    async def get_settled_urls_set(self) -> set:
-        """Return set of normalized URLs already settled (verified, rejected, or dead)."""
+    async def get_settled_urls_set(self, tier: str = None) -> set:
+        """Return set of normalized URLs already settled (verified, rejected, or dead).
+        If tier is provided, filters strictly by verification_tier.
+        """
+        query = "SELECT url FROM urls WHERE status IN ('dead', 'verified', 'rejected')"
+        params = []
+        if tier is not None:
+            query += " AND verification_tier = ?"
+            params.append(tier)
         async with self._connect() as db:
-            async with db.execute(
-                "SELECT url FROM urls WHERE status IN ('dead', 'verified', 'rejected')"
-            ) as cursor:
+            async with db.execute(query, params) as cursor:
                 rows = await cursor.fetchall()
                 return {r[0] for r in rows}
 
-    async def upsert_strict_result(self, url: str, domain: str, status: str,
-                                   confidence_score: float = 0.0, reasons=None):
-        """Insert-or-update a URL with verification_tier='strict'.
-        Called by verify-batch for all three outcomes.
+    async def get_unenriched_verified_urls(self, limit=100):
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT id, url, domain FROM urls WHERE status = 'verified' AND (ssl_issuer IS NULL AND whois_registrar IS NULL) LIMIT ?",
+                (limit,)
+            ) as cursor:
+                return await cursor.fetchall()
+
+    async def record_classification(self, url: str = None, domain: str = None, status: str = 'pending',
+                                     confidence_score: float = 0.0, reasons=None,
+                                     tier: str = None, url_id: int = None):
+        """Unified classification record method for all pipelines (crawler, batch verification, dispute).
+        Uses INSERT ... ON CONFLICT(url) DO UPDATE with 3-attempt retry and exponential backoff.
         """
-        reasons_str = json.dumps(reasons) if reasons is not None else None
+        reasons_str = json.dumps(reasons) if (reasons is not None and not isinstance(reasons, str)) else (reasons or None)
         verified_at_expr = ", verified_at = CURRENT_TIMESTAMP" if status == 'verified' else ""
         async with self._write_lock:
             for attempt in range(3):
                 try:
                     async with self._connect() as db:
-                        await db.execute(
-                            "INSERT INTO urls (url, domain, status, confidence_score, classification_reasons,"
-                            " last_checked_at, verification_tier) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, 'strict')"
-                            " ON CONFLICT(url) DO UPDATE SET status = excluded.status,"
-                            " confidence_score = excluded.confidence_score,"
-                            " classification_reasons = excluded.classification_reasons,"
-                            " last_checked_at = CURRENT_TIMESTAMP,"
-                            " verification_tier = 'strict'" + verified_at_expr,
-                            (url, domain, status, confidence_score, reasons_str)
-                        )
+                        if not url and url_id:
+                            await db.execute(
+                                "UPDATE urls SET status = ?, last_checked_at = CURRENT_TIMESTAMP WHERE id = ?",
+                                (status, url_id)
+                            )
+                        else:
+                            await db.execute(
+                                "INSERT INTO urls (url, domain, status, confidence_score, classification_reasons,"
+                                " last_checked_at, verification_tier) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)"
+                                " ON CONFLICT(url) DO UPDATE SET status = excluded.status,"
+                                " confidence_score = excluded.confidence_score,"
+                                " classification_reasons = excluded.classification_reasons,"
+                                " last_checked_at = CURRENT_TIMESTAMP,"
+                                " verification_tier = COALESCE(excluded.verification_tier, urls.verification_tier)" + verified_at_expr,
+                                (url, domain, status, confidence_score, reasons_str, tier)
+                            )
                         await db.commit()
                         break
                 except Exception as e:
@@ -287,11 +293,19 @@ class Database:
                 )
                 await db.commit()
 
-    async def get_unenriched_verified_urls(self, limit=100):
-        async with self._connect() as db:
-            db.row_factory = aiosqlite.Row
-            async with db.execute(
-                "SELECT id, url, domain FROM urls WHERE status = 'verified' AND (ssl_issuer IS NULL AND whois_registrar IS NULL) LIMIT ?",
-                (limit,)
-            ) as cursor:
-                return await cursor.fetchall()
+
+def get_urls_export_df(db_path: str, status: str) -> pd.DataFrame:
+    """Helper function for exporting pandas DataFrame per status category without inline SQL in exporters."""
+    import sqlite3
+    import pandas as pd
+    conn = sqlite3.connect(db_path)
+    if status == 'verified':
+        query = "SELECT url, domain, confidence_score, classification_reasons as matched_signals, verified_at as checked_at FROM urls WHERE status = 'verified' ORDER BY verified_at DESC"
+    elif status == 'rejected':
+        query = "SELECT url, domain, confidence_score, classification_reasons as matched_signals, last_checked_at as checked_at FROM urls WHERE status = 'rejected' ORDER BY last_checked_at DESC"
+    else:
+        query = f"SELECT url, domain, last_checked_at as checked_at FROM urls WHERE status = '{status}' ORDER BY last_checked_at DESC"
+
+    df = pd.read_sql_query(query, conn)
+    conn.close()
+    return df

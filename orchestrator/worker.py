@@ -24,14 +24,14 @@ async def process_url(url_row, db, settings):
     # touch_domain is handled inside fetcher.fetch()
 
     if result.error or not result.html or (result.status_code and result.status_code >= 400):
-        await db.mark_status(url_id, 'dead', confidence_score=0.0,
-                             reasons=[result.error or f"status:{result.status_code}"])
+        await db.record_classification(url=url, domain=domain, status='dead', confidence_score=0.0,
+                                     reasons=[result.error or f"status:{result.status_code}"], url_id=url_id)
         return
 
     is_gambling, score, reasons = classify(result.html, domain=domain, url=url, threshold=settings.get('classification_threshold', 0.55))
 
     if is_gambling:
-        await db.mark_status(url_id, 'verified', confidence_score=score, reasons=reasons)
+        await db.record_classification(url=url, domain=domain, status='verified', confidence_score=score, reasons=reasons, url_id=url_id)
         existing = await _get_existing_keyword_terms(db)
         new_keywords = extract_keywords(
             result.html,
@@ -57,5 +57,5 @@ async def process_url(url_row, db, settings):
         if filtered_dorks:
             await db.insert_keywords([(dork, 'extracted', url, 'dork') for dork in filtered_dorks])
     else:
-        await db.mark_status(url_id, 'rejected', confidence_score=score, reasons=reasons)
+        await db.record_classification(url=url, domain=domain, status='rejected', confidence_score=score, reasons=reasons, url_id=url_id)
 
