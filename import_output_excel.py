@@ -16,7 +16,7 @@ from tqdm import tqdm
 
 load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env")
 
-EXCEL_PATH = Path(__file__).resolve().parent / "first_slot_data\output.xlsx"
+EXCEL_PATH = Path(__file__).resolve().parent / "first_slot_data/output.xlsx"
 BATCH_SIZE = 5000
 
 
@@ -105,11 +105,11 @@ def import_excel():
             chk_at = row.get("checked_at")
             checked_at_str = str(chk_at) if pd.notna(chk_at) else now_iso
 
-            # 1. domain_Listed operation
+            # 1. domain_Listed operation (_id is domain string, matching checked_domains)
             source_ops.append(
                 UpdateOne(
-                    {"domain": dom},
-                    {"$setOnInsert": {"domain": dom, "active": active_val}},
+                    {"_id": dom},
+                    {"$set": {"_id": dom, "domain": dom, "active": active_val}},
                     upsert=True,
                 )
             )

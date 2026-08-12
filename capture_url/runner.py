@@ -3,7 +3,7 @@ capture_url/runner.py — Screenshot gambling domains from checked_domains, writ
 """
 import asyncio
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -15,6 +15,7 @@ from db.mongo_client import find_pending_capture, checked_domains
 from capture_url.screenshot import BrowserPool, is_valid_screenshot
 
 OUTPUT_DIR = os.path.join("output", "screenshots")
+IST = timezone(timedelta(hours=5, minutes=30))
 
 
 async def run(concurrency: int = None, limit: int = 0):
@@ -37,7 +38,7 @@ async def run(concurrency: int = None, limit: int = 0):
     async def process(doc):
         domain = doc["_id"]
         url = doc.get("url", f"https://{domain}")
-        now = datetime.now(timezone.utc).isoformat()
+        now_ist = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
 
         async with sem:
             path = await pool.capture_url(url, OUTPUT_DIR, retries=3)
@@ -48,6 +49,7 @@ async def run(concurrency: int = None, limit: int = 0):
                 {"$set": {
                     "screenshot_taken": True,
                     "screenshot_failed_reason": None,
+                    "captured_at": now_ist,
                 }}
             )
         else:
@@ -56,6 +58,7 @@ async def run(concurrency: int = None, limit: int = 0):
                 {"$set": {
                     "screenshot_taken": False,
                     "screenshot_failed_reason": "timeout or blank",
+                    "captured_at": now_ist,
                 }}
             )
         pbar.update(1)

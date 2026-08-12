@@ -139,8 +139,8 @@ def export_domains_to_mongo(
 
     for domain, status in domain_results:
         op = UpdateOne(
-            {"domain": domain},
-            {"$set": {"domain": domain, "active": status}},
+            {"_id": domain},
+            {"$set": {"_id": domain, "domain": domain, "active": status}},
             upsert=True,
         )
         operations.append(op)

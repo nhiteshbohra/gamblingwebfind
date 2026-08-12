@@ -6,8 +6,11 @@ Two functions:
   export_capture_workbook() — 2 sheets (Captured / Failed)
 """
 import os
+from datetime import datetime, timezone, timedelta
 import pandas as pd
 from db.mongo_client import checked_domains
+
+IST = timezone(timedelta(hours=5, minutes=30))
 
 
 def _to_df(docs):
@@ -38,7 +41,11 @@ def export_verify_workbook(output_path: str = "output/verify_results.xlsx") -> d
 
     all_ids = [d["_id"] for docs in sheets.values() for d in docs]
     if all_ids:
-        checked_domains().update_many({"_id": {"$in": all_ids}}, {"$set": {"exported": True}})
+        now_ist = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
+        checked_domains().update_many(
+            {"_id": {"$in": all_ids}},
+            {"$set": {"exported": True, "exported_at": now_ist}}
+        )
 
     counts = {name: len(docs) for name, docs in sheets.items()}
     print(f"[export] verify workbook -> {output_path}  {counts}")
@@ -53,12 +60,23 @@ def export_capture_workbook(output_path: str = "output/capture_results.xlsx") ->
     failed   = list(checked_domains().find({"status": "gambling", "screenshot_taken": False}))
 
     cap_rows = [
-        {"S.No.": i, "Domain": d.get("_id", ""), "URL": d.get("url", "")}
+        {
+            "S.No.": i,
+            "Domain": d.get("_id", ""),
+            "URL": d.get("url", ""),
+            "Captured At (IST)": d.get("captured_at", ""),
+        }
         for i, d in enumerate(captured, 1)
     ]
 
     fail_rows = [
-        {"S.No.": i, "Domain": d.get("_id", ""), "URL": d.get("url", ""), "Failure Reason": d.get("screenshot_failed_reason", "Timeout / Navigation error")}
+        {
+            "S.No.": i,
+            "Domain": d.get("_id", ""),
+            "URL": d.get("url", ""),
+            "Captured At (IST)": d.get("captured_at", ""),
+            "Failure Reason": d.get("screenshot_failed_reason", "Timeout / Navigation error"),
+        }
         for i, d in enumerate(failed, 1)
     ]
 
@@ -68,7 +86,11 @@ def export_capture_workbook(output_path: str = "output/capture_results.xlsx") ->
 
     all_ids = [d["_id"] for d in captured + failed]
     if all_ids:
-        checked_domains().update_many({"_id": {"$in": all_ids}}, {"$set": {"exported": True}})
+        now_ist = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
+        checked_domains().update_many(
+            {"_id": {"$in": all_ids}},
+            {"$set": {"exported": True, "exported_at": now_ist}}
+        )
 
     print(f"[export] capture workbook -> {output_path}  captured={len(captured)} failed={len(failed)}")
     return {"file": output_path, "captured": len(captured), "failed": len(failed)}

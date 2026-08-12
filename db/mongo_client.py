@@ -105,14 +105,21 @@ def find_active_domains(limit: int = 0):
 
 # ── Result writer ─────────────────────────────────────────────────────────────
 
+from datetime import datetime, timezone, timedelta
+
+IST = timezone(timedelta(hours=5, minutes=30))
+
+
 def write_result(domain: str, *, status: str, reason: list, url: str = None):
-    """Upsert a classification result into checked_domains with strictly 7 fields."""
+    """Upsert a classification result into checked_domains."""
+    now_ist = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
     doc = {
         "_id": domain,
         "domain": domain,
         "url": url or f"https://{domain}",
         "status": status,
         "reason": reason or [],
+        "checked_at": now_ist,
         "screenshot_taken": False,
         "screenshot_failed_reason": None,
     }
@@ -151,8 +158,8 @@ def seed_from_csv(path: str, active: bool = True):
                 continue
             domain = domain.replace('https://', '').replace('http://', '').rstrip('/')
             source_domains().update_one(
-                {"domain": domain},
-                {"$setOnInsert": {"domain": domain, "active": active}},
+                {"_id": domain},
+                {"$set": {"_id": domain, "domain": domain, "active": active}},
                 upsert=True,
             )
             inserted += 1
