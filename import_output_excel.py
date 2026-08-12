@@ -16,7 +16,7 @@ from tqdm import tqdm
 
 load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env")
 
-EXCEL_PATH = Path(__file__).resolve().parent / "output.xlsx"
+EXCEL_PATH = Path(__file__).resolve().parent / "first_slot_data\output.xlsx"
 BATCH_SIZE = 5000
 
 
