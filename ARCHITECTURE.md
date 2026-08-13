@@ -24,7 +24,10 @@ All stages share a single MongoDB instance (`gamblingsites`) and a single `.env`
 │                                                                     │
 │  Input : domain_Listed WHERE active = true                          │
 │          (skips domains already in checked_domains)                 │
-│  Method: aiohttp fetch -> BeautifulSoup keyword matching            │
+│  Method: Scrapling AsyncFetcher (curl_cffi impersonation) fetch,    │
+│          escalating to StealthyFetcher (solve_cloudflare=True)      │
+│          on 'blocked' verdicts if STEALTH_FALLBACK=true             │
+│          -> BeautifulSoup keyword matching                          │
 │          Keywords loaded from gambling_top_500_keywords.json        │
 │          Rule: >= 3 matching keywords -> status = "gambling"        │
 │  Output: gamblingsites.checked_domains                              │
@@ -142,11 +145,9 @@ gamblingwebfind/
 │   ├── classifier.py               <- Matches page HTML against 500 keywords (>= 3 matches)
 │   └── runner.py                   <- Orchestrates fetch -> classify -> write
 │
-├── capture_url/                    <- Stage 3
+├── capture_url/                    <- Stage 3 & Reporting
 │   ├── screenshot.py               <- Playwright BrowserPool, JPEG encode, validation
-│   └── runner.py                   <- Orchestrates capture -> write to checked_domains
-│
-├── reports/
+│   ├── runner.py                   <- Orchestrates capture -> write to checked_domains
 │   ├── excel_exporter.py           <- Mongo -> Excel workbooks (S.No., Domain, URL columns; exported_at date-only)
 │   └── docx_report_generator.py    <- Mongo -> Word doc (2 per page) + auto-deletes temp JPEGs
 │
@@ -188,30 +189,27 @@ SCREENSHOT_CONCURRENCY=15
 
 ## How to Run
 
-### Stage 1 — Discover domains from Common Crawl
+Simply run `python main.py` to launch the interactive prompt menu:
+```bash
+python main.py
+```
+Select from:
+1. **Keywords Search in Domain Fetch (Stage 1)** — prompt for keywords (e.g. `bet, casino, slot`)
+2. **Checking URL (Stage 2)** — process unchecked domains in DB
+3. **Capture URL (Stage 3)** — capture screenshots & build reports
+4. **Both Checking & Capture URL** — execute Stage 2 + Stage 3 sequentially
+5. **Exit**
+
+---
+
+### Direct Script Execution
+
+#### Stage 1 — Discover domains directly from Common Crawl
 ```bash
 cd keywordsindomainfetch
 python find_domains.py --keyword bet casino slot spin win play 777
 ```
 
-### Stage 2 — Classify active domains
-```bash
-python main.py --mode check
-python main.py --mode check --limit 50   # test run with 50 domains
-```
-Outputs `output/verify_results.xlsx` (4 sheets: Gambling / Blocked / Dead / Regular).
-
-### Stage 3 — Screenshot gambling sites & generate reports
-```bash
-python main.py --mode capture
-python main.py --mode capture --limit 20  # test run with 20 domains
-```
-Outputs timestamped `output/capture_report_<ts>.docx` and `output/capture_results_<ts>.xlsx`. Auto-deletes temporary `.jpg` files when done.
-
-### Run Stage 2 + Stage 3 together
-```bash
-python main.py --mode both
-```
 
 ### Bulk import from Excel dataset
 ```bash

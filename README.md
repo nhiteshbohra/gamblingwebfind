@@ -60,6 +60,10 @@ cd gamblingwebfind
 
 pip install -r requirements.txt
 playwright install chromium
+
+# Only needed if you enable STEALTH_FALLBACK=true in .env (Stage 2's
+# Cloudflare-solving fetch tier, via Scrapling's StealthyFetcher):
+scrapling install
 ```
 
 ### 2. Configure Environment (`.env`)
@@ -205,11 +209,9 @@ gamblingwebfind/
 │   ├── classifier.py
 │   └── runner.py
 │
-├── capture_url/                    <- Stage 3: Screenshot Capture
+├── capture_url/                    <- Stage 3: Screenshot Capture & Reporting
 │   ├── screenshot.py
-│   └── runner.py
-│
-├── reports/                        <- Exporters & Word/Excel Builders
+│   ├── runner.py
 │   ├── excel_exporter.py           <- exported_at stored as date-only (YYYY-MM-DD)
 │   └── docx_report_generator.py
 │
