@@ -1,0 +1,84 @@
+# SearXNG settings — tuned for gamblingwebfind keyword search (unlimited crawl)
+use_default_settings: true
+
+server:
+  secret_key: "gamblingwebfind_searxng_secret_key_change_me"
+  limiter: false          # no rate-limiting on our own instance
+  image_proxy: false
+
+search:
+  safe_search: 0
+  autocomplete: ""
+  default_lang: "all"     # search all languages
+  ban_time_on_fail: 5     # seconds before retrying a failed engine
+  max_ban_time_on_fail: 120
+  formats:
+    - html
+    - json               # MUST be here — without this SearXNG returns 403 on ?format=json
+
+outgoing:
+  request_timeout: 15.0   # per-engine timeout (seconds) — increase for slow engines
+  max_request_timeout: 30.0
+  pool_connections: 200
+  pool_maxsize: 200
+  # Rotate user-agents so engines don't block us
+  useragent_suffix: ""
+
+engines:
+  # ── Google (re-enabled — primary source) ──────────────────────────────────
+  - name: google
+    engine: google
+    categories: general
+    disabled: false
+    use_mobile_ui: false
+    send_accept_language_header: true
+    timeout: 15.0
+
+  # ── Bing (re-enabled) ────────────────────────────────────────────────────
+  - name: bing
+    engine: bing
+    categories: general
+    disabled: false
+    timeout: 15.0
+
+  # ── DuckDuckGo ────────────────────────────────────────────────────────────
+  - name: duckduckgo
+    engine: duckduckgo
+    categories: general
+    disabled: false
+    timeout: 15.0
+
+  # ── Brave Search ─────────────────────────────────────────────────────────
+  - name: brave
+    engine: brave
+    categories: general
+    disabled: false
+    timeout: 15.0
+
+  # ── Startpage (Google proxy — very useful) ───────────────────────────────
+  - name: startpage
+    engine: startpage
+    categories: general
+    disabled: false
+    timeout: 15.0
+
+  # ── Qwant ────────────────────────────────────────────────────────────────
+  - name: qwant
+    engine: qwant
+    categories: general
+    disabled: false
+    timeout: 15.0
+
+  # ── Yahoo ────────────────────────────────────────────────────────────────
+  - name: yahoo
+    engine: yahoo
+    categories: general
+    disabled: false
+    timeout: 15.0
+
+  # ── Mojeek ───────────────────────────────────────────────────────────────
+  - name: mojeek
+    engine: mojeek
+    categories: general
+    disabled: false
+    timeout: 15.0

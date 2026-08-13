@@ -1,0 +1,26 @@
+# gamblingwebfind — SearXNG Docker stack
+# SearXNG will be available at http://127.0.0.1:8080
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: gamblingwebfind_redis
+    restart: unless-stopped
+    command: redis-server --save "" --appendonly no
+
+  searxng:
+    image: searxng/searxng:latest
+    container_name: gamblingwebfind_searxng
+    restart: unless-stopped
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      - SEARXNG_BASE_URL=http://localhost:8080/
+      - SEARXNG_SECRET_KEY=gamblingwebfind_searxng_secret_key_change_me
+    volumes:
+      - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
+    depends_on:
+      - redis

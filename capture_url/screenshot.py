@@ -84,7 +84,7 @@ class BrowserPool:
         filename = _url_to_filename(url)
         filepath = os.path.join(output_dir, filename)
 
-        # Check existing valid screenshot
+        # Re-use an existing valid screenshot if it's already on disk
         if is_valid_screenshot(filepath):
             return filepath, "success", ""
 
@@ -103,17 +103,27 @@ class BrowserPool:
             context = None
             try:
                 context = await self.browser.new_context(
-                    viewport={'width': 1280, 'height': 720},
+                    viewport={'width': 1280, 'height': 900},
                     user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
                     ignore_https_errors=True
                 )
                 page = await context.new_page()
-                page.set_default_timeout(15000)
 
-                wait_strategy = 'domcontentloaded' if attempt == 0 else ('load' if attempt == 1 else 'commit')
+                # ── Navigation ──────────────────────────────────────────────
+                # Attempt 0 → domcontentloaded (fast, enough for most sites)
+                # Attempt 1 → load            (waits for all resources)
+                # Attempt 2 → commit          (bare minimum; heavily blocking sites)
+                nav_strategies = ['domcontentloaded', 'load', 'commit']
+                wait_strategy = nav_strategies[min(attempt, len(nav_strategies) - 1)]
+
+                # Navigation timeout increases with each retry so slow sites
+                # get more time on subsequent attempts: 15s → 20s → 25s
+                nav_timeout = 15000 + attempt * 5000
+
+                page.set_default_timeout(nav_timeout)
                 response = None
                 try:
-                    response = await page.goto(target_url, timeout=12000, wait_until=wait_strategy)
+                    response = await page.goto(target_url, timeout=nav_timeout, wait_until=wait_strategy)
                 except Exception as nav_err:
                     err_str = str(nav_err).lower()
                     last_reason = f"Navigation error: {str(nav_err)[:80]}"
@@ -121,8 +131,9 @@ class BrowserPool:
                         last_failure_type = "blocked"
                     else:
                         last_failure_type = "dead"
+                    # Fall back to bare 'commit' so we capture at least partial content
                     try:
-                        response = await page.goto(target_url, timeout=12000, wait_until='commit')
+                        response = await page.goto(target_url, timeout=8000, wait_until='commit')
                     except Exception:
                         pass
 
@@ -138,7 +149,7 @@ class BrowserPool:
                         last_failure_type = "dead"
                         last_reason = f"HTTP {status_code} Server Error"
 
-                # Check page body content for WAF or Parked markers
+                # ── WAF / parked page detection ──────────────────────────────
                 try:
                     content = (await page.content()).lower()
                     if any(m in content for m in ("checking your browser", "cf-challenge", "captcha", "just a moment", "cf_chl_opt")):
@@ -150,8 +161,37 @@ class BrowserPool:
                 except Exception:
                     pass
 
-                await asyncio.sleep(0.5 if attempt == 0 else 1.5)
+                # ── Wait for full page render ────────────────────────────────
+                # networkidle = no pending network requests for 500ms.
+                # This catches pages that fire XHR/fetch calls after DOMContentLoaded
+                # to load their real content (very common on gambling sites).
+                # We cap it at 8s — pages that keep background-polling will still
+                # get captured after the timeout with whatever has rendered.
+                try:
+                    await page.wait_for_load_state('networkidle', timeout=8000)
+                except Exception:
+                    pass  # Timed out — capture what's rendered so far
 
+                # ── Trigger lazy-loaded content ──────────────────────────────
+                # Scroll to the bottom then back to top so images, hero sections,
+                # and any element that only loads when entering the viewport
+                # are rendered before the screenshot is taken.
+                try:
+                    await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                    await asyncio.sleep(0.5)
+                    await page.evaluate("window.scrollTo(0, 0)")
+                    await asyncio.sleep(0.3)
+                except Exception:
+                    pass
+
+                # ── Settle delay ─────────────────────────────────────────────
+                # Small fixed pause after all the above so CSS animations,
+                # cookie banners, and splash screens have time to finish.
+                # Increases with each retry to give slower sites more time.
+                settle_delay = 1.0 + attempt * 0.5   # 1.0s → 1.5s → 2.0s
+                await asyncio.sleep(settle_delay)
+
+                # ── Take screenshot ──────────────────────────────────────────
                 raw_bytes = await page.screenshot(type='png', full_page=False)
                 await context.close()
                 context = None
@@ -169,6 +209,7 @@ class BrowserPool:
                             os.remove(filepath)
                         except Exception:
                             pass
+
             except Exception as e:
                 err_text = str(e)
                 if "403" in err_text:
@@ -183,7 +224,7 @@ class BrowserPool:
                         await context.close()
                     except Exception:
                         pass
-                await asyncio.sleep(0.5 * (attempt + 1))
+                await asyncio.sleep(1.0 * (attempt + 1))  # 1s → 2s → 3s back-off
 
         return None, last_failure_type, last_reason
 
@@ -199,4 +240,3 @@ async def capture_async(url: str, output_dir: str, viewport_width: int = 1280, v
 
 def capture(url: str, output_dir: str) -> str | None:
     return asyncio.run(capture_async(url, output_dir))
-

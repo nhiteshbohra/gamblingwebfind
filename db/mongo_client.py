@@ -15,7 +15,7 @@ from pathlib import Path
 
 import tldextract
 from dotenv import load_dotenv
-from pymongo import MongoClient, ASCENDING
+from pymongo import MongoClient
 from pymongo.collection import Collection
 
 # Load root .env
@@ -34,12 +34,7 @@ def get_db():
         db_name = os.getenv("MONGO_DB_NAME", "gamblingsites")
         _client = MongoClient(uri)
         _db = _client[db_name]
-        _ensure_indexes()
     return _db
-
-
-def _ensure_indexes():
-    checked_domains().create_index([("status", ASCENDING), ("checked_at", ASCENDING)])
 
 
 def source_domains() -> Collection:
@@ -93,13 +88,23 @@ def extract_domain(url: str) -> str:
 # ── Source collection helpers ─────────────────────────────────────────────────
 
 def find_active_domains(limit: int = 0):
-    """Yield active domains not yet in checked_domains."""
-    already_checked = set(d["_id"] for d in checked_domains().find({}, {"_id": 1}))
-    cur = source_domains().find({"active": True})
+    """Yield active domains not yet processed by checking_url.
+
+    Filters out documents where processed=True so that re-runs never
+    re-check the same domain twice.  Older documents without the
+    'processed' field are treated as unprocessed (backward-compatible).
+    """
+    cur = source_domains().find(
+        {
+            "active": True,
+            # Include docs with no 'processed' field (legacy) OR processed=False
+            "processed": {"$ne": True},
+        }
+    )
     if limit:
         cur = cur.limit(limit)
     for doc in cur:
-        if doc.get("domain") and doc["domain"] not in already_checked:
+        if doc.get("domain"):
             yield doc
 
 
@@ -111,7 +116,13 @@ IST = timezone(timedelta(hours=5, minutes=30))
 
 
 def write_result(domain: str, *, status: str, reason: list, url: str = None):
-    """Upsert a classification result into checked_domains."""
+    """Upsert a classification result into checked_domains AND mark the
+    source domain as processed in domain_Listed.
+
+    Both writes happen in the same function call — eliminates the crash
+    window that existed when mark_domain_processed() was a separate call
+    in runner.py after write_result().
+    """
     now_ist = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
     today_date = datetime.now(IST).strftime("%Y-%m-%d")
     doc = {
@@ -132,10 +143,28 @@ def write_result(domain: str, *, status: str, reason: list, url: str = None):
         },
         upsert=True,
     )
+    # Mark source domain as processed — bundled here so there is no gap
+    # between writing the result and stamping the domain as done.
+    source_domains().update_one(
+        {"_id": domain},
+        {"$set": {"processed": True}},
+    )
 
 
 def get_checked(domain: str) -> dict | None:
     return checked_domains().find_one({"_id": domain})
+
+
+def mark_domain_processed(domain: str):
+    """Flip processed=True on the source domain_Listed document.
+
+    Called by checking_url/runner.py after write_result() so that
+    re-runs of the checker skip this domain entirely.
+    """
+    source_domains().update_one(
+        {"_id": domain},
+        {"$set": {"processed": True}},
+    )
 
 
 def find_pending_capture(limit: int = 0):

@@ -98,9 +98,6 @@ def import_excel(excel_path: Path = None):
     source_col = db[os.getenv("MONGO_COLLECTION", "domain_Listed")]
     checked_col = db[os.getenv("CHECKED_COLLECTION", "checked_domains")]
 
-    # Create indexes for speed
-    source_col.create_index("domain", unique=True)
-
     print(f"\nReading '{excel_path.name}' ({excel_path})...")
     xl = pd.ExcelFile(excel_path)
 
@@ -154,7 +151,9 @@ def import_excel(excel_path: Path = None):
                 UpdateOne(
                     {"_id": dom},
                     {
-                        "$set": {"_id": dom, "domain": dom, "active": active_val},
+                        # processed=True: these domains already have results in checked_domains,
+                        # so Stage 2 (checking_url) must NOT re-check them.
+                        "$set": {"_id": dom, "domain": dom, "active": active_val, "processed": True},
                         "$setOnInsert": {"added_date": today_date},
                     },
                     upsert=True,

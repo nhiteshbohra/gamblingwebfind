@@ -23,7 +23,7 @@ if not env_path.exists():
     env_path = Path(__file__).resolve().parents[2] / ".env"
 load_dotenv(dotenv_path=env_path)
 
-DEFAULT_CSV_PATH = Path(r"C:\Users\hites\Downloads\gambling_sites.csv")
+DEFAULT_CSV_PATH = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("")
 EXPORT_DATE_STR = "10th of August 2026"
 EXPORT_TIMESTAMP_IST = "2026-08-10 00:00:00 IST"
 BATCH_SIZE = 1000
@@ -114,7 +114,7 @@ def update_export_status(csv_path: Path = None):
             pbar.update(1)
             continue
 
-        screenshot_flag = bool(row.get("screenhot", True))
+        screenshot_flag = bool(row.get("screenshot", True))  # was: "screenhot" (typo fixed)
 
         # 1. Update domain_Listed
         source_ops.append(

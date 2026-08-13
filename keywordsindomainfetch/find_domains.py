@@ -129,10 +129,6 @@ def export_domains_to_mongo(
     coll_name = config["collection"]
     collection = client[db_name][coll_name]
 
-    try:
-        collection.create_index("domain", unique=True)
-    except Exception:
-        pass
 
     batch_size = config["batch_size"]
     operations = []
@@ -145,7 +141,8 @@ def export_domains_to_mongo(
             {"_id": domain},
             {
                 "$set": {"_id": domain, "domain": domain, "active": status},
-                "$setOnInsert": {"added_date": today_date},
+                # processed=False on insert; checking_url sets it True after processing
+                "$setOnInsert": {"added_date": today_date, "processed": False},
             },
             upsert=True,
         )
