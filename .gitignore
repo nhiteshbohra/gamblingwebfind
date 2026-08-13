@@ -22,7 +22,7 @@ output/
 *.sqlite
 *.sqlite3
 data/presence.db
-
+all domainsearched/
 !config/
 # ^ remove the line above if you never keep a tracked CSV in config/
 
