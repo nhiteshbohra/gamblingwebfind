@@ -11,10 +11,12 @@ A high-performance, three-stage Python pipeline for discovering, classifying, an
                                   │
                                   ▼
            Stage 1: Domain Finder (DuckDB SQL Query)
+                    stamps added_date on new domains
                                   │
                                   ▼
                  MongoDB: gamblingsites.domain_Listed
                           (active: true / false / "blocked")
+                          (added_date: YYYY-MM-DD)
                                   │
                                   ▼
            Stage 2: URL Checker & Classifier (aiohttp)
@@ -22,16 +24,17 @@ A high-performance, three-stage Python pipeline for discovering, classifying, an
                                   │
                                   ▼
                  MongoDB: gamblingsites.checked_domains
-                          (Strict 7-field schema)
+                          (status, reason, screenshot_taken)
+                          (added_date, exported_at: YYYY-MM-DD)
                                   │
                                   ▼
            Stage 3: Screenshot Capturer (Playwright Chromium)
                                   │
                                   ▼
                    Root output/ Folder:
-                   ├── capture_report.docx   (Word Doc)
-                   ├── capture_results.xlsx  (Excel Doc)
-                   └── verify_results.xlsx   (Verification Excel)
+                   ├── capture_report_<ts>.docx   (Word Doc)
+                   ├── capture_results_<ts>.xlsx  (Excel Doc)
+                   └── verify_results.xlsx        (Verification Excel)
 ```
 
 ---
@@ -41,7 +44,9 @@ A high-performance, three-stage Python pipeline for discovering, classifying, an
 - **Stage 1 (Domain Finder):** Uses DuckDB SQL queries over Common Crawl Parquet indices to extract 10,000s of domains matching gambling search phrases without hitting search engine CAPTCHAs.
 - **Stage 2 (URL Checker & Classifier):** Asynchronously fetches live HTML via `aiohttp` and classifies domains against `gambling_top_500_keywords.json`. Websites with **$\ge 3$ matching keywords** are classified as `gambling`.
 - **Stage 3 (Screenshot & Reporting):** Takes headless Playwright Chromium screenshots for all verified gambling sites, formats them into a compact A4 Word report (`capture_report.docx`, 2 targets per page with clickable hyperlinks), and exports matching Excel workbooks (`capture_results.xlsx`).
-- **Auto-Cleanup:** Temporary JPEG files are automatically deleted from disk after being embedded into the Word report to prevent duplicate disk storage.
+- **`added_date` Tracking:** Every domain is automatically stamped with the date it was first imported (`YYYY-MM-DD`). Set once via MongoDB `$setOnInsert` — never overwritten on re-import.
+- **`exported_at` Date-Only:** Export date is stored cleanly as `YYYY-MM-DD` (no time component).
+- **Auto-Cleanup:** Temporary JPEG files are automatically deleted from disk after being embedded into the Word report.
 - **Single Output Folder:** All final reports land cleanly in a single `output/` folder at project root.
 
 ---
@@ -93,7 +98,7 @@ SCREENSHOT_CONCURRENCY=15
 cd keywordsindomainfetch
 python find_domains.py --keyword bet casino slot spin win play 777
 ```
-*Results land in MongoDB `gamblingsites.domain_Listed`.*
+*Results land in MongoDB `gamblingsites.domain_Listed` with `added_date` stamped automatically.*
 
 ### 2. Stage 2 — Check & Classify Active Domains
 ```bash
@@ -113,24 +118,40 @@ python main.py --mode capture
 # Test run with first 20 gambling sites
 python main.py --mode capture --limit 20
 ```
-*Outputs `output/capture_report.docx` and `output/capture_results.xlsx`. Temporary `.jpg` files are auto-cleaned from disk.*
+*Outputs timestamped `output/capture_report_<ts>.docx` and `output/capture_results_<ts>.xlsx`. Temporary `.jpg` files are auto-cleaned from disk.*
 
 ### 4. Run Stage 2 & Stage 3 Together
 ```bash
 python main.py --mode both
 ```
 
-### 5. Bulk Import Output Excel (`output.xlsx`)
+### 5. Bulk Import from Excel Dataset
 To populate MongoDB from an existing `output.xlsx` dataset:
 ```bash
+cd project_sup/mongodbupdate
 python import_output_excel.py
+```
+*New domains are stamped with `added_date` automatically. Existing domains are not overwritten.*
+
+### 6. Seed Domains from CSV
+```bash
+python main.py --seed path/to/domains.csv
 ```
 
 ---
 
-## MongoDB Document Schema (`checked_domains`)
+## MongoDB Document Schema
 
-Each document in `checked_domains` strictly contains 7 fields:
+### `domain_Listed`
+
+| Field        | Type        | Description                                              |
+|--------------|-------------|----------------------------------------------------------|
+| `_id`        | string      | domain name (primary key)                                |
+| `domain`     | string      | e.g. `"bet365.com"`                                      |
+| `active`     | bool/string | `true` / `false` / `"blocked"`                           |
+| `added_date` | string      | Date first imported — `YYYY-MM-DD` (set once, never overwritten) |
+
+### `checked_domains`
 
 ```json
 {
@@ -138,18 +159,27 @@ Each document in `checked_domains` strictly contains 7 fields:
   "domain": "we-play.poker",
   "url": "https://we-play.poker",
   "status": "gambling",
-  "reason": [
-    "play now",
-    "cashier",
-    "casino",
-    "poker",
-    "wager",
-    "responsible gambling"
-  ],
+  "reason": ["play now", "cashier", "casino", "poker"],
   "screenshot_taken": true,
-  "screenshot_failed_reason": null
+  "screenshot_failed_reason": null,
+  "added_date": "2026-08-13",
+  "exported": true,
+  "exported_at": "2026-08-13"
 }
 ```
+
+| Field                      | Type   | Description                                                     |
+|----------------------------|--------|-----------------------------------------------------------------|
+| `_id`                      | string | domain name (primary key)                                       |
+| `domain`                   | string | same as `_id`                                                   |
+| `url`                      | string | full normalized URL                                             |
+| `status`                   | string | `"gambling"`, `"regular"`, `"blocked"`, `"dead"`                |
+| `reason`                   | array  | matched signal keywords                                         |
+| `screenshot_taken`         | bool   | `true` after successful screenshot capture                      |
+| `screenshot_failed_reason` | string | error message if capture failed, else `null`                    |
+| `added_date`               | string | Date first imported — `YYYY-MM-DD` (set once, never overwritten)|
+| `exported`                 | bool   | `true` once included in an exported report                      |
+| `exported_at`              | string | Date of export — `YYYY-MM-DD`                                   |
 
 ---
 
@@ -162,14 +192,13 @@ gamblingwebfind/
 ├── README.md                       <- Setup & Usage Guide
 ├── main.py                         <- Unified CLI entry point (--mode check|capture|both)
 ├── gambling_top_500_keywords.json  <- 500 keyword signal terms
-├── import_output_excel.py          <- Bulk importer for output.xlsx
 │
 ├── keywordsindomainfetch/          <- Stage 1: Common Crawl Domain Extraction
-│   ├── find_domains.py
+│   ├── find_domains.py             <- DuckDB query -> domain_Listed (stamps added_date)
 │   └── manifests/
 │
 ├── db/                             <- MongoDB client & accessors
-│   └── mongo_client.py
+│   └── mongo_client.py             <- Connection, seed_from_csv, write_result
 │
 ├── checking_url/                   <- Stage 2: Fetch & Classification
 │   ├── fetcher.py
@@ -180,7 +209,12 @@ gamblingwebfind/
 │   ├── screenshot.py
 │   └── runner.py
 │
-└── reports/                        <- Exporters & Word/Excel Builders
-    ├── excel_exporter.py
-    └── docx_report_generator.py
+├── reports/                        <- Exporters & Word/Excel Builders
+│   ├── excel_exporter.py           <- exported_at stored as date-only (YYYY-MM-DD)
+│   └── docx_report_generator.py
+│
+└── project_sup/
+    └── mongodbupdate/
+        ├── import_output_excel.py  <- Bulk Excel importer (stamps added_date)
+        └── update_export_status.py
 ```

@@ -7,6 +7,7 @@ import os
 import socket
 import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from pathlib import Path
 
 import aiohttp
@@ -137,10 +138,15 @@ def export_domains_to_mongo(
     operations = []
     total_written = 0
 
+    today_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
     for domain, status in domain_results:
         op = UpdateOne(
             {"_id": domain},
-            {"$set": {"_id": domain, "domain": domain, "active": status}},
+            {
+                "$set": {"_id": domain, "domain": domain, "active": status},
+                "$setOnInsert": {"added_date": today_date},
+            },
             upsert=True,
         )
         operations.append(op)

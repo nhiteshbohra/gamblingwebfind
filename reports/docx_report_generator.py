@@ -90,13 +90,42 @@ def build_report(entries: list[dict], output_path: str) -> str:
     return output_path
 
 
-def build_report_from_mongo(output_path: str = "output/capture_report.docx", cleanup: bool = True) -> str:
-    """Build Word report by querying Mongo for successfully captured domains, then auto-deletes temporary JPEGs from disk."""
+def build_report_from_mongo(domain_ids: list = None, output_path: str = "output/capture_report.docx", cleanup: bool = True) -> str:
+    """Build Word report by querying Mongo for successfully captured domains.
+
+    Only includes entries whose screenshot JPEG actually exists on disk.
+    Cleans up temporary JPEGs after embedding them.
+    """
+    if domain_ids is not None and len(domain_ids) == 0:
+        print("[report] No domains processed in this run to generate Word report.")
+        return output_path
+
     from db.mongo_client import checked_domains
     from capture_url.screenshot import _url_to_filename
-    captured = list(checked_domains().find({"screenshot_taken": True}))
+
+    query = {"screenshot_taken": True}
+    if domain_ids:
+        query["_id"] = {"$in": domain_ids}
+
+    captured = list(checked_domains().find(query))
     screenshots_dir = os.path.join("output", "screenshots")
-    entries = [{"url": d["url"], "screenshot_path": os.path.join(screenshots_dir, _url_to_filename(d["url"]))} for d in captured]
+
+    # Only include entries where the JPEG is actually on disk
+    entries = []
+    missing_ids = []
+    for d in captured:
+        jpg_path = os.path.join(screenshots_dir, _url_to_filename(d["url"]))
+        if os.path.exists(jpg_path):
+            entries.append({"url": d["url"], "screenshot_path": jpg_path})
+        else:
+            missing_ids.append(d["_id"])
+
+    if missing_ids:
+        print(f"[report] Warning: {len(missing_ids)} domains marked captured but JPEG not found on disk. Skipping from Word doc.")
+        # Reconcile DB status
+        checked_domains().update_many({"_id": {"$in": missing_ids}}, {"$set": {"screenshot_taken": False}})
+
+    print(f"[report] Building Word document with {len(entries)} screenshots -> {output_path}")
     res = build_report(entries, output_path)
 
     if cleanup:

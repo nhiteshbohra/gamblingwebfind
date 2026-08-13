@@ -15,7 +15,7 @@ All stages share a single MongoDB instance (`gamblingsites`) and a single `.env`
 │                                                                     │
 │  Input : Common Crawl Parquet index (CC-MAIN-2024-22)              │
 │  Method: DuckDB SQL query over keyword list                         │
-│  Output: gamblingsites.domain_Listed  { domain, active: true/false }│
+│  Output: gamblingsites.domain_Listed  { domain, active, added_date }│
 └─────────────────────────┬───────────────────────────────────────────┘
                           │  active: true domains
                           ▼
@@ -32,7 +32,7 @@ All stages share a single MongoDB instance (`gamblingsites`) and a single `.env`
 │  Status values:                                                     │
 │    gambling  — confirmed gambling operator (>= 3 keyword matches)   │
 │    regular   — reachable, not gambling (< 3 keyword matches)        │
-│    blocked   — 403/429 or Cloudflare WAF challenge                   │
+│    blocked   — 403/429 or Cloudflare WAF challenge                  │
 │    dead      — DNS fail / connection refused / parked               │
 │                                                                     │
 │  Export: output/verify_results.xlsx (4 sheets)                      │
@@ -45,8 +45,8 @@ All stages share a single MongoDB instance (`gamblingsites`) and a single `.env`
 │                                                                     │
 │  Input : checked_domains WHERE status=gambling, screenshot_taken=false│
 │  Method: Playwright headless Chromium, 1280x720 JPEG q68           │
-│  Output: output/capture_report.docx   (2 targets per page)          │
-│          output/capture_results.xlsx  (Captured / Failed sheets)    │
+│  Output: output/capture_report_<date>.docx   (2 targets per page)  │
+│          output/capture_results_<date>.xlsx  (Captured / Failed)   │
 │          (Temporary JPEGs in output/screenshots/ are auto-deleted)  │
 └─────────────────────────────────────────────────────────────────────┘
 ```
@@ -57,15 +57,16 @@ All stages share a single MongoDB instance (`gamblingsites`) and a single `.env`
 
 ### 1. `domain_Listed` — Stage 1 output (READ-ONLY by Stage 2)
 
-| Field    | Type        | Description                                           |
-|----------|-------------|-------------------------------------------------------|
-| `_id`    | ObjectId    | Auto-generated                                        |
-| `domain` | string      | e.g. `"bet365.com"`                                   |
-| `active` | bool/string | `true` = reachable, `false` = dead, `"blocked"` = WAF |
+| Field        | Type        | Description                                            |
+|--------------|-------------|--------------------------------------------------------|
+| `_id`        | string      | domain name (primary key)                              |
+| `domain`     | string      | e.g. `"bet365.com"`                                    |
+| `active`     | bool/string | `true` = reachable, `false` = dead, `"blocked"` = WAF  |
+| `added_date` | string      | Date domain was first imported — `YYYY-MM-DD` (set once, never overwritten) |
 
-### 2. `checked_domains` — Stage 2/3 output (Strict 7-Field Schema)
+### 2. `checked_domains` — Stage 2/3 output
 
-Each document strictly contains ONLY these 7 fields:
+Each document contains these fields:
 
 ```json
 {
@@ -82,19 +83,27 @@ Each document strictly contains ONLY these 7 fields:
     "responsible gambling"
   ],
   "screenshot_taken": true,
-  "screenshot_failed_reason": null
+  "screenshot_failed_reason": null,
+  "added_date": "2026-08-13",
+  "exported": true,
+  "exported_at": "2026-08-13"
 }
 ```
 
-| Field                      | Type   | Description                                       |
-|----------------------------|--------|---------------------------------------------------|
-| `_id`                      | string | domain name (primary key)                         |
-| `domain`                   | string | same as `_id`                                     |
-| `url`                      | string | full normalized URL                               |
-| `status`                   | string | `"gambling"`, `"regular"`, `"blocked"`, `"dead"`  |
-| `reason`                   | array  | matched signal keywords from the 500 keyword list |
-| `screenshot_taken`         | bool   | `true` after successful screenshot capture        |
-| `screenshot_failed_reason` | string | error message if capture failed, else `null`      |
+| Field                      | Type   | Description                                                    |
+|----------------------------|--------|----------------------------------------------------------------|
+| `_id`                      | string | domain name (primary key)                                      |
+| `domain`                   | string | same as `_id`                                                  |
+| `url`                      | string | full normalized URL                                            |
+| `status`                   | string | `"gambling"`, `"regular"`, `"blocked"`, `"dead"`               |
+| `reason`                   | array  | matched signal keywords from the 500 keyword list              |
+| `screenshot_taken`         | bool   | `true` after successful screenshot capture                     |
+| `screenshot_failed_reason` | string | error message if capture failed, else `null`                   |
+| `added_date`               | string | Date domain was first imported — `YYYY-MM-DD` (set once via `$setOnInsert`, never overwritten) |
+| `exported`                 | bool   | `true` once included in an exported report                     |
+| `exported_at`              | string | Date of export — `YYYY-MM-DD` (date only, no time)             |
+
+> **Note:** `captured_at` has been removed from the schema. Export tracking uses `exported_at` (date only). Import tracking uses `added_date` (date only, set once).
 
 ---
 
@@ -105,9 +114,9 @@ All generated reports land in a single root **`output/`** folder:
 ```
 gamblingwebfind/
 └── output/
-    ├── capture_report.docx   <- Word report (2 targets per page with hyperlinks)
-    ├── capture_results.xlsx  <- Excel workbook (Captured / Failed sheets: S.No., Domain, URL)
-    └── verify_results.xlsx   <- Excel workbook (4 sheets: Gambling / Blocked / Dead / Regular)
+    ├── capture_report_<YYYY-MM-DD_HH-MM-SS>.docx   <- Word report (2 targets per page with hyperlinks)
+    ├── capture_results_<YYYY-MM-DD_HH-MM-SS>.xlsx  <- Excel workbook (Captured / Failed sheets: S.No., Domain, URL)
+    └── verify_results.xlsx                          <- Excel workbook (4 sheets: Gambling / Blocked / Dead / Regular)
 ```
 
 ---
@@ -120,14 +129,13 @@ gamblingwebfind/
 ├── main.py                         <- Entry point: --mode check|capture|both
 ├── gambling_top_500_keywords.json  <- 500 keyword signal terms
 ├── seed_500_keywords.py            <- Seeder script for MongoDB keywords collection
-├── import_output_excel.py          <- Bulk seeder for output.xlsx into MongoDB
 │
 ├── keywordsindomainfetch/          <- Stage 1
-│   ├── find_domains.py             <- Common Crawl -> domain_Listed
+│   ├── find_domains.py             <- Common Crawl -> domain_Listed (stamps added_date)
 │   └── manifests/                  <- CC crawl manifest cache
 │
 ├── db/
-│   └── mongo_client.py             <- Connection, collection accessors, URL helpers
+│   └── mongo_client.py             <- Connection, collection accessors, URL helpers, seed_from_csv
 │
 ├── checking_url/                   <- Stage 2
 │   ├── fetcher.py                  <- aiohttp fetch with retry + failure classification
@@ -138,9 +146,14 @@ gamblingwebfind/
 │   ├── screenshot.py               <- Playwright BrowserPool, JPEG encode, validation
 │   └── runner.py                   <- Orchestrates capture -> write to checked_domains
 │
-└── reports/
-    ├── excel_exporter.py           <- Mongo -> Excel workbooks (clean S.No., Domain, URL columns)
-    └── docx_report_generator.py    <- Mongo -> Word doc (2 per page) + auto-deletes temp JPEGs
+├── reports/
+│   ├── excel_exporter.py           <- Mongo -> Excel workbooks (S.No., Domain, URL columns; exported_at date-only)
+│   └── docx_report_generator.py    <- Mongo -> Word doc (2 per page) + auto-deletes temp JPEGs
+│
+└── project_sup/
+    └── mongodbupdate/
+        ├── import_output_excel.py  <- Bulk Excel importer (stamps added_date on new domains)
+        └── update_export_status.py <- Utility to update export status in MongoDB
 ```
 
 ---
@@ -193,16 +206,22 @@ Outputs `output/verify_results.xlsx` (4 sheets: Gambling / Blocked / Dead / Regu
 python main.py --mode capture
 python main.py --mode capture --limit 20  # test run with 20 domains
 ```
-Outputs `output/capture_report.docx` (2 targets per page) and `output/capture_results.xlsx` (Captured / Failed sheets). Auto-deletes temporary `.jpg` files when done.
+Outputs timestamped `output/capture_report_<ts>.docx` and `output/capture_results_<ts>.xlsx`. Auto-deletes temporary `.jpg` files when done.
 
 ### Run Stage 2 + Stage 3 together
 ```bash
 python main.py --mode both
 ```
 
-### Import existing output.xlsx dataset into MongoDB
+### Bulk import from Excel dataset
 ```bash
+cd project_sup/mongodbupdate
 python import_output_excel.py
+```
+
+### Seed domains from CSV
+```bash
+python main.py --seed path/to/domains.csv
 ```
 
 ---
@@ -210,8 +229,10 @@ python import_output_excel.py
 ## Key Architectural Principles
 
 1. **Single `.env` Config:** One central configuration file for all three pipeline stages.
-2. **Strict 7-Field MongoDB Schema:** No bloated audit timestamps or redundant metadata in `checked_domains`.
-3. **$\ge 3$ Keyword Rule:** Website is marked `status: "gambling"` if 3 or more keywords match page HTML. Hard excludes `.gov` and `.edu`.
-4. **Single `output/` Directory:** All Word documents and Excel workbooks land in one clean folder.
-5. **Auto-Cleanup:** Screenshot JPEGs are embedded into `capture_report.docx` and immediately deleted from disk to prevent double memory/storage consumption.
-6. **1-to-1 Word & Excel Alignment:** `capture_report.docx` and `capture_results.xlsx` pull the exact same set of captured domains from MongoDB simultaneously.
+2. **`added_date` Tracking:** Every domain gets stamped with the date it was first imported (`YYYY-MM-DD`), set once via MongoDB `$setOnInsert` — never overwritten on re-import.
+3. **`exported_at` Date-Only:** Export date is stored as `YYYY-MM-DD` (no time component) for clean reporting.
+4. **No `captured_at`:** Capture timestamps have been removed; the pipeline only tracks import date and export date.
+5. **$\ge 3$ Keyword Rule:** Website is marked `status: "gambling"` if 3 or more keywords match page HTML. Hard excludes `.gov` and `.edu`.
+6. **Single `output/` Directory:** All Word documents and Excel workbooks land in one clean folder.
+7. **Auto-Cleanup:** Screenshot JPEGs are embedded into `capture_report.docx` and immediately deleted from disk to prevent double memory/storage consumption.
+8. **1-to-1 Word & Excel Alignment:** `capture_report.docx` and `capture_results.xlsx` pull the exact same set of captured domains from MongoDB simultaneously.

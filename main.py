@@ -12,6 +12,7 @@ Usage:
 import argparse
 import asyncio
 import os
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -49,15 +50,20 @@ def main():
         export_verify_workbook()
 
     if args.mode in ("capture", "both"):
+        IST = timezone(timedelta(hours=5, minutes=30))
+        run_ts = datetime.now(IST).strftime("%Y-%m-%d_%H-%M-%S")
+
         from capture_url.runner import run as capture_run
-        asyncio.run(capture_run(
+        processed_ids = asyncio.run(capture_run(
             concurrency=args.concurrency or int(os.getenv("SCREENSHOT_CONCURRENCY", 15)),
             limit=args.limit
         ))
         from reports.excel_exporter import export_capture_workbook
         from reports.docx_report_generator import build_report_from_mongo
-        export_capture_workbook()
-        build_report_from_mongo(cleanup=True)
+        xlsx_path = f"output/capture_results_{run_ts}.xlsx"
+        docx_path = f"output/capture_report_{run_ts}.docx"
+        export_capture_workbook(domain_ids=processed_ids, output_path=xlsx_path)
+        build_report_from_mongo(domain_ids=processed_ids, output_path=docx_path, cleanup=True)
 
 
 if __name__ == "__main__":

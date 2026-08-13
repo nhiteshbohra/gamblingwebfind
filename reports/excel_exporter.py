@@ -41,7 +41,7 @@ def export_verify_workbook(output_path: str = "output/verify_results.xlsx") -> d
 
     all_ids = [d["_id"] for docs in sheets.values() for d in docs]
     if all_ids:
-        now_ist = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
+        now_ist = datetime.now(IST).strftime("%Y-%m-%d")
         checked_domains().update_many(
             {"_id": {"$in": all_ids}},
             {"$set": {"exported": True, "exported_at": now_ist}}
@@ -52,19 +52,38 @@ def export_verify_workbook(output_path: str = "output/verify_results.xlsx") -> d
     return {"file": output_path, **counts}
 
 
-def export_capture_workbook(output_path: str = "output/capture_results.xlsx") -> dict:
+def export_capture_workbook(domain_ids: list = None, output_path: str = "output/capture_results.xlsx") -> dict:
     """2-sheet workbook for capture mode results (Captured / Failed)."""
+    if domain_ids is not None and len(domain_ids) == 0:
+        print("[export] No domains processed in this run to export.")
+        return {"file": output_path, "captured": 0, "failed": 0}
+
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
-    captured = list(checked_domains().find({"status": "gambling", "screenshot_taken": True}))
-    failed   = list(checked_domains().find({"status": "gambling", "screenshot_taken": False}))
+    base_filter = {"_id": {"$in": domain_ids}} if domain_ids else {}
+
+    captured_filter = {**base_filter, "screenshot_taken": True}
+    failed_filter   = {**base_filter, "screenshot_taken": False}
+
+    captured = list(checked_domains().find(captured_filter))
+    failed   = list(checked_domains().find(failed_filter))
+
+    # Excel Captured sheet only includes domains whose JPEG is on disk
+    # (matches the Word doc screenshot count exactly)
+    screenshots_dir = os.path.join("output", "screenshots")
+    try:
+        from capture_url.screenshot import _url_to_filename
+        captured = [d for d in captured if os.path.exists(
+            os.path.join(screenshots_dir, _url_to_filename(d.get("url", "")))
+        )]
+    except Exception:
+        pass  # fallback: include all if import fails
 
     cap_rows = [
         {
             "S.No.": i,
             "Domain": d.get("_id", ""),
             "URL": d.get("url", ""),
-            "Captured At (IST)": d.get("captured_at", ""),
         }
         for i, d in enumerate(captured, 1)
     ]
@@ -74,7 +93,6 @@ def export_capture_workbook(output_path: str = "output/capture_results.xlsx") ->
             "S.No.": i,
             "Domain": d.get("_id", ""),
             "URL": d.get("url", ""),
-            "Captured At (IST)": d.get("captured_at", ""),
             "Failure Reason": d.get("screenshot_failed_reason", "Timeout / Navigation error"),
         }
         for i, d in enumerate(failed, 1)
@@ -84,12 +102,19 @@ def export_capture_workbook(output_path: str = "output/capture_results.xlsx") ->
         pd.DataFrame(cap_rows).to_excel(writer, sheet_name='Captured', index=False)
         pd.DataFrame(fail_rows).to_excel(writer, sheet_name='Failed', index=False)
 
-    all_ids = [d["_id"] for d in captured + failed]
-    if all_ids:
-        now_ist = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
+    cap_ids = [d["_id"] for d in captured]
+    if cap_ids:
+        now_ist = datetime.now(IST).strftime("%Y-%m-%d")
         checked_domains().update_many(
-            {"_id": {"$in": all_ids}},
+            {"_id": {"$in": cap_ids}},
             {"$set": {"exported": True, "exported_at": now_ist}}
+        )
+
+    fail_ids = [d["_id"] for d in failed]
+    if fail_ids:
+        checked_domains().update_many(
+            {"_id": {"$in": fail_ids}},
+            {"$set": {"exported": False}, "$unset": {"export_status": "", "exported_at": ""}}
         )
 
     print(f"[export] capture workbook -> {output_path}  captured={len(captured)} failed={len(failed)}")

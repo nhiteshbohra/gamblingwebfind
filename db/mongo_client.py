@@ -113,6 +113,7 @@ IST = timezone(timedelta(hours=5, minutes=30))
 def write_result(domain: str, *, status: str, reason: list, url: str = None):
     """Upsert a classification result into checked_domains."""
     now_ist = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
+    today_date = datetime.now(IST).strftime("%Y-%m-%d")
     doc = {
         "_id": domain,
         "domain": domain,
@@ -125,7 +126,10 @@ def write_result(domain: str, *, status: str, reason: list, url: str = None):
     }
     checked_domains().update_one(
         {"_id": domain},
-        {"$set": doc},
+        {
+            "$set": doc,
+            "$setOnInsert": {"added_date": today_date},
+        },
         upsert=True,
     )
 
@@ -150,6 +154,7 @@ def seed_from_csv(path: str, active: bool = True):
     ponytail: ceiling = no progress bar; upgrade = tqdm if > 10k rows.
     """
     inserted = skipped = 0
+    today_date = datetime.now(IST).strftime("%Y-%m-%d")
     with open(path, newline='', encoding='utf-8') as f:
         for row in csv.DictReader(f):
             domain = (row.get('domain') or row.get('url') or '').strip()
@@ -159,7 +164,10 @@ def seed_from_csv(path: str, active: bool = True):
             domain = domain.replace('https://', '').replace('http://', '').rstrip('/')
             source_domains().update_one(
                 {"_id": domain},
-                {"$set": {"_id": domain, "domain": domain, "active": active}},
+                {
+                    "$set": {"_id": domain, "domain": domain, "active": active},
+                    "$setOnInsert": {"added_date": today_date},
+                },
                 upsert=True,
             )
             inserted += 1

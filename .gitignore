@@ -52,5 +52,4 @@ Thumbs.db
 *.tmp
 *_test_output*
 spec_audit*.md
-*.xlsx
 *.zip

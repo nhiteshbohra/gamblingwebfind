@@ -79,20 +79,23 @@ class BrowserPool:
                     pass
                 self.playwright = None
 
-    async def capture_url(self, url: str, output_dir: str, retries: int = 3) -> str | None:
+    async def capture_url(self, url: str, output_dir: str, retries: int = 3) -> tuple[str | None, str, str]:
         os.makedirs(output_dir, exist_ok=True)
         filename = _url_to_filename(url)
         filepath = os.path.join(output_dir, filename)
 
         # Check existing valid screenshot
         if is_valid_screenshot(filepath):
-            return filepath
+            return filepath, "success", ""
 
         urls_to_try = [url]
         if url.startswith("https://"):
             urls_to_try.append("http://" + url[8:])
         elif url.startswith("http://"):
             urls_to_try.append("https://" + url[7:])
+
+        last_failure_type = "dead"
+        last_reason = "timeout or blank"
 
         for attempt in range(retries):
             await self.ensure_browser()
@@ -108,13 +111,44 @@ class BrowserPool:
                 page.set_default_timeout(15000)
 
                 wait_strategy = 'domcontentloaded' if attempt == 0 else ('load' if attempt == 1 else 'commit')
+                response = None
                 try:
-                    await page.goto(target_url, timeout=12000, wait_until=wait_strategy)
-                except Exception:
+                    response = await page.goto(target_url, timeout=12000, wait_until=wait_strategy)
+                except Exception as nav_err:
+                    err_str = str(nav_err).lower()
+                    last_reason = f"Navigation error: {str(nav_err)[:80]}"
+                    if "403" in err_str or "access denied" in err_str:
+                        last_failure_type = "blocked"
+                    else:
+                        last_failure_type = "dead"
                     try:
-                        await page.goto(target_url, timeout=12000, wait_until='commit')
+                        response = await page.goto(target_url, timeout=12000, wait_until='commit')
                     except Exception:
                         pass
+
+                if response:
+                    status_code = response.status
+                    if status_code in (403, 429):
+                        last_failure_type = "blocked"
+                        last_reason = f"HTTP {status_code} Blocked"
+                    elif status_code == 404:
+                        last_failure_type = "dead"
+                        last_reason = "HTTP 404 Not Found"
+                    elif status_code >= 500:
+                        last_failure_type = "dead"
+                        last_reason = f"HTTP {status_code} Server Error"
+
+                # Check page body content for WAF or Parked markers
+                try:
+                    content = (await page.content()).lower()
+                    if any(m in content for m in ("checking your browser", "cf-challenge", "captcha", "just a moment", "cf_chl_opt")):
+                        last_failure_type = "blocked"
+                        last_reason = "Cloudflare / WAF Blocked"
+                    elif any(m in content for m in ("this domain is for sale", "domain for sale", "buy this domain", "parked by", "sedo.com")):
+                        last_failure_type = "dead"
+                        last_reason = "Domain Parked / For Sale"
+                except Exception:
+                    pass
 
                 await asyncio.sleep(0.5 if attempt == 0 else 1.5)
 
@@ -128,7 +162,7 @@ class BrowserPool:
                 img.save(filepath, format='JPEG', quality=68, optimize=True)
 
                 if is_valid_screenshot(filepath):
-                    return filepath
+                    return filepath, "success", ""
                 else:
                     if os.path.exists(filepath):
                         try:
@@ -136,6 +170,14 @@ class BrowserPool:
                         except Exception:
                             pass
             except Exception as e:
+                err_text = str(e)
+                if "403" in err_text:
+                    last_failure_type = "blocked"
+                    last_reason = "HTTP 403 Forbidden"
+                else:
+                    last_failure_type = "dead"
+                    last_reason = f"Failed: {err_text[:80]}"
+
                 if context:
                     try:
                         await context.close()
@@ -143,14 +185,15 @@ class BrowserPool:
                         pass
                 await asyncio.sleep(0.5 * (attempt + 1))
 
-        return None
+        return None, last_failure_type, last_reason
 
 # Fallback one-off capture function for backward compatibility
 async def capture_async(url: str, output_dir: str, viewport_width: int = 1280, viewport_height: int = 720, quality: int = 68, timeout_seconds: int = 12) -> str | None:
     pool = BrowserPool(concurrency=1)
     await pool.start()
     try:
-        return await pool.capture_url(url, output_dir, retries=2)
+        fp, _, _ = await pool.capture_url(url, output_dir, retries=2)
+        return fp
     finally:
         await pool.close()
 
