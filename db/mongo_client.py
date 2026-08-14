@@ -135,6 +135,23 @@ def find_blocked_domains(limit: int = 0):
                     return
 
 
+def find_gambling_domains_by_date(added_date: str, limit: int = 0):
+    """Yield domains currently marked as gambling with the specified added_date."""
+    query = {"status": "gambling", "added_date": added_date}
+    cur = checked_domains().find(query)
+    if limit:
+        cur = cur.limit(limit)
+    for doc in cur:
+        domain = doc.get("domain") or doc.get("_id")
+        if domain:
+            yield {
+                "domain": domain,
+                "_id": domain,
+                "url": doc.get("url", f"https://{domain}"),
+                "added_date": doc.get("added_date"),
+            }
+
+
 # ── Result writer ─────────────────────────────────────────────────────────────
 
 from datetime import datetime, timezone, timedelta
