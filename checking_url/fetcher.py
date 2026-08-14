@@ -13,12 +13,17 @@ Two tiers:
                     comes back "blocked", and only if STEALTH_FALLBACK=true.
 """
 import asyncio
+import logging
 import os
-from datetime import datetime, timezone
+
+# Silence verbose third-party loggers to prevent breaking tqdm progress bar
+for _logger_name in ("scrapling", "curl_cffi", "urllib3", "asyncio", "playwright"):
+    _lg = logging.getLogger(_logger_name)
+    _lg.setLevel(logging.CRITICAL)
+    _lg.handlers.clear()
+    _lg.addHandler(logging.NullHandler())
 
 from scrapling.fetchers import AsyncFetcher, StealthyFetcher
-
-from db.mongo_client import get_checked, checked_domains
 
 # scrapling's AsyncFetcher generates real, matching browser headers itself when
 # impersonate/stealthy_headers are set, so we no longer hand-roll a UA list.
@@ -141,24 +146,13 @@ async def _fetch_stealth(url: str, timeout_seconds: float) -> FetchResult:
 
 
 async def fetch(url: str, domain_id: str, timeout_seconds=10, per_domain_delay=2.0, retries=2) -> FetchResult:
-    """Fetch a URL with per-domain rate limiting via Mongo last_updated_at.
+    """Fetch a URL, running fast tier first, escalating to stealth if blocked.
 
     Runs the fast (non-browser) tier first. If that tier reports the domain
     as 'blocked' and STEALTH_FALLBACK is enabled, escalates once to the
     stealth browser tier, which can actually solve Cloudflare challenges
     instead of just detecting them.
     """
-    if per_domain_delay > 0:
-        doc = get_checked(domain_id)
-        if doc and doc.get('last_updated_at'):
-            try:
-                last_dt = datetime.fromisoformat(doc['last_updated_at'])
-                elapsed = (datetime.now(timezone.utc) - last_dt).total_seconds()
-                if elapsed < per_domain_delay:
-                    await asyncio.sleep(per_domain_delay - elapsed)
-            except (ValueError, TypeError):
-                pass
-
     result = await _fetch_fast(url, timeout_seconds, retries)
 
     stealth_enabled = os.getenv("STEALTH_FALLBACK", "false").strip().lower() == "true"
@@ -166,8 +160,4 @@ async def fetch(url: str, domain_id: str, timeout_seconds=10, per_domain_delay=2
         stealth_timeout = float(os.getenv("STEALTH_TIMEOUT", 60))
         result = await _fetch_stealth(url, stealth_timeout)
 
-    checked_domains().update_one(
-        {"_id": domain_id},
-        {"$set": {"last_updated_at": datetime.now(timezone.utc).isoformat()}}
-    )
     return result

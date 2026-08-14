@@ -108,6 +108,50 @@ def find_active_domains(limit: int = 0):
             yield doc
 
 
+def find_blocked_domains(limit: int = 0):
+    """Yield domains previously marked as blocked in checked_domains or domain_Listed."""
+    seen = set()
+    cur_checked = checked_domains().find({"status": "blocked"})
+    if limit:
+        cur_checked = cur_checked.limit(limit)
+    for doc in cur_checked:
+        domain = doc.get("domain") or doc.get("_id")
+        if domain and domain not in seen:
+            seen.add(domain)
+            yield {"domain": domain, "_id": domain, "url": doc.get("url", f"https://{domain}")}
+            if limit and len(seen) >= limit:
+                return
+
+    if not limit or len(seen) < limit:
+        cur_source = source_domains().find({"active": "blocked"})
+        if limit:
+            cur_source = cur_source.limit(limit - len(seen))
+        for doc in cur_source:
+            domain = doc.get("domain") or doc.get("_id")
+            if domain and domain not in seen:
+                seen.add(domain)
+                yield {"domain": domain, "_id": domain, "url": doc.get("url", f"https://{domain}")}
+                if limit and len(seen) >= limit:
+                    return
+
+
+def find_gambling_domains_by_date(added_date: str, limit: int = 0):
+    """Yield domains currently marked as gambling with the specified added_date."""
+    query = {"status": "gambling", "added_date": added_date}
+    cur = checked_domains().find(query)
+    if limit:
+        cur = cur.limit(limit)
+    for doc in cur:
+        domain = doc.get("domain") or doc.get("_id")
+        if domain:
+            yield {
+                "domain": domain,
+                "_id": domain,
+                "url": doc.get("url", f"https://{domain}"),
+                "added_date": doc.get("added_date"),
+            }
+
+
 # ── Result writer ─────────────────────────────────────────────────────────────
 
 from datetime import datetime, timezone, timedelta
@@ -119,35 +163,46 @@ def write_result(domain: str, *, status: str, reason: list, url: str = None):
     """Upsert a classification result into checked_domains AND mark the
     source domain as processed in domain_Listed.
 
-    Both writes happen in the same function call — eliminates the crash
-    window that existed when mark_domain_processed() was a separate call
-    in runner.py after write_result().
+    Minimal document schema — only gambling domains get screenshot fields,
+    and only on first insert. No checked_at / last_updated_at bloat.
+
+    Before export:  { _id, domain, url, status, reason, added_date }
+    After capture:  + screenshot_taken, screenshot_failed_reason
+    After export:   + exported, exported_at
     """
-    now_ist = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
     today_date = datetime.now(IST).strftime("%Y-%m-%d")
-    doc = {
-        "_id": domain,
+
+    set_fields = {
         "domain": domain,
         "url": url or f"https://{domain}",
         "status": status,
         "reason": reason or [],
-        "checked_at": now_ist,
-        "screenshot_taken": False,
-        "screenshot_failed_reason": None,
+        "added_date": today_date,
     }
+
+    update = {"$set": set_fields}
+
+    # screenshot fields only for gambling sites, only on first insert
+    if status == "gambling":
+        update["$setOnInsert"] = {
+            "screenshot_taken": False,
+            "screenshot_failed_reason": None,
+        }
+
     checked_domains().update_one(
         {"_id": domain},
-        {
-            "$set": doc,
-            "$setOnInsert": {"added_date": today_date},
-        },
+        update,
         upsert=True,
     )
-    # Mark source domain as processed — bundled here so there is no gap
-    # between writing the result and stamping the domain as done.
+
+    # Sync active status in domain_Listed to match new classification.
+    # gambling / regular  ->  active = True   (site is live and classified)
+    # blocked             ->  active = "blocked"
+    # dead                ->  active = False
+    active_val = "blocked" if status == "blocked" else (False if status == "dead" else True)
     source_domains().update_one(
         {"_id": domain},
-        {"$set": {"processed": True}},
+        {"$set": {"processed": True, "active": active_val}},
     )
 
 
@@ -201,3 +256,55 @@ def seed_from_csv(path: str, active: bool = True):
             )
             inserted += 1
     print(f"[seed] {inserted} upserted into domain_Listed, {skipped} skipped")
+
+
+def seed_discovered_domains(domains: set, discovered_from: str) -> tuple[int, int]:
+    """Bulk upsert domains discovered via deep crawl into domain_Listed.
+
+    Only inserts domains NOT already present (uses $setOnInsert so existing
+    records are never overwritten). Skips empty / invalid domain strings.
+
+    Args:
+        domains:         Set of clean domain strings (e.g. {"bet365.com", ...})
+        discovered_from: The source domain that contained these links (for tracking)
+
+    Returns:
+        Tuple of (inserted_count, skipped_count)
+    """
+    if not domains:
+        return 0, 0
+
+    today_date = datetime.now(IST).strftime("%Y-%m-%d")
+    inserted = 0
+    skipped = 0
+
+    for domain in domains:
+        domain = domain.strip().lower().lstrip("www.").rstrip("/")
+        if not domain or "." not in domain:
+            skipped += 1
+            continue
+        try:
+            result = source_domains().update_one(
+                {"_id": domain},
+                {
+                    "$setOnInsert": {
+                        "_id": domain,
+                        "domain": domain,
+                        "active": True,
+                        "processed": False,
+                        "added_date": today_date,
+                        "source": "deep_crawl",
+                        "discovered_from": discovered_from,
+                    }
+                },
+                upsert=True,
+            )
+            if result.upserted_id is not None:
+                inserted += 1
+            else:
+                skipped += 1
+        except Exception:
+            skipped += 1
+
+    return inserted, skipped
+

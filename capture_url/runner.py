@@ -2,11 +2,19 @@
 capture_url/runner.py — Screenshot gambling domains from checked_domains, write results back.
 """
 import asyncio
+import logging
 import os
 from pathlib import Path
 
 from dotenv import load_dotenv
 from tqdm import tqdm
+
+# Silence verbose loggers to keep progress bar on a single line
+for _logger_name in ("scrapling", "curl_cffi", "urllib3", "asyncio", "playwright"):
+    _lg = logging.getLogger(_logger_name)
+    _lg.setLevel(logging.CRITICAL)
+    _lg.handlers.clear()
+    _lg.addHandler(logging.NullHandler())
 
 load_dotenv(dotenv_path=Path(__file__).resolve().parent.parent / ".env")
 
@@ -24,15 +32,17 @@ async def run(concurrency: int = None, limit: int = 0) -> list[str]:
         print("[capture] No gambling domains pending screenshot.")
         return []
 
+    total_pending = len(pending)
     processed_ids = [doc["_id"] for doc in pending]
-    print(f"[capture] {len(pending)} domains to screenshot.")
+    print(f"[capture] {total_pending} domains to screenshot.")
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     pool = BrowserPool(concurrency=concurrency)
     await pool.start()
 
     sem = asyncio.Semaphore(concurrency)
-    pbar = tqdm(total=len(pending), desc="Capturing", unit="domain", dynamic_ncols=True)
+    pbar = tqdm(total=total_pending, desc="Capturing", unit="domain", dynamic_ncols=True)
+    pbar.set_postfix({"Left": total_pending})
 
     run_captured = 0
     run_failed = 0
@@ -71,8 +81,7 @@ async def run(concurrency: int = None, limit: int = 0) -> list[str]:
                     },
                     "$unset": {
                         "export_status": "",
-                        "exported_at": "",
-                        "export_date": "",
+                        "exported_at": ""
                     }
                 }
             )
@@ -84,6 +93,7 @@ async def run(concurrency: int = None, limit: int = 0) -> list[str]:
                 {"$set": {"active": active_val}}
             )
         pbar.update(1)
+        pbar.set_postfix({"Left": total_pending - pbar.n})
 
     try:
         await asyncio.gather(*[process(doc) for doc in pending])

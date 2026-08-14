@@ -11,10 +11,54 @@ from docx.oxml import parse_xml
 from docx.oxml.ns import nsdecls
 
 
+def _convert_to_pdf(docx_path: str) -> str | None:
+    """Convert a .docx file to .pdf using MS Word COM with screen/web optimisation.
+
+    Uses wdExportOptimizeForOnScreen (OptimizeFor=1) — lower DPI, smaller file.
+    Requires Microsoft Word to be installed (Windows only).
+    Returns the PDF path on success, or None if conversion fails.
+    """
+    import os as _os
+    pdf_path = _os.path.splitext(docx_path)[0] + ".pdf"
+    abs_docx = _os.path.abspath(docx_path)
+    abs_pdf  = _os.path.splitext(abs_docx)[0] + ".pdf"
+    try:
+        import win32com.client as _win32
+        word = _win32.Dispatch("Word.Application")
+        word.Visible = False
+        try:
+            doc = word.Documents.Open(abs_docx)
+            doc.ExportAsFixedFormat(
+                OutputFileName=abs_pdf,
+                ExportFormat=17,       # wdExportFormatPDF
+                OpenAfterExport=False,
+                OptimizeFor=1,         # wdExportOptimizeForOnScreen — smaller file
+                Range=0,               # wdExportAllDocument
+                Item=0,                # wdExportDocumentContent
+                IncludeDocProps=True,
+                KeepIRM=True,
+                CreateBookmarks=0,     # wdExportCreateNoBookmarks
+                DocStructureTags=True,
+                BitmapMissingFonts=True,
+                UseISO19005_1=False,
+            )
+            doc.Close(False)
+        finally:
+            word.Quit()
+        return pdf_path
+    except ImportError:
+        print("[pdf] pywin32 not installed — skipping PDF conversion. Run: pip install pywin32")
+        return None
+    except Exception as e:
+        print(f"[pdf] PDF conversion failed for {docx_path}: {e}")
+        return None
+
+
 def add_clickable_hyperlink(paragraph, url: str, text: str, font_size_pt=12.0):
     """Inject an active, clickable OpenXML hyperlink run with 12pt blue underlined text."""
+    full_url = url if (url.startswith("http://") or url.startswith("https://")) else f"https://{url}"
     part = paragraph.part
-    r_id = part.relate_to(url, docx.opc.constants.RELATIONSHIP_TYPE.HYPERLINK, is_external=True)
+    r_id = part.relate_to(full_url, docx.opc.constants.RELATIONSHIP_TYPE.HYPERLINK, is_external=True)
 
     hyperlink = parse_xml(f'<w:hyperlink {nsdecls("w")} {nsdecls("r")} r:id="{r_id}"/>')
     run = parse_xml(f'<w:r {nsdecls("w")}/>')
@@ -28,6 +72,7 @@ def add_clickable_hyperlink(paragraph, url: str, text: str, font_size_pt=12.0):
     run.append(parse_xml(f'<w:t {nsdecls("w")}>{text}</w:t>'))
     hyperlink.append(run)
     paragraph._p.append(hyperlink)
+
 
 
 def build_report(entries: list[dict], output_path: str) -> str:
@@ -89,15 +134,31 @@ def build_report(entries: list[dict], output_path: str) -> str:
     return output_path
 
 
-def build_report_from_mongo(domain_ids: list = None, output_path: str = "output/capture_report.docx", cleanup: bool = True) -> str:
-    """Build Word report by querying Mongo for successfully captured domains.
+def build_report_from_mongo(
+    domain_ids: list = None,
+    output_dir: str = "output",
+    batch_size: int = 40,
+    cleanup: bool = True,
+    pdf: bool = True,
+) -> dict:
+    """Build batched Word reports from successfully captured domains in MongoDB.
 
-    Only includes entries whose screenshot JPEG actually exists on disk.
-    Cleans up temporary JPEGs after embedding them.
+    Splits all captured entries into chunks of `batch_size` (default 40).
+    For each batch, creates:
+        output_dir/batch_001/batch_001_report.docx  (+.pdf if pdf=True)
+        output_dir/batch_002/batch_002_report.docx  (+.pdf if pdf=True)
+        ...
+
+    S.No. restarts from #00001 in each batch (each batch is a standalone deliverable).
+    Cleans up temporary JPEGs from disk after all batches are written.
+
+    Returns dict with keys:
+        "docx_paths" — list of generated .docx file paths
+        "pdf_paths"  — list of generated .pdf file paths (empty if pdf=False or conversion failed)
     """
     if domain_ids is not None and len(domain_ids) == 0:
         print("[report] No domains processed in this run to generate Word report.")
-        return output_path
+        return {"docx_paths": [], "pdf_paths": []}
 
     from db.mongo_client import checked_domains
     from capture_url.screenshot import _url_to_filename
@@ -120,13 +181,39 @@ def build_report_from_mongo(domain_ids: list = None, output_path: str = "output/
             missing_ids.append(d["_id"])
 
     if missing_ids:
-        print(f"[report] Warning: {len(missing_ids)} domains marked captured but JPEG not found on disk. Skipping from Word doc.")
-        # Reconcile DB status
+        print(f"[report] Warning: {len(missing_ids)} domains marked captured but JPEG not found on disk. Skipping.")
         checked_domains().update_many({"_id": {"$in": missing_ids}}, {"$set": {"screenshot_taken": False}})
 
-    print(f"[report] Building Word document with {len(entries)} screenshots -> {output_path}")
-    res = build_report(entries, output_path)
+    if not entries:
+        print("[report] No valid screenshot entries found. No Word docs generated.")
+        return []
 
+    # Split into batches of batch_size
+    batches = [entries[i:i + batch_size] for i in range(0, len(entries), batch_size)]
+    total_batches = len(batches)
+    print(f"[report] {len(entries)} screenshots -> {total_batches} batch(es) of up to {batch_size} each.")
+
+    docx_paths = []
+    pdf_paths  = []
+
+    for batch_num, batch_entries in enumerate(batches, 1):
+        batch_label = f"batch_{batch_num:03d}"
+        batch_dir = os.path.join(output_dir, batch_label)
+        os.makedirs(batch_dir, exist_ok=True)
+
+        docx_path = os.path.join(batch_dir, f"{batch_label}_report.docx")
+        print(f"[report] Writing {batch_label}: {len(batch_entries)} screenshots -> {docx_path}")
+        build_report(batch_entries, docx_path)
+        docx_paths.append(docx_path)
+
+        if pdf:
+            print(f"[pdf]    Converting {batch_label}_report.docx -> .pdf ...")
+            pdf_path = _convert_to_pdf(docx_path)
+            if pdf_path:
+                pdf_paths.append(pdf_path)
+                print(f"[pdf]    Saved: {pdf_path}")
+
+    # Clean up all temp JPEGs only after all batches are written
     if cleanup:
         cleaned_count = 0
         for entry in entries:
@@ -139,4 +226,5 @@ def build_report_from_mongo(domain_ids: list = None, output_path: str = "output/
                     pass
         print(f"[cleanup] Auto-deleted {cleaned_count:,} temporary screenshot JPEG files from disk.")
 
-    return res
+    print(f"[report] Done. {total_batches} Word document(s) + {len(pdf_paths)} PDF(s) saved in: {output_dir}")
+    return {"docx_paths": docx_paths, "pdf_paths": pdf_paths}
