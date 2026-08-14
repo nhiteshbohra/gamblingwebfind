@@ -669,6 +669,136 @@ async def searxng_crawl_keyword(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  ENGINE 4 — Yahoo Search (direct HTML scraping via curl_cffi GET)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _yahoo_get_sync(url: str, impersonate: str = "chrome124") -> tuple[int, str]:
+    """GET request to Yahoo Search using curl_cffi."""
+    try:
+        from curl_cffi import requests as cffi_requests
+        resp = cffi_requests.get(
+            url,
+            impersonate=impersonate,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/124.0.0.0 Safari/537.36"
+                ),
+                "Accept-Language": "en-IN,en;q=0.9",
+            },
+            timeout=30,
+        )
+        return resp.status_code, resp.text
+    except ImportError:
+        import urllib.request
+        req = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/124.0.0.0 Safari/537.36"
+                )
+            },
+        )
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return r.status, r.read().decode("utf-8", errors="ignore")
+    except Exception as e:
+        return 0, str(e)
+
+
+async def yahoo_crawl_keyword(keyword: str, max_pages_per_var: int = 150) -> list[str]:
+    """
+    Scrape Yahoo Search for a single keyword across multiple query variations.
+    Paginates using b=1, b=11, b=21, ... up to 100+ pages per variation.
+    Returns list of target URLs.
+    """
+    import urllib.parse
+    print(f"\n  [Yahoo] Starting Yahoo Search crawl for: '{keyword}'")
+
+    variations = [
+        keyword,
+        f"{keyword} site:.com",
+        f"{keyword} site:.in",
+        f"{keyword} site:.net",
+        f"{keyword} site:.org",
+        f"{keyword} online",
+        f"{keyword} real money",
+        f"{keyword} login",
+    ]
+
+    all_urls: list[str] = []
+    seen_urls: set[str] = set()
+
+    for v_idx, query in enumerate(variations, 1):
+        page = 1
+        stagnant_pages = 0
+        print(f"  [Yahoo] '{keyword}' | variation {v_idx}/{len(variations)}: query='{query}'")
+
+        while page <= max_pages_per_var:
+            b_offset = (page - 1) * 10 + 1
+            encoded_query = urllib.parse.quote(query)
+            url = f"https://search.yahoo.com/search?p={encoded_query}&b={b_offset}"
+
+            try:
+                status, html = await asyncio.to_thread(_yahoo_get_sync, url)
+                if status != 200:
+                    print(f"  [Yahoo] '{keyword}' | v{v_idx} p{page} | HTTP {status} -- skipping variation")
+                    break
+
+                soup = BeautifulSoup(html, "html.parser")
+                raw_hrefs: list[str] = []
+                for a in soup.find_all("a", href=True):
+                    href = a["href"]
+                    if "/RU=" in href:
+                        try:
+                            ru_part = href.split("/RU=")[1].split("/RK=")[0]
+                            clean_target = urllib.parse.unquote(ru_part)
+                            if clean_target.startswith("http"):
+                                raw_hrefs.append(clean_target)
+                        except Exception:
+                            pass
+                    elif href.startswith("http") and not any(
+                        domain in href
+                        for domain in [
+                            "yahoo.com",
+                            "yimg.com",
+                            "yahoo.net",
+                            "search.yahoo",
+                        ]
+                    ):
+                        raw_hrefs.append(href)
+
+                new_on_page = 0
+                for u in raw_hrefs:
+                    if u not in seen_urls:
+                        seen_urls.add(u)
+                        all_urls.append(u)
+                        new_on_page += 1
+
+                print(f"  [Yahoo] '{keyword}' | v{v_idx} p{page} (b={b_offset}) -> {new_on_page} new URLs | total: {len(all_urls)}")
+
+                if new_on_page == 0:
+                    stagnant_pages += 1
+                    if stagnant_pages >= 3:
+                        print(f"  [Yahoo] '{keyword}' | v{v_idx} exhausted -- next variation")
+                        break
+                else:
+                    stagnant_pages = 0
+
+                page += 1
+                await asyncio.sleep(1.0)
+
+            except Exception as e:
+                print(f"  [Yahoo] '{keyword}' | v{v_idx} p{page} | error: {e}")
+                break
+
+    print(f"  [Yahoo] '{keyword}' DONE -- {len(all_urls)} URLs")
+    return all_urls
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  MAIN CRAWL ORCHESTRATOR — combines all engines per keyword
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -722,7 +852,7 @@ async def crawl_keyword_all_engines(
         except Exception as e:
             print(f"  [DDG] Error on '{keyword}': {e}")
 
-    # ── Engine 2: Playwright/Chromium (Google) ────────────────────────────────
+    # ── Engine 2: Playwright/Chromium (Bing) ──────────────────────────────────
     if USE_PLAYWRIGHT:
         try:
             pw_urls = await asyncio.to_thread(playwright_crawl_keyword_sync, keyword)
@@ -745,6 +875,19 @@ async def crawl_keyword_all_engines(
             raise
         except Exception as e:
             print(f"  [SearXNG] Error on '{keyword}': {e}")
+
+    # ── Engine 4: Yahoo Search ────────────────────────────────────────────────
+    try:
+        yh_urls = await yahoo_crawl_keyword(keyword)
+        all_raw_urls.extend(yh_urls)
+        process_urls(yh_urls)
+        print(f"  [Yahoo] Contributed {len(yh_urls)} URLs for '{keyword}'")
+    except KeyboardInterrupt:
+        raise
+    except Exception as e:
+        print(f"  [Yahoo] Error on '{keyword}': {e}")
+
+    # ── Final flush of remaining unsaved domains ──────────────────────────────
 
     # ── Final flush of remaining unsaved domains ──────────────────────────────
     if unsaved_domains:

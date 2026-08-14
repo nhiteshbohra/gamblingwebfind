@@ -113,18 +113,29 @@ def run_capture_url():
     run_ts = datetime.now(IST).strftime("%Y%m%d_%H%M%S")
     conc = int(os.getenv("SCREENSHOT_CONCURRENCY", 15))
     limit = int(os.getenv("CAPTURE_LIMIT", 0))
+    batch_size = int(os.getenv("EXPORT_BATCH_SIZE", 40))
+
     processed_ids = asyncio.run(capture_run(concurrency=conc, limit=limit))
 
     if not processed_ids:
         print("[+] capture_url: No gambling domains pending screenshot.")
         return
 
-    xlsx_path = f"output/capture_results_{run_ts}.xlsx"
-    docx_path = f"output/capture_report_{run_ts}.docx"
+    # All output goes into a timestamped run folder: output/<timestamp>/
+    run_dir = os.path.join("output", run_ts)
 
-    export_capture_workbook(domain_ids=processed_ids, output_path=xlsx_path)
-    build_report_from_mongo(domain_ids=processed_ids, output_path=docx_path, cleanup=True)
-    print(f"[+] capture_url complete. Saved Excel: {xlsx_path}, Word: {docx_path}")
+    print(f"\n[+] Exporting {len(processed_ids)} domains in batches of {batch_size} -> {run_dir}/")
+
+    xlsx_result = export_capture_workbook(domain_ids=processed_ids, output_dir=run_dir, batch_size=batch_size)
+    report_result = build_report_from_mongo(domain_ids=processed_ids, output_dir=run_dir, batch_size=batch_size, cleanup=True, pdf=True)
+
+    print(f"\n[+] capture_url complete.")
+    print(f"    Run folder  : {os.path.abspath(run_dir)}")
+    print(f"    Batches     : {xlsx_result['batches']} (up to {batch_size} domains each)")
+    print(f"    Captured    : {xlsx_result['captured']} | Failed: {xlsx_result['failed']}")
+    print(f"    Excel files : {len([f for f in xlsx_result['files'] if f.endswith('.xlsx')])}")
+    print(f"    Word files  : {len(report_result['docx_paths'])}")
+    print(f"    PDF files   : {len(report_result['pdf_paths'])}")
 
 
 def interactive_menu():

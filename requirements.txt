@@ -11,3 +11,4 @@ playwright>=1.40.0
 Pillow>=10.0.0
 pymongo>=4.6.0
 python-dotenv>=1.0.0
+docx2pdf>=0.1.8

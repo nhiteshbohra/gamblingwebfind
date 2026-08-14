@@ -81,8 +81,7 @@ async def run(concurrency: int = None, limit: int = 0) -> list[str]:
                     },
                     "$unset": {
                         "export_status": "",
-                        "exported_at": "",
-                        "export_date": "",
+                        "exported_at": ""
                     }
                 }
             )
