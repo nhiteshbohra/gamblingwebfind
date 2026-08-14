@@ -1,10 +1,21 @@
+import os
+from pathlib import Path
+from dotenv import load_dotenv
 from pymongo import MongoClient
 
-client = MongoClient("mongodb://localhost:27017/")
-db = client["gamblingsites"]
+load_dotenv(dotenv_path=Path(__file__).resolve().parent.parent.parent / ".env")
 
-col_source = db["domain_Listed"]
-col_checked = db["checked_domains"]
+MONGO_URI   = os.getenv("MONGO_URI", "mongodb://localhost:27017/")
+DB_NAME     = os.getenv("MONGO_DB_NAME", "gamblingsites")
+COL_SOURCE  = os.getenv("MONGO_COLLECTION", "domain_Listed")
+COL_CHECKED = os.getenv("CHECKED_COLLECTION", "checked_domains")
+
+client = MongoClient(MONGO_URI)
+db = client[DB_NAME]
+
+col_source  = db[COL_SOURCE]
+col_checked = db[COL_CHECKED]
+
 
 print("=" * 60)
 print("       DATABASE SYNC: domain_Listed <-> checked_domains")

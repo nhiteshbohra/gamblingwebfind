@@ -5,18 +5,26 @@ Usage:
     python project_sup/helping_code/compare_dbs.py
 """
 import os
+from pathlib import Path
+from dotenv import load_dotenv
 from pymongo import MongoClient
+
+load_dotenv(dotenv_path=Path(__file__).resolve().parent.parent.parent / ".env")
 
 # Base MongoDB URI
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017/")
 
-# Database 1 (Base DB)
-DB1_NAME = "gamblingsitetry"
-COL1_NAME = "domain_Listed"
+# Database 1 — primary DB (from .env MONGO_DB_NAME)
+DB1_NAME  = os.getenv("MONGO_DB_NAME", "gamblingsitetry")
+COL1_NAME = os.getenv("MONGO_COLLECTION", "domain_Listed")
 
-# Database 2 (Target DB with new crawl data)
-DB2_NAME = "gamblingsites"
-COL2_NAME = "domain_Listed"
+# Database 2 — secondary/comparison DB (from .env MONGO_DB2_NAME)
+DB2_NAME  = os.getenv("MONGO_DB2_NAME", "gamblingsites")
+COL2_NAME = os.getenv("MONGO_COLLECTION", "domain_Listed")
+
+print(f"[+] DB1 (primary):    {DB1_NAME}")
+print(f"[+] DB2 (comparison): {DB2_NAME}")
+
 
 
 def _ask_yes_no(prompt: str) -> bool:

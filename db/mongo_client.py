@@ -163,35 +163,35 @@ def write_result(domain: str, *, status: str, reason: list, url: str = None):
     """Upsert a classification result into checked_domains AND mark the
     source domain as processed in domain_Listed.
 
-    Both writes happen in the same function call — eliminates the crash
-    window that existed when mark_domain_processed() was a separate call
-    in runner.py after write_result().
+    Minimal document schema — only gambling domains get screenshot fields,
+    and only on first insert. No checked_at / last_updated_at bloat.
 
-    On re-check (domain already exists), screenshot_taken is preserved so
-    a previously-captured screenshot is not silently discarded.
+    Before export:  { _id, domain, url, status, reason, added_date }
+    After capture:  + screenshot_taken, screenshot_failed_reason
+    After export:   + exported, exported_at
     """
-    now_ist = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
     today_date = datetime.now(IST).strftime("%Y-%m-%d")
 
-    # Always overwrite classification fields and added_date (so re-classified domains
-    # get today's date — the aggregation by added_date stays accurate).
-    # screenshot_taken / screenshot_failed_reason are only set on first insert.
+    set_fields = {
+        "domain": domain,
+        "url": url or f"https://{domain}",
+        "status": status,
+        "reason": reason or [],
+        "added_date": today_date,
+    }
+
+    update = {"$set": set_fields}
+
+    # screenshot fields only for gambling sites, only on first insert
+    if status == "gambling":
+        update["$setOnInsert"] = {
+            "screenshot_taken": False,
+            "screenshot_failed_reason": None,
+        }
+
     checked_domains().update_one(
         {"_id": domain},
-        {
-            "$set": {
-                "domain": domain,
-                "url": url or f"https://{domain}",
-                "status": status,
-                "reason": reason or [],
-                "checked_at": now_ist,
-                "added_date": today_date,
-            },
-            "$setOnInsert": {
-                "screenshot_taken": False,
-                "screenshot_failed_reason": None,
-            },
-        },
+        update,
         upsert=True,
     )
 
@@ -256,3 +256,55 @@ def seed_from_csv(path: str, active: bool = True):
             )
             inserted += 1
     print(f"[seed] {inserted} upserted into domain_Listed, {skipped} skipped")
+
+
+def seed_discovered_domains(domains: set, discovered_from: str) -> tuple[int, int]:
+    """Bulk upsert domains discovered via deep crawl into domain_Listed.
+
+    Only inserts domains NOT already present (uses $setOnInsert so existing
+    records are never overwritten). Skips empty / invalid domain strings.
+
+    Args:
+        domains:         Set of clean domain strings (e.g. {"bet365.com", ...})
+        discovered_from: The source domain that contained these links (for tracking)
+
+    Returns:
+        Tuple of (inserted_count, skipped_count)
+    """
+    if not domains:
+        return 0, 0
+
+    today_date = datetime.now(IST).strftime("%Y-%m-%d")
+    inserted = 0
+    skipped = 0
+
+    for domain in domains:
+        domain = domain.strip().lower().lstrip("www.").rstrip("/")
+        if not domain or "." not in domain:
+            skipped += 1
+            continue
+        try:
+            result = source_domains().update_one(
+                {"_id": domain},
+                {
+                    "$setOnInsert": {
+                        "_id": domain,
+                        "domain": domain,
+                        "active": True,
+                        "processed": False,
+                        "added_date": today_date,
+                        "source": "deep_crawl",
+                        "discovered_from": discovered_from,
+                    }
+                },
+                upsert=True,
+            )
+            if result.upserted_id is not None:
+                inserted += 1
+            else:
+                skipped += 1
+        except Exception:
+            skipped += 1
+
+    return inserted, skipped
+

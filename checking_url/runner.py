@@ -20,9 +20,10 @@ for _logger_name in ("scrapling", "curl_cffi", "urllib3", "asyncio", "playwright
 
 load_dotenv(dotenv_path=Path(__file__).resolve().parent.parent / ".env")
 
-from db.mongo_client import find_active_domains, find_blocked_domains, write_result, checked_domains, get_db
+from db.mongo_client import find_active_domains, find_blocked_domains, write_result, checked_domains, get_db, seed_discovered_domains
 from checking_url.fetcher import fetch
 from checking_url.classifier import load_keywords, classify
+from checking_url.deep_crawl import extract_outbound_domains, MIN_OUTBOUND_LINKS
 
 
 async def run(concurrency: int = None, limit: int = 0, mode: str = "new"):
@@ -57,6 +58,7 @@ async def run(concurrency: int = None, limit: int = 0, mode: str = "new"):
         "regular": 0,
         "blocked": 0,
         "dead": 0,
+        "deep_crawl_new": 0,
     }
 
     async def process(doc):
@@ -84,6 +86,15 @@ async def run(concurrency: int = None, limit: int = 0, mode: str = "new"):
             write_result(domain, url=url, status=status, reason=matched_reasons)
             run_stats[status] += 1
 
+            # ── Deep crawl: extract outbound gambling links from gambling pages ──
+            if is_gambling and result.html:
+                outbound = extract_outbound_domains(result.html, source_url=url)
+                if len(outbound) >= MIN_OUTBOUND_LINKS:
+                    inserted, _ = seed_discovered_domains(outbound, discovered_from=domain)
+                    if inserted:
+                        run_stats["deep_crawl_new"] += inserted
+            # ─────────────────────────────────────────────────────────────────────
+
         pbar.update(1)
         pbar.set_postfix({"Left": total_pending - pbar.n})
 
@@ -100,6 +111,8 @@ async def run(concurrency: int = None, limit: int = 0, mode: str = "new"):
     blocked_label = "Still Blocked (403 / WAF)" if mode == "blocked" else "Blocked (403 / WAF)"
     print(f"  * {blocked_label:<30}: {run_stats['blocked']:,}")
     print(f"  * Dead / Unreachable           : {run_stats['dead']:,}")
+    if run_stats["deep_crawl_new"]:
+        print(f"  * New Domains via Deep Crawl   : {run_stats['deep_crawl_new']:,}  [queued for next run]")
     print("=" * 60)
 
     return run_stats
