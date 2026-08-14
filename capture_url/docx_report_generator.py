@@ -56,8 +56,9 @@ def _convert_to_pdf(docx_path: str) -> str | None:
 
 def add_clickable_hyperlink(paragraph, url: str, text: str, font_size_pt=12.0):
     """Inject an active, clickable OpenXML hyperlink run with 12pt blue underlined text."""
+    full_url = url if (url.startswith("http://") or url.startswith("https://")) else f"https://{url}"
     part = paragraph.part
-    r_id = part.relate_to(url, docx.opc.constants.RELATIONSHIP_TYPE.HYPERLINK, is_external=True)
+    r_id = part.relate_to(full_url, docx.opc.constants.RELATIONSHIP_TYPE.HYPERLINK, is_external=True)
 
     hyperlink = parse_xml(f'<w:hyperlink {nsdecls("w")} {nsdecls("r")} r:id="{r_id}"/>')
     run = parse_xml(f'<w:r {nsdecls("w")}/>')
@@ -71,6 +72,7 @@ def add_clickable_hyperlink(paragraph, url: str, text: str, font_size_pt=12.0):
     run.append(parse_xml(f'<w:t {nsdecls("w")}>{text}</w:t>'))
     hyperlink.append(run)
     paragraph._p.append(hyperlink)
+
 
 
 def build_report(entries: list[dict], output_path: str) -> str:

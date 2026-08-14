@@ -8,9 +8,51 @@ Two functions:
 import os
 from datetime import datetime, timezone, timedelta
 import pandas as pd
+import openpyxl
+from openpyxl.styles import Font
 from db.mongo_client import checked_domains
 
 IST = timezone(timedelta(hours=5, minutes=30))
+HYPERLINK_FONT = Font(color="0000FF", underline="single")
+
+
+def _make_excel_urls_clickable(workbook_path: str):
+    """Format Domain and URL columns in all sheets of an Excel file to be clickable hyperlinks."""
+    try:
+        wb = openpyxl.load_workbook(workbook_path)
+        for sheetname in wb.sheetnames:
+            ws = wb[sheetname]
+            url_col_idx = None
+            domain_col_idx = None
+
+            for col_idx, cell in enumerate(ws[1], 1):
+                col_name = str(cell.value or "").strip().lower()
+                if col_name == "url":
+                    url_col_idx = col_idx
+                elif col_name == "domain":
+                    domain_col_idx = col_idx
+
+            if url_col_idx:
+                for row in range(2, ws.max_row + 1):
+                    cell = ws.cell(row=row, column=url_col_idx)
+                    val = str(cell.value or "").strip()
+                    if val:
+                        target = val if (val.startswith("http://") or val.startswith("https://")) else f"https://{val}"
+                        cell.hyperlink = target
+                        cell.font = HYPERLINK_FONT
+
+            if domain_col_idx:
+                for row in range(2, ws.max_row + 1):
+                    cell = ws.cell(row=row, column=domain_col_idx)
+                    val = str(cell.value or "").strip()
+                    if val:
+                        target = val if (val.startswith("http://") or val.startswith("https://")) else f"https://{val}"
+                        cell.hyperlink = target
+                        cell.font = HYPERLINK_FONT
+
+        wb.save(workbook_path)
+    except Exception as e:
+        print(f"[export] Warning: Could not apply hyperlinks to {workbook_path}: {e}")
 
 
 def _to_df(docs):
@@ -38,6 +80,8 @@ def export_verify_workbook(output_path: str = "output/verify_results.xlsx") -> d
     with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
         for sheet_name, docs in sheets.items():
             _to_df(docs).to_excel(writer, sheet_name=sheet_name, index=False)
+
+    _make_excel_urls_clickable(output_path)
 
     all_ids = [d["_id"] for docs in sheets.values() for d in docs]
     if all_ids:
@@ -120,6 +164,8 @@ def export_capture_workbook(
         with pd.ExcelWriter(xlsx_path, engine='openpyxl') as writer:
             pd.DataFrame(cap_rows).to_excel(writer, sheet_name='Captured', index=False)
 
+        _make_excel_urls_clickable(xlsx_path)
+
         # Mark these domains as exported in MongoDB
         cap_ids = [d["_id"] for d in batch_docs]
         if cap_ids:
@@ -145,6 +191,8 @@ def export_capture_workbook(
         failed_xlsx = os.path.join(output_dir, "failed_domains.xlsx")
         with pd.ExcelWriter(failed_xlsx, engine='openpyxl') as writer:
             pd.DataFrame(fail_rows).to_excel(writer, sheet_name='Failed', index=False)
+
+        _make_excel_urls_clickable(failed_xlsx)
         print(f"[export] Failed domains ({len(failed)}) -> {failed_xlsx}")
         generated_files.append(failed_xlsx)
 
@@ -161,4 +209,5 @@ def export_capture_workbook(
         "batches": total_batches,
         "files": generated_files,
     }
+
 

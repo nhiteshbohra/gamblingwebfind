@@ -33,12 +33,35 @@ except Exception:
     pass
 
 try:
+    import docx
     from docx import Document
     from docx.shared import Inches, Pt, RGBColor
     from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.oxml import parse_xml
+    from docx.oxml.ns import nsdecls
 except ImportError:
     print("Error: 'python-docx' library is missing. Install it using: pip install python-docx")
     sys.exit(1)
+
+
+def add_clickable_hyperlink(paragraph, url: str, text: str, font_size_pt=11.0):
+    """Inject an active, clickable OpenXML hyperlink run into Word paragraph."""
+    full_url = url if (url.startswith("http://") or url.startswith("https://")) else f"https://{url}"
+    part = paragraph.part
+    r_id = part.relate_to(full_url, docx.opc.constants.RELATIONSHIP_TYPE.HYPERLINK, is_external=True)
+
+    hyperlink = parse_xml(f'<w:hyperlink {nsdecls("w")} {nsdecls("r")} r:id="{r_id}"/>')
+    run = parse_xml(f'<w:r {nsdecls("w")}/>')
+
+    rPr = parse_xml(f'<w:rPr {nsdecls("w")}/>')
+    rPr.append(parse_xml(f'<w:rFonts {nsdecls("w")} w:ascii="Calibri" w:hAnsi="Calibri"/>'))
+    rPr.append(parse_xml(f'<w:color {nsdecls("w")} w:val="0066CC"/>'))
+    rPr.append(parse_xml(f'<w:u {nsdecls("w")} w:val="single"/>'))
+    rPr.append(parse_xml(f'<w:sz {nsdecls("w")} w:val="{int(font_size_pt * 2)}"/>'))
+    run.append(rPr)
+    run.append(parse_xml(f'<w:t {nsdecls("w")}>{text}</w:t>'))
+    hyperlink.append(run)
+    paragraph._p.append(hyperlink)
 
 
 def clean_domain(url_or_domain: str) -> str:
@@ -186,17 +209,15 @@ def create_single_docx_file(
         p_hdr.paragraph_format.space_after = Pt(2)
         p_hdr.paragraph_format.line_spacing = 1.15
 
-        run_sno = p_hdr.add_run(f"TARGET #{item['sno']:05d}  |  ")
+        run_sno = p_hdr.add_run(f"TARGET #{item['sno']:05d}  |  URL: ")
         run_sno.bold = True
         run_sno.font.size = Pt(11)
         run_sno.font.name = "Calibri"
         run_sno.font.color.rgb = RGBColor(15, 32, 67)
 
-        run_url = p_hdr.add_run(f"URL: {item['url']}")
-        run_url.bold = True
-        run_url.font.size = Pt(11)
-        run_url.font.name = "Calibri"
-        run_url.font.color.rgb = RGBColor(0, 102, 204)
+        url_str = item['url']
+        add_clickable_hyperlink(p_hdr, url=url_str, text=url_str, font_size_pt=11.0)
+
 
         if item["image_rel"] and item["image_rel"] in z_archive.namelist():
             try:
