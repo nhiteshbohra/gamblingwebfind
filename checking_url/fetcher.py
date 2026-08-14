@@ -13,8 +13,16 @@ Two tiers:
                     comes back "blocked", and only if STEALTH_FALLBACK=true.
 """
 import asyncio
+import logging
 import os
 from datetime import datetime, timezone
+
+# Silence verbose third-party loggers to prevent breaking tqdm progress bar
+for _logger_name in ("scrapling", "curl_cffi", "urllib3", "asyncio", "playwright"):
+    _lg = logging.getLogger(_logger_name)
+    _lg.setLevel(logging.CRITICAL)
+    _lg.handlers.clear()
+    _lg.addHandler(logging.NullHandler())
 
 from scrapling.fetchers import AsyncFetcher, StealthyFetcher
 

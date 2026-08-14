@@ -108,6 +108,33 @@ def find_active_domains(limit: int = 0):
             yield doc
 
 
+def find_blocked_domains(limit: int = 0):
+    """Yield domains previously marked as blocked in checked_domains or domain_Listed."""
+    seen = set()
+    cur_checked = checked_domains().find({"status": "blocked"})
+    if limit:
+        cur_checked = cur_checked.limit(limit)
+    for doc in cur_checked:
+        domain = doc.get("domain") or doc.get("_id")
+        if domain and domain not in seen:
+            seen.add(domain)
+            yield {"domain": domain, "_id": domain, "url": doc.get("url", f"https://{domain}")}
+            if limit and len(seen) >= limit:
+                return
+
+    if not limit or len(seen) < limit:
+        cur_source = source_domains().find({"active": "blocked"})
+        if limit:
+            cur_source = cur_source.limit(limit - len(seen))
+        for doc in cur_source:
+            domain = doc.get("domain") or doc.get("_id")
+            if domain and domain not in seen:
+                seen.add(domain)
+                yield {"domain": domain, "_id": domain, "url": doc.get("url", f"https://{domain}")}
+                if limit and len(seen) >= limit:
+                    return
+
+
 # ── Result writer ─────────────────────────────────────────────────────────────
 
 from datetime import datetime, timezone, timedelta
@@ -122,32 +149,43 @@ def write_result(domain: str, *, status: str, reason: list, url: str = None):
     Both writes happen in the same function call — eliminates the crash
     window that existed when mark_domain_processed() was a separate call
     in runner.py after write_result().
+
+    On re-check (domain already exists), screenshot_taken is preserved so
+    a previously-captured screenshot is not silently discarded.
     """
     now_ist = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
     today_date = datetime.now(IST).strftime("%Y-%m-%d")
-    doc = {
-        "_id": domain,
-        "domain": domain,
-        "url": url or f"https://{domain}",
-        "status": status,
-        "reason": reason or [],
-        "checked_at": now_ist,
-        "screenshot_taken": False,
-        "screenshot_failed_reason": None,
-    }
+
+    # Always overwrite classification fields and added_date (so re-classified domains
+    # get today's date — the aggregation by added_date stays accurate).
+    # screenshot_taken / screenshot_failed_reason are only set on first insert.
     checked_domains().update_one(
         {"_id": domain},
         {
-            "$set": doc,
-            "$setOnInsert": {"added_date": today_date},
+            "$set": {
+                "domain": domain,
+                "url": url or f"https://{domain}",
+                "status": status,
+                "reason": reason or [],
+                "checked_at": now_ist,
+                "added_date": today_date,
+            },
+            "$setOnInsert": {
+                "screenshot_taken": False,
+                "screenshot_failed_reason": None,
+            },
         },
         upsert=True,
     )
-    # Mark source domain as processed — bundled here so there is no gap
-    # between writing the result and stamping the domain as done.
+
+    # Sync active status in domain_Listed to match new classification.
+    # gambling / regular  ->  active = True   (site is live and classified)
+    # blocked             ->  active = "blocked"
+    # dead                ->  active = False
+    active_val = "blocked" if status == "blocked" else (False if status == "dead" else True)
     source_domains().update_one(
         {"_id": domain},
-        {"$set": {"processed": True}},
+        {"$set": {"processed": True, "active": active_val}},
     )
 
 

@@ -77,29 +77,47 @@ def run_keywords_search():
         print("\n[!] keywordsindomainfetch interrupted by user.")
 
 
-def run_checking_url():
+def ask_checking_mode() -> str:
+    """Prompt user to choose whether to check new unprocessed URLs or re-check blocked URLs."""
+    print("\nSelect checking target:")
+    print("  1. Check new unprocessed URLs (default)")
+    print("  2. Re-check blocked URLs (403 / WAF)")
+    sub_choice = input("Enter choice (1-2) [default: 1]: ").strip()
+    if sub_choice == "2":
+        return "blocked"
+    return "new"
+
+
+def run_checking_url(mode: str = None):
     print("\n--- checking_url ---")
-    from checking_url.url_checker import process_domains
+    if mode is None:
+        mode = ask_checking_mode()
 
-    run_ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    xlsx_path = f"output/checking_results_{run_ts}.xlsx"
+    from checking_url.runner import run as check_run
 
-    concurrency = int(os.getenv("CHECK_CONCURRENCY", 50))
+    concurrency = int(os.getenv("CHECK_CONCURRENCY", os.getenv("MAX_CONCURRENT_FETCHES", 20)))
     limit = int(os.getenv("CHECK_LIMIT", 0))
 
-    summary = asyncio.run(process_domains(concurrency=concurrency, limit=limit, output_excel=xlsx_path))
-    print(f"[+] checking_url complete. Summary: {summary}")
+    summary = asyncio.run(check_run(concurrency=concurrency, limit=limit, mode=mode))
+    if summary:
+        print("[+] checking_url complete.")
 
 
 def run_capture_url():
     print("\n--- capture_url ---")
-    from capture_url.screenshot import process_domains as capture_run
+    from capture_url.runner import run as capture_run
     from capture_url.excel_exporter import export_capture_workbook
     from capture_url.docx_report_generator import build_report_from_mongo
 
-    run_ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    IST = timezone(timedelta(hours=5, minutes=30))
+    run_ts = datetime.now(IST).strftime("%Y%m%d_%H%M%S")
     conc = int(os.getenv("SCREENSHOT_CONCURRENCY", 15))
-    processed_ids = asyncio.run(capture_run(concurrency=conc, limit=0))
+    limit = int(os.getenv("CAPTURE_LIMIT", 0))
+    processed_ids = asyncio.run(capture_run(concurrency=conc, limit=limit))
+
+    if not processed_ids:
+        print("[+] capture_url: No gambling domains pending screenshot.")
+        return
 
     xlsx_path = f"output/capture_results_{run_ts}.xlsx"
     docx_path = f"output/capture_report_{run_ts}.docx"
@@ -118,11 +136,10 @@ def interactive_menu():
         print("1. keywordsindomainfetch")
         print("2. checking_url")
         print("3. capture_url")
-        print("4. checking_url + capture_url")
-        print("5. Exit")
+        print("4. Exit")
         print("=" * 55)
 
-        choice = input("Select an option (0-5): ").strip()
+        choice = input("Select an option (0-4): ").strip()
 
         if choice == "0":
             run_searxng_search()
@@ -132,14 +149,11 @@ def interactive_menu():
             run_checking_url()
         elif choice == "3":
             run_capture_url()
-        elif choice == "4":
-            run_checking_url()
-            run_capture_url()
-        elif choice == "5" or choice.lower() in ("exit", "q", "quit"):
+        elif choice == "4" or choice.lower() in ("exit", "q", "quit"):
             print("Exiting.")
             break
         else:
-            print("[!] Invalid option. Please enter 0, 1, 2, 3, 4, or 5.")
+            print("[!] Invalid option. Please enter 0, 1, 2, 3, or 4.")
 
 
 def main():

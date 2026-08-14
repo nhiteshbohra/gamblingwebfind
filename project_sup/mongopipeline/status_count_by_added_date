@@ -1,0 +1,18 @@
+[
+  {
+    $match: {
+      status: { $exists: true, $ne: null },
+      added_date: "2026-08-14"
+    }
+  },
+  {
+    $group: {
+      _id: "$status",
+      count: { $sum: 1 },
+      domains: { $push: "$domain" }
+    }
+  },
+  {
+    $sort: { count: -1 }
+  }
+]
