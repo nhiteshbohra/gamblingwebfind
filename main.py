@@ -60,7 +60,10 @@ def run_keywords_search():
         print("[!] No keywords provided. Returning to menu.")
         return
 
-    kw_list = [k.strip() for k in keywords_raw.split(",") if k.strip()]
+    if "," in keywords_raw:
+        kw_list = [k.strip() for k in keywords_raw.split(",") if k.strip()]
+    else:
+        kw_list = [k.strip() for k in keywords_raw.split() if k.strip()]
     if not kw_list:
         print("[!] Invalid keywords provided. Returning to menu.")
         return
@@ -113,7 +116,27 @@ def run_capture_url():
     run_ts = datetime.now(IST).strftime("%Y%m%d_%H%M%S")
     conc = int(os.getenv("SCREENSHOT_CONCURRENCY", 15))
     limit = int(os.getenv("CAPTURE_LIMIT", 0))
-    batch_size = int(os.getenv("EXPORT_BATCH_SIZE", 40))
+    default_batch_size = int(os.getenv("EXPORT_BATCH_SIZE", 40))
+
+    # Ask user for export preference before or during run
+    print("\n" + "=" * 55)
+    print("           SELECT REPORT EXPORT FORMAT           ")
+    print("=" * 55)
+    print("1. Single Combined Files (1 Word, 1 PDF, 1 Excel)")
+    print("2. Batched Files (Split into batch folders of N items)")
+    print("=" * 55)
+    export_choice = input("Select export format (1-2) [default: 1]: ").strip()
+
+    single_file = (export_choice != "2")
+    batch_size = default_batch_size
+
+    if export_choice == "2":
+        bs_input = input(f"Enter batch size (e.g. 20, 40, 50) [default: {default_batch_size}]: ").strip()
+        if bs_input.isdigit() and int(bs_input) > 0:
+            batch_size = int(bs_input)
+    else:
+        batch_size = 0
+
 
     processed_ids = asyncio.run(capture_run(concurrency=conc, limit=limit))
 
@@ -124,18 +147,36 @@ def run_capture_url():
     # All output goes into a timestamped run folder: output/<timestamp>/
     run_dir = os.path.join("output", run_ts)
 
-    print(f"\n[+] Exporting {len(processed_ids)} domains in batches of {batch_size} -> {run_dir}/")
+    if single_file:
+        print(f"\n[+] Exporting {len(processed_ids)} domains to Single Combined Word, PDF & Excel -> {run_dir}/")
+    else:
+        print(f"\n[+] Exporting {len(processed_ids)} domains in batches of {batch_size} -> {run_dir}/")
 
-    xlsx_result = export_capture_workbook(domain_ids=processed_ids, output_dir=run_dir, batch_size=batch_size)
-    report_result = build_report_from_mongo(domain_ids=processed_ids, output_dir=run_dir, batch_size=batch_size, cleanup=True, pdf=True)
+    xlsx_result = export_capture_workbook(
+        domain_ids=processed_ids,
+        output_dir=run_dir,
+        batch_size=batch_size,
+        single_file=single_file,
+    )
+    report_result = build_report_from_mongo(
+        domain_ids=processed_ids,
+        output_dir=run_dir,
+        batch_size=batch_size,
+        cleanup=True,
+        pdf=True,
+        single_file=single_file,
+    )
+
 
     print(f"\n[+] capture_url complete.")
     print(f"    Run folder  : {os.path.abspath(run_dir)}")
-    print(f"    Batches     : {xlsx_result['batches']} (up to {batch_size} domains each)")
+    if not single_file:
+        print(f"    Batches     : {xlsx_result['batches']} (up to {batch_size} domains each)")
     print(f"    Captured    : {xlsx_result['captured']} | Failed: {xlsx_result['failed']}")
     print(f"    Excel files : {len([f for f in xlsx_result['files'] if f.endswith('.xlsx')])}")
     print(f"    Word files  : {len(report_result['docx_paths'])}")
     print(f"    PDF files   : {len(report_result['pdf_paths'])}")
+
 
 
 def interactive_menu():

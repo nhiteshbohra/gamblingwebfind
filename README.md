@@ -219,6 +219,96 @@ Takes full screenshots of every confirmed gambling domain and generates Word + E
 
 ---
 
+## Menu Options — Detailed
+
+### Option 0 — SearXNG Keyword Search *(Stage 0)*
+
+Searches keywords on real search engines (Google, Bing, DuckDuckGo) via SearXNG running in Docker, extracts all result domains, and saves them to MongoDB.
+
+**What happens automatically:**
+1. Checks if SearXNG is already running on port 8080
+2. If not → runs `docker-compose up -d` from `keywordssearch/` folder
+3. Waits up to 30 seconds for containers to be ready
+4. Searches your keywords across multiple pages
+5. Saves new domains to `domain_Listed` with `processed: false`
+
+**Usage:**
+```
+Select an option (0-4): 0
+
+Enter keyword(s) to search (single or comma-separated, e.g. bet, casino, poker):
+> casino, poker, betting, slot, spin
+```
+
+**Output:** New domains added to MongoDB `domain_Listed`
+
+---
+
+### Option 1 — Common Crawl Domain Fetch *(Stage 1)*
+
+Searches the Common Crawl web archive for domains whose names contain your keywords. Performs DNS + HTTP probe on each domain to check if it's alive.
+
+**Usage:**
+```
+Select an option (0-4): 1
+
+Enter keyword(s) to search (single or comma-separated, e.g. bet, casino, slot, spin):
+> bet, casino, slot, spin, win, play
+```
+
+**Output:** Domains written to `domain_Listed` with:
+- `active: true` — reachable domain
+- `active: false` — DNS failed / dead
+- `active: "blocked"` — WAF / Cloudflare blocked
+- `processed: false` — ready for Stage 2
+
+> **Checkpoint system:** If interrupted, re-running with the same keywords resumes from the last completed batch automatically.
+
+---
+
+### Option 2 — Checking URL *(Stage 2)*
+
+Fetches the HTML of every unprocessed active domain and classifies it as a gambling site or not.
+
+**Filter:** Only picks up `domain_Listed` where `active: true` AND `processed != true`
+
+**Classification rules:**
+- **gambling** — 3 or more gambling keywords found in page HTML
+- **regular** — page reachable but fewer than 3 keyword matches
+- **blocked** — HTTP 403/429 or Cloudflare challenge detected
+- **dead** — DNS failed, connection refused, or parked lander
+
+**Deep Crawl Link Extraction:**
+When a page is classified as `gambling` and contains 3+ outbound links, `checking_url/deep_crawl.py` extracts external domain links (filtering out social media, ad networks, and same-domain links) and seeds them back into `domain_Listed` with `source: "deep_crawl"` for future checking.
+
+**After each domain is checked:**
+- Result written to `checked_domains`
+- Source document stamped `processed: true` — will never be re-checked
+
+**Output:** `output/verify_results.xlsx` with 4 sheets (Gambling, Blocked, Dead, Regular) featuring clickable `https://` hyperlinks.
+
+---
+
+### Option 3 — Capture URL *(Stage 3)*
+
+Takes full screenshots of confirmed gambling domains with live double-layer verification, and generates Word (.docx), PDF (.pdf), and Excel (.xlsx) reports.
+
+**Filter:** Only picks up `checked_domains` where `status: "gambling"` AND `screenshot_taken: false`
+
+**Double-Layer Verification Strategy:**
+1. **Layer 1 (Status & 403 WAF Check)**: Evaluates response codes (403, 429, 404, 500+) and text markers.
+2. **Layer 2 (Live Keyword Re-check)**: Classifies rendered HTML in browser memory (reclassifies non-gambling as `regular`).
+3. **Layer 3 (Screenshot & Clean Save)**: Saves screenshots only for confirmed sites, deletes temporary files automatically.
+
+**Export Format Options:**
+When running Option 3, you can choose:
+1. **Single Combined Files** *(default)*: 1 Master Word document, 1 Master PDF, and 1 Master Excel workbook.
+2. **Batched Deliverables**: Splits domains into batch folders (e.g. `batch_001`, `batch_002` of 20, 40, or 50 items each).
+
+
+
+---
+
 ### Option 4 — Both Checking & Capture
 
 Runs Stage 2 then Stage 3 back-to-back automatically.
@@ -237,7 +327,7 @@ gamblingwebfind/
 ├── requirements.txt                  ← Python dependencies
 │
 ├── keywordssearch/                   ← Stage 0 — SearXNG web search
-│   ├── searxng_search.py             ← Core: Docker auto-start + search + save to MongoDB
+│   ├── searxng_search.py             ← Docker auto-start + search + save to MongoDB
 │   ├── docker-compose.yml            ← Redis + SearXNG container definitions
 │   └── searxng/
 │       └── settings.yml              ← SearXNG config (JSON API, web engines only)
@@ -247,156 +337,187 @@ gamblingwebfind/
 │   └── manifests/                    ← Cached CC crawl manifest files
 │
 ├── db/                               ← Shared MongoDB layer
-│   └── mongo_client.py               ← All DB access: connections, queries, write_result()
-│                                        _id is the only index (domain name = primary key)
+│   └── mongo_client.py               ← All DB access: connections, queries, write_result(), seed_discovered_domains()
 │
 ├── checking_url/                     ← Stage 2 — URL fetching & classification
-│   ├── runner.py                     ← Orchestrator (asyncio, semaphore concurrency)
-│   ├── fetcher.py                    ← Two-tier HTTP fetcher (fast + stealth fallback)
-│   └── classifier.py                 ← Keyword matcher (BeautifulSoup text extraction)
+│   ├── runner.py                     ← Orchestrator (async fetch + classification + deep crawl hook)
+│   ├── fetcher.py                    ← Two-tier HTTP fetcher (Fast AsyncFetcher + StealthyFetcher)
+│   ├── classifier.py                 ← Keyword matcher & parked lander detector
+│   └── deep_crawl.py                 ← Aggregator outbound link extractor
 │
 ├── capture_url/                      ← Stage 3 — Screenshot capture & reporting
 │   ├── runner.py                     ← Orchestrator (Playwright BrowserPool)
 │   ├── screenshot.py                 ← Page capture with full-load strategy
-│   ├── excel_exporter.py             ← MongoDB → Excel workbooks
-│   └── docx_report_generator.py      ← MongoDB → Word report (2 per page)
+│   ├── excel_exporter.py             ← MongoDB → Excel workbooks (clickable links)
+│   └── docx_report_generator.py      ← MongoDB → Word/PDF reports (2 per page, clickable links)
 │
-└── project_sup/                      ← Manual utility scripts
-    └── mongodbupdate/
+└── project_sup/                      ← Project support & helper scripts
+    └── helping_code/
+        ├── audit_db.py               ← Database health check & interactive/automated cleanup
+        ├── cleanup_db.py             ← Wrapper delegating to audit_db.py --fix
+        ├── compare_dbs.py            ← Interactive tool to compare & sync domains between two DBs
+        ├── compare_processed_domains.py.py ← Syncs processed=True flag for domains in checked_domains
+        ├── batch_splitter.py         ← Splits CSV and PDF reports into batch subfolders
         ├── import_output_excel.py    ← Bulk import existing Excel data into MongoDB
-        ├── update_export_status.py   ← Mark domains as exported in MongoDB
+        ├── merge_pdfs.py             ← PDF merger tool
         └── arrange_docx_report.py    ← Re-arrange existing Word report (2 per page, batched)
 ```
 
 ---
 
-## MongoDB Collections
+## MongoDB Collections & Schema Design
 
 ### `domain_Listed` — Source of domains for Stage 2
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `_id` | string | Domain name — primary key + auto-indexed |
+| `_id` | string | Domain name — primary key |
 | `domain` | string | e.g. `"bet365.com"` |
 | `active` | bool/string | `true` / `false` / `"blocked"` |
 | `processed` | bool | `false` on insert → `true` after Stage 2 checks it |
-| `added_date` | string | First import date `YYYY-MM-DD` — set once, never overwritten |
+| `added_date` | string | First import date `YYYY-MM-DD` — set once via `$setOnInsert` |
+| `source` | string | Origin e.g. `"searxng_search"`, `"common_crawl"`, `"deep_crawl"` |
+| `discovered_from` | string | Aggregator domain that contained the link (optional) |
 
-### `checked_domains` — Classification results
+### `checked_domains` — Minimal classification results
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `_id` | string | Domain name — primary key + auto-indexed |
-| `domain` | string | Same as `_id` |
-| `url` | string | Full URL e.g. `"https://bet365.com"` |
-| `status` | string | `"gambling"` / `"regular"` / `"blocked"` / `"dead"` |
-| `reason` | array | Matched keyword signals |
-| `checked_at` | string | Timestamp in IST e.g. `"2026-08-13 19:45:00 IST"` |
-| `screenshot_taken` | bool | `true` after a successful screenshot |
-| `screenshot_failed_reason` | string | Error reason if capture failed, else `null` |
-| `added_date` | string | First import date — `YYYY-MM-DD` |
-| `exported` | bool | `true` once included in a report |
-| `exported_at` | string | Export date `YYYY-MM-DD` |
+| Field | Type | Present On | Description |
+|-------|------|------------|-------------|
+| `_id` | string | All docs | Domain name — primary key |
+| `domain` | string | All docs | Same as `_id` |
+| `url` | string | All docs | Full URL e.g. `"https://bet365.com"` |
+| `status` | string | All docs | `"gambling"` / `"regular"` / `"blocked"` / `"dead"` |
+| `reason` | array | All docs | Matched keyword signals |
+| `added_date` | string | All docs | First import date `YYYY-MM-DD` |
+| `screenshot_taken` | bool | `gambling` only | `true` after successful screenshot |
+| `screenshot_failed_reason` | string | `gambling` only | Error reason if capture failed, else `null` |
+| `exported` | bool | Exported docs only | `true` once included in an exported report |
+| `exported_at` | string | Exported docs only | Export date `YYYY-MM-DD` |
 
 ---
 
-## Utility Scripts
+## Utility & Support Scripts
 
-These are standalone scripts run directly — not through `main.py`.
+These standalone tools are located in `project_sup/helping_code/` and run directly.
 
-### Import existing Excel data into MongoDB
+### Database Health Check & Schema Cleanup
 
-If you have an existing Excel file with domains already classified:
+Audits MongoDB collections for bloat or schema violations and interactively offers to repair them:
 
 ```bash
-cd project_sup/mongodbupdate
-python import_output_excel.py
+python project_sup/helping_code/audit_db.py
 ```
 
-Reads sheets: **Verified / Rejected / Dead / Blocked**  
-Writes to both `domain_Listed` (with `processed: true`) and `checked_domains`.  
-Uses `$setOnInsert` — never overwrites existing records.
-
----
-
-### Seed domains from CSV
+To run non-interactively in automated pipelines:
 
 ```bash
-python main.py --seed path/to/domains.csv
+python project_sup/helping_code/audit_db.py --fix
+# OR
+python project_sup/helping_code/cleanup_db.py
 ```
-
-CSV must have a `domain` or `url` column. All domains inserted with `active: true`.
 
 ---
 
-### Mark domains as exported
+### Compare Databases & Sync Missing Domains
+
+Interactively compares two MongoDB databases (e.g. `gamblingsitetry` vs `gamblingsites`) and asks whether to copy missing domains in either direction:
 
 ```bash
-cd project_sup/mongodbupdate
-python update_export_status.py path/to/exported_domains.csv
+python project_sup/helping_code/compare_dbs.py
 ```
-
-Updates `exported: true`, `export_status`, `exported_at`, `screenshot_taken` in MongoDB.
 
 ---
 
-### Re-arrange an existing Word report
+### Sync Processed Flags for Existing Results
+
+Scans `domain_Listed` against `checked_domains` and updates `processed: true` for any domains that were already classified:
 
 ```bash
-cd project_sup/mongodbupdate
-python arrange_docx_report.py --csv domains.csv --docx report.docx --output-dir ./output
+python project_sup/helping_code/compare_processed_domains.py.py
 ```
-
-Useful when you have an existing report that needs to be reformatted to 2 targets per page, or split into smaller batch files (e.g. 1000 targets per file).
 
 ---
 
-## `.env` — All Configuration Variables
+### Batch Splitter (CSV + PDF Reports)
+
+Splits a combined CSV report and matching PDF report into smaller standalone batch folders (e.g., 20 items per batch):
+
+```bash
+python project_sup/helping_code/batch_splitter.py --csv report.csv --pdf report.pdf --size 20
+```
+
+---
+
+### Import Existing Excel Data into MongoDB
+
+Imports existing classified Excel workbooks into MongoDB (`domain_Listed` with `processed: true` and `checked_domains`):
+
+```bash
+python project_sup/helping_code/import_output_excel.py
+```
+
+---
+
+### Re-arrange Word Reports
+
+Re-formats existing Word reports to 2 items per page with clickable hyperlinks:
+
+```bash
+python project_sup/helping_code/arrange_docx_report.py --csv domains.csv --docx report.docx --output-dir ./output
+```
+
+---
+
+## `.env` — Configuration Variables
 
 ```env
-# ── Stage 0 — SearXNG (Docker auto-started) ───────────────────────────────────
+# ── Stage 0 — SearXNG ──────────────────────────────────────────────────────────
 SEARXNG_BASE_URL=http://127.0.0.1:8080
-SEARXNG_MAX_PAGES=4         # Pages of results per keyword (10 results/page)
-SEARXNG_PAGE_DELAY=1.0      # Delay between pages (seconds)
-SEARXNG_TIMEOUT=10.0        # HTTP timeout per request (seconds)
+SEARXNG_MAX_PAGES=4
+SEARXNG_PAGE_DELAY=1.0
+SEARXNG_TIMEOUT=10.0
 
 # ── MongoDB ────────────────────────────────────────────────────────────────────
 MONGO_URI=mongodb://localhost:27017/
 MONGO_DB_NAME=gamblingsites
-MONGO_COLLECTION=domain_Listed        # Stage 0/1 output — Stage 2 source
-CHECKED_COLLECTION=checked_domains    # Stage 2/3 output
-KEYWORDS_COLLECTION=keywords
+MONGO_DB2_NAME=gamblingsitetry
+MONGO_COLLECTION=domain_Listed
+CHECKED_COLLECTION=checked_domains
 
 # ── Stage 1 — Common Crawl ────────────────────────────────────────────────────
-MAX_WORKERS=200             # DNS/HTTP concurrent connections
-TIMEOUT=5.0                 # HTTP probe timeout (seconds)
-MONGO_BATCH_SIZE=1000       # Domains per MongoDB bulk write
-PARQUET_BATCH_SIZE=20       # Parquet files per DuckDB batch
-EXPORT_TO_MONGO=true        # Set false to dry-run without saving
+MAX_WORKERS=200
+TIMEOUT=5.0
+MONGO_BATCH_SIZE=1000
+PARQUET_BATCH_SIZE=20
+EXPORT_TO_MONGO=true
 
 # ── Stage 2 — URL Checking ────────────────────────────────────────────────────
-FETCH_TIMEOUT=10            # HTTP fetch timeout per domain (seconds)
-PER_DOMAIN_DELAY=2.0        # Min seconds between re-fetching same domain
-MAX_CONCURRENT_FETCHES=20   # Max simultaneous fetches
+FETCH_TIMEOUT=10
+PER_DOMAIN_DELAY=2.0
+MAX_CONCURRENT_FETCHES=20
 
-STEALTH_FALLBACK=false      # true = retry blocked domains with real browser
-STEALTH_TIMEOUT=60          # Browser timeout for Cloudflare solving (seconds)
-STEALTH_CONCURRENCY=3       # Max simultaneous stealth browser instances
+STEALTH_FALLBACK=false
+STEALTH_TIMEOUT=60
+STEALTH_CONCURRENCY=3
+
+# ── Deep Crawl Link Extraction ────────────────────────────────────────────────
+DEEP_CRAWL_MIN_LINKS=3
+DEEP_CRAWL_STRICT=false
 
 # ── Stage 3 — Screenshots ─────────────────────────────────────────────────────
-SCREENSHOT_CONCURRENCY=15   # Max simultaneous Playwright browser contexts
+SCREENSHOT_CONCURRENCY=15
 ```
 
 ---
 
-## Key Design Decisions
+## Key Design Principles
 
-| Decision | Why |
-|----------|-----|
-| `_id` = domain name | Domain is already unique — no separate index needed |
-| `processed` flag on source docs | Prevents Stage 2 re-checking domains across runs |
-| `$ne: true` filter | Legacy docs without `processed` field are treated as unprocessed — backward compatible |
-| `write_result()` atomically sets `processed:true` | No crash window between writing result and marking done |
-| `$setOnInsert` for `added_date` | First import date is preserved — never overwritten on re-import |
-| networkidle wait in screenshots | Captures pages after all XHR/API calls finish, not just HTML load |
-| Docker auto-start in Stage 0 | User never needs to manually run `docker-compose` |
+| Principle | Why |
+|-----------|-----|
+| `_id` = domain name | Primary key is domain string — no redundant indexes |
+| `processed` flag on source docs | Prevents Stage 2 from re-checking domains across runs |
+| Deep Crawl aggregator extraction | Outbound links on gambling pages are captured and queued |
+| Active `https://` hyperlinks | All URLs in Excel, Word, and PDF reports are directly clickable |
+| Minimal Schema Design | Eliminates database bloat (`checked_at`, `last_updated_at` removed) |
+| Unified `.env` Config | Single `.env` file drives all pipeline stages and helper scripts |
+

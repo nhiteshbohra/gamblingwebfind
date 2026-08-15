@@ -100,19 +100,15 @@ def export_capture_workbook(
     domain_ids: list = None,
     output_dir: str = "output",
     batch_size: int = 40,
+    single_file: bool = False,
+    combined: bool = False,
 ) -> dict:
-    """Batched 2-sheet workbook for capture mode results (Captured / Failed).
+    """Export captured domains to Excel workbooks.
 
-    Splits successfully captured domains into batches of `batch_size` (default 40).
-    For each batch, creates:
-        output_dir/batch_001/batch_001_domains.xlsx
-        output_dir/batch_002/batch_002_domains.xlsx
-        ...
-
-    S.No. restarts from 1 in each batch (each batch is a standalone deliverable).
-    Failed domains are written once to output_dir/failed_domains.xlsx (not batched).
-
-    Returns dict with total captured, failed, batch count, and file list.
+    Supports:
+      - Single file mode (single_file=True or batch_size=0): 1 combined Excel file.
+      - Batch mode (batch_size > 0): splits into batch_001, batch_002 folders.
+      - Both mode (combined=True): writes batches AND master combined Excel file.
     """
     if domain_ids is not None and len(domain_ids) == 0:
         print("[export] No domains processed in this run to export.")
@@ -121,14 +117,13 @@ def export_capture_workbook(
     os.makedirs(output_dir, exist_ok=True)
 
     base_filter = {"_id": {"$in": domain_ids}} if domain_ids else {}
-
     captured_filter = {**base_filter, "screenshot_taken": True}
     failed_filter   = {**base_filter, "screenshot_taken": False}
 
     captured = list(checked_domains().find(captured_filter))
     failed   = list(checked_domains().find(failed_filter))
 
-    # Only include captured domains whose JPEG is on disk (matches Word doc)
+    # Only include captured domains whose JPEG is on disk
     screenshots_dir = os.path.join("output", "screenshots")
     try:
         from capture_url.screenshot import _url_to_filename
@@ -136,48 +131,74 @@ def export_capture_workbook(
             os.path.join(screenshots_dir, _url_to_filename(d.get("url", "")))
         )]
     except Exception:
-        pass  # fallback: include all if import fails
+        pass
 
-    # ── Batch captured into groups of batch_size ──────────────────────────────
-    batches = [captured[i:i + batch_size] for i in range(0, len(captured), batch_size)]
-    total_batches = len(batches)
     generated_files = []
-
     now_ist = datetime.now(IST).strftime("%Y-%m-%d")
 
-    for batch_num, batch_docs in enumerate(batches, 1):
-        batch_label = f"batch_{batch_num:03d}"
-        batch_dir = os.path.join(output_dir, batch_label)
-        os.makedirs(batch_dir, exist_ok=True)
-
-        xlsx_path = os.path.join(batch_dir, f"{batch_label}_domains.xlsx")
-
-        cap_rows = [
+    # ── Single File / Combined Master File ────────────────────────────────────
+    if single_file or batch_size <= 0 or combined:
+        master_xlsx = os.path.join(output_dir, "captured_domains_combined.xlsx")
+        master_rows = [
             {
                 "S.No.": i,
                 "Domain": d.get("_id", ""),
                 "URL": d.get("url", ""),
             }
-            for i, d in enumerate(batch_docs, 1)
+            for i, d in enumerate(captured, 1)
         ]
+        with pd.ExcelWriter(master_xlsx, engine='openpyxl') as writer:
+            pd.DataFrame(master_rows).to_excel(writer, sheet_name='Captured', index=False)
 
-        with pd.ExcelWriter(xlsx_path, engine='openpyxl') as writer:
-            pd.DataFrame(cap_rows).to_excel(writer, sheet_name='Captured', index=False)
+        _make_excel_urls_clickable(master_xlsx)
+        generated_files.append(master_xlsx)
+        print(f"[export] Single combined Excel: {len(captured)} domains -> {master_xlsx}")
 
-        _make_excel_urls_clickable(xlsx_path)
-
-        # Mark these domains as exported in MongoDB
-        cap_ids = [d["_id"] for d in batch_docs]
+        cap_ids = [d["_id"] for d in captured]
         if cap_ids:
             checked_domains().update_many(
                 {"_id": {"$in": cap_ids}},
                 {"$set": {"exported": True, "exported_at": now_ist}}
             )
 
-        print(f"[export] {batch_label}: {len(batch_docs)} domains -> {xlsx_path}")
-        generated_files.append(xlsx_path)
+    # ── Batched Export ────────────────────────────────────────────────────────
+    total_batches = 0
+    if not single_file and batch_size > 0:
+        batches = [captured[i:i + batch_size] for i in range(0, len(captured), batch_size)]
+        total_batches = len(batches)
 
-    # ── Write all failed domains to a single non-batched file ─────────────────
+        for batch_num, batch_docs in enumerate(batches, 1):
+            batch_label = f"batch_{batch_num:03d}"
+            batch_dir = os.path.join(output_dir, batch_label)
+            os.makedirs(batch_dir, exist_ok=True)
+
+            xlsx_path = os.path.join(batch_dir, f"{batch_label}_domains.xlsx")
+
+            cap_rows = [
+                {
+                    "S.No.": i,
+                    "Domain": d.get("_id", ""),
+                    "URL": d.get("url", ""),
+                }
+                for i, d in enumerate(batch_docs, 1)
+            ]
+
+            with pd.ExcelWriter(xlsx_path, engine='openpyxl') as writer:
+                pd.DataFrame(cap_rows).to_excel(writer, sheet_name='Captured', index=False)
+
+            _make_excel_urls_clickable(xlsx_path)
+
+            cap_ids = [d["_id"] for d in batch_docs]
+            if cap_ids:
+                checked_domains().update_many(
+                    {"_id": {"$in": cap_ids}},
+                    {"$set": {"exported": True, "exported_at": now_ist}}
+                )
+
+            print(f"[export] {batch_label}: {len(batch_docs)} domains -> {xlsx_path}")
+            generated_files.append(xlsx_path)
+
+    # ── Write Failed Domains ──────────────────────────────────────────────────
     if failed:
         fail_rows = [
             {
@@ -199,15 +220,16 @@ def export_capture_workbook(
         fail_ids = [d["_id"] for d in failed]
         checked_domains().update_many(
             {"_id": {"$in": fail_ids}},
-            {"$set": {"exported": False}, "$unset": {"export_status": "", "exported_at": ""}}
+            {"$set": {"exported": False}, "$unset": {"exported_at": ""}}
         )
 
-    print(f"[export] Done. {total_batches} batch Excel file(s) + {1 if failed else 0} failed file. Folder: {output_dir}")
+    print(f"[export] Done. Generated {len(generated_files)} file(s). Output: {output_dir}")
     return {
         "captured": len(captured),
         "failed": len(failed),
         "batches": total_batches,
         "files": generated_files,
     }
+
 
 

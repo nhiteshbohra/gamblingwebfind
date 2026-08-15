@@ -110,6 +110,31 @@ PARKED_AND_FOR_SALE_MARKERS = [
     "domainnameshop.com",
 ]
 
+# Negative archetype indicators: generalized patterns that indicate non-gambling domains
+# (Prevents false positives from SEO spam injected on educational, e-commerce, or media sites)
+NEGATIVE_ARCHETYPES = {
+    "educational": [
+        "admission", "facult", "academic", "syllabus", "curriculum", 
+        "degree college", "undergraduate", "postgraduate", "ph.d",
+        "examination result", "chancellor", "principal", "alumni", "merit list"
+    ],
+    "ecommerce": [
+        "add to cart", "shopping cart", "buy now", "in stock", "out of stock",
+        "free shipping", "return policy", "customer reviews", "product description",
+        "delivery charges", "order summary", "secure checkout", "payment options"
+    ],
+    "news_media_wiki": [
+        "breaking news", "editorial team", "journalism", "press release",
+        "published by", "fandom wiki", "community wiki", "table of contents"
+    ],
+}
+
+HIGH_INTENT_GAMBLING_TERMS = {
+    "online casino", "live casino", "sportsbook", "poker room", 
+    "real money casino", "aviator crash game", "betting app", 
+    "slot machine", "live dealer", "deposit bonus"
+}
+
 
 def is_parked_or_for_sale(text: str, html: str = "", url: str = "") -> tuple[bool, list[str]]:
     """Check if the page is a parked domain, domain-for-sale lander, or marketplace."""
@@ -127,32 +152,51 @@ def is_parked_or_for_sale(text: str, html: str = "", url: str = "") -> tuple[boo
     return False, []
 
 
+def detect_negative_archetype(text: str) -> tuple[bool, str]:
+    """Detect if the page is predominantly an educational, e-commerce, or news/wiki site."""
+    text_lower = text.lower() if text else ""
+    
+    for archetype, signals in NEGATIVE_ARCHETYPES.items():
+        matched = [s for s in signals if s in text_lower]
+        if len(matched) >= 2:
+            return True, f"{archetype}_site (signals: {', '.join(matched[:3])})"
+            
+    return False, ""
+
+
 def classify(html: str, url: str = "", keywords: set = None, min_keywords: int = 3) -> tuple[bool, list[str]]:
-    """Classifier:
-    - Hard excludes .gov / .edu domains.
-    - Hard excludes parked and domain-for-sale pages (e.g. Atom, Dan, Sedo, GoDaddy).
-    - Counts matching keywords from the 500 keyword set.
-    - Returns (True, matched_keywords) if len(matched_keywords) >= min_keywords (default 3).
-    - Returns (False, matched_keywords) otherwise.
+    """Generalized High-Accuracy Classifier:
+    - Checks for parked/for-sale domain landers.
+    - Evaluates negative archetypes (educational, e-commerce, media) to defeat SEO spam injections.
+    - Performs multi-keyword & high-intent structural gambling verification.
+    - Zero hardcoded domain lists!
     """
     if not html:
         return False, ["empty_html"]
 
-    url_lower = url.lower()
-    if '.gov' in url_lower or '.edu' in url_lower:
-        return False, ["hard_excluded:gov_edu"]
-
     text = _extract_text(html)
 
-    # Check for domain-for-sale / parked landers
+    # 1. Parked / For-Sale Check
     is_parked, parked_reasons = is_parked_or_for_sale(text=text, html=html, url=url)
     if is_parked:
-        return False, [f"hard_excluded:parked_or_for_sale ({', '.join(parked_reasons[:3])})"]
+        return False, [f"excluded:parked_or_for_sale ({', '.join(parked_reasons[:3])})"]
 
     kw_set = keywords if keywords is not None else load_keywords()
 
-    # Find all matching keywords present in page text
+    # 2. Match gambling keywords
     matched = [kw for kw in kw_set if kw in text]
 
-    is_gambling = len(matched) >= min_keywords
+    # 3. Negative Archetype Check (Educational, E-Commerce, News/Wiki)
+    is_negative, neg_reason = detect_negative_archetype(text)
+    if is_negative:
+        # If page is clearly educational/e-commerce/news, only mark as gambling if there is an overwhelmingly high density of gambling terms (>= 8)
+        if len(matched) < 8:
+            return False, [f"excluded:{neg_reason}"]
+
+    # 4. Gambling Decision Logic:
+    # Requires at least min_keywords (default 3) OR at least 2 keywords if one is a High-Intent Gambling Term
+    has_high_intent = any(kw in matched for kw in HIGH_INTENT_GAMBLING_TERMS)
+    
+    is_gambling = (len(matched) >= min_keywords) or (len(matched) >= 2 and has_high_intent)
     return is_gambling, matched
+

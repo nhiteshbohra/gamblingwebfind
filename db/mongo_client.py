@@ -10,8 +10,10 @@ Two-collection flow:
 import csv
 import os
 import urllib.parse
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
+
+IST = timezone(timedelta(hours=5, minutes=30))
 
 import tldextract
 from dotenv import load_dotenv
@@ -49,20 +51,7 @@ def checked_domains() -> Collection:
     return _db[os.getenv("CHECKED_COLLECTION", "checked_domains")]
 
 
-def keywords_col() -> Collection:
-    """keywords collection — gambling signal terms loaded by classifier."""
-    get_db()
-    return _db[os.getenv("KEYWORDS_COLLECTION", "keywords")]
-
-
 # ── URL helpers ───────────────────────────────────────────────────────────────
-
-_TRACKING_PARAMS = {
-    'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content',
-    'fbclid', 'gclid', 'msockid', 'msclkid', 'ref', 'ref_id', 'aff_id',
-    'session_id', 'clickid', 'affid', 'btag', 'tag', 'subid', 'cid'
-}
-
 
 def normalize_url(raw_url: str) -> str:
     parsed = urllib.parse.urlparse(raw_url.strip())
@@ -75,9 +64,7 @@ def normalize_url(raw_url: str) -> str:
         if (scheme == 'http' and port == '80') or (scheme == 'https' and port == '443'):
             netloc = host
     path = parsed.path.rstrip('/') if len(parsed.path) > 1 else parsed.path
-    params = urllib.parse.parse_qsl(parsed.query, keep_blank_values=False)
-    params = sorted((k, v) for k, v in params if k.lower() not in _TRACKING_PARAMS)
-    return urllib.parse.urlunparse((scheme, netloc, path, parsed.params, urllib.parse.urlencode(params), ''))
+    return urllib.parse.urlunparse((scheme, netloc, path, parsed.params, parsed.query, ''))
 
 
 def extract_domain(url: str) -> str:
@@ -262,14 +249,8 @@ def seed_discovered_domains(domains: set, discovered_from: str) -> tuple[int, in
     """Bulk upsert domains discovered via deep crawl into domain_Listed.
 
     Only inserts domains NOT already present (uses $setOnInsert so existing
-    records are never overwritten). Skips empty / invalid domain strings.
-
-    Args:
-        domains:         Set of clean domain strings (e.g. {"bet365.com", ...})
-        discovered_from: The source domain that contained these links (for tracking)
-
-    Returns:
-        Tuple of (inserted_count, skipped_count)
+    records are never overwritten). Newly discovered domains are marked
+    processed: False so they get picked up by future runs.
     """
     if not domains:
         return 0, 0
@@ -307,4 +288,5 @@ def seed_discovered_domains(domains: set, discovered_from: str) -> tuple[int, in
             skipped += 1
 
     return inserted, skipped
+
 

@@ -15,13 +15,15 @@ def _convert_to_pdf(docx_path: str) -> str | None:
     """Convert a .docx file to .pdf using MS Word COM with screen/web optimisation.
 
     Uses wdExportOptimizeForOnScreen (OptimizeFor=1) — lower DPI, smaller file.
-    Requires Microsoft Word to be installed (Windows only).
-    Returns the PDF path on success, or None if conversion fails.
+    Tries win32com -> comtypes -> docx2pdf.
     """
-    import os as _os
-    pdf_path = _os.path.splitext(docx_path)[0] + ".pdf"
-    abs_docx = _os.path.abspath(docx_path)
-    abs_pdf  = _os.path.splitext(abs_docx)[0] + ".pdf"
+    abs_docx = os.path.abspath(docx_path)
+    abs_pdf = os.path.splitext(abs_docx)[0] + ".pdf"
+
+    if not os.path.exists(abs_docx):
+        return None
+
+    # Tier 1: win32com.client
     try:
         import win32com.client as _win32
         word = _win32.Dispatch("Word.Application")
@@ -45,13 +47,52 @@ def _convert_to_pdf(docx_path: str) -> str | None:
             doc.Close(False)
         finally:
             word.Quit()
-        return pdf_path
-    except ImportError:
-        print("[pdf] pywin32 not installed — skipping PDF conversion. Run: pip install pywin32")
-        return None
+
+        if os.path.exists(abs_pdf):
+            return abs_pdf
+    except Exception:
+        pass
+
+    # Tier 2: comtypes.client (pure ctypes fallback for Python 3.12 DLL compatibility)
+    try:
+        import comtypes.client as _comtypes
+        word = _comtypes.CreateObject("Word.Application")
+        word.Visible = False
+        try:
+            doc = word.Documents.Open(abs_docx)
+            doc.ExportAsFixedFormat(
+                OutputFileName=abs_pdf,
+                ExportFormat=17,
+                OpenAfterExport=False,
+                OptimizeFor=1,
+                Range=0,
+                Item=0,
+                IncludeDocProps=True,
+                KeepIRM=True,
+                CreateBookmarks=0,
+                DocStructureTags=True,
+                BitmapMissingFonts=True,
+                UseISO19005_1=False,
+            )
+            doc.Close(False)
+        finally:
+            word.Quit()
+
+        if os.path.exists(abs_pdf):
+            return abs_pdf
+    except Exception:
+        pass
+
+    # Tier 3: docx2pdf fallback
+    try:
+        import docx2pdf
+        docx2pdf.convert(abs_docx, abs_pdf)
+        if os.path.exists(abs_pdf):
+            return abs_pdf
     except Exception as e:
-        print(f"[pdf] PDF conversion failed for {docx_path}: {e}")
-        return None
+        print(f"[pdf] PDF conversion error for {docx_path}: {e}")
+
+    return None
 
 
 def add_clickable_hyperlink(paragraph, url: str, text: str, font_size_pt=12.0):
@@ -140,21 +181,15 @@ def build_report_from_mongo(
     batch_size: int = 40,
     cleanup: bool = True,
     pdf: bool = True,
+    single_file: bool = False,
+    combined: bool = False,
 ) -> dict:
-    """Build batched Word reports from successfully captured domains in MongoDB.
+    """Build Word & PDF reports from successfully captured domains in MongoDB.
 
-    Splits all captured entries into chunks of `batch_size` (default 40).
-    For each batch, creates:
-        output_dir/batch_001/batch_001_report.docx  (+.pdf if pdf=True)
-        output_dir/batch_002/batch_002_report.docx  (+.pdf if pdf=True)
-        ...
-
-    S.No. restarts from #00001 in each batch (each batch is a standalone deliverable).
-    Cleans up temporary JPEGs from disk after all batches are written.
-
-    Returns dict with keys:
-        "docx_paths" — list of generated .docx file paths
-        "pdf_paths"  — list of generated .pdf file paths (empty if pdf=False or conversion failed)
+    Supports:
+      - Single file mode (single_file=True or batch_size=0): 1 combined Word & PDF report.
+      - Batch mode (batch_size > 0): splits into batch_001, batch_002 folders.
+      - Both mode (combined=True): writes batches AND master combined Word & PDF report.
     """
     if domain_ids is not None and len(domain_ids) == 0:
         print("[report] No domains processed in this run to generate Word report.")
@@ -186,34 +221,49 @@ def build_report_from_mongo(
 
     if not entries:
         print("[report] No valid screenshot entries found. No Word docs generated.")
-        return []
-
-    # Split into batches of batch_size
-    batches = [entries[i:i + batch_size] for i in range(0, len(entries), batch_size)]
-    total_batches = len(batches)
-    print(f"[report] {len(entries)} screenshots -> {total_batches} batch(es) of up to {batch_size} each.")
+        return {"docx_paths": [], "pdf_paths": []}
 
     docx_paths = []
     pdf_paths  = []
 
-    for batch_num, batch_entries in enumerate(batches, 1):
-        batch_label = f"batch_{batch_num:03d}"
-        batch_dir = os.path.join(output_dir, batch_label)
-        os.makedirs(batch_dir, exist_ok=True)
-
-        docx_path = os.path.join(batch_dir, f"{batch_label}_report.docx")
-        print(f"[report] Writing {batch_label}: {len(batch_entries)} screenshots -> {docx_path}")
-        build_report(batch_entries, docx_path)
-        docx_paths.append(docx_path)
+    # ── 1. Single Combined Master Report ──────────────────────────────────────
+    if single_file or batch_size <= 0 or combined:
+        master_docx = os.path.join(output_dir, "capture_report_combined.docx")
+        print(f"[report] Writing single combined Word report: {len(entries)} screenshots -> {master_docx}")
+        build_report(entries, master_docx)
+        docx_paths.append(master_docx)
 
         if pdf:
-            print(f"[pdf]    Converting {batch_label}_report.docx -> .pdf ...")
-            pdf_path = _convert_to_pdf(docx_path)
-            if pdf_path:
-                pdf_paths.append(pdf_path)
-                print(f"[pdf]    Saved: {pdf_path}")
+            print("[pdf]    Converting combined report to PDF...")
+            master_pdf = _convert_to_pdf(master_docx)
+            if master_pdf:
+                pdf_paths.append(master_pdf)
+                print(f"[pdf]    Saved: {master_pdf}")
 
-    # Clean up all temp JPEGs only after all batches are written
+    # ── 2. Batched Reports ───────────────────────────────────────────────────
+    if not single_file and batch_size > 0:
+        batches = [entries[i:i + batch_size] for i in range(0, len(entries), batch_size)]
+        total_batches = len(batches)
+        print(f"[report] {len(entries)} screenshots -> {total_batches} batch(es) of up to {batch_size} each.")
+
+        for batch_num, batch_entries in enumerate(batches, 1):
+            batch_label = f"batch_{batch_num:03d}"
+            batch_dir = os.path.join(output_dir, batch_label)
+            os.makedirs(batch_dir, exist_ok=True)
+
+            docx_path = os.path.join(batch_dir, f"{batch_label}_report.docx")
+            print(f"[report] Writing {batch_label}: {len(batch_entries)} screenshots -> {docx_path}")
+            build_report(batch_entries, docx_path)
+            docx_paths.append(docx_path)
+
+            if pdf:
+                print(f"[pdf]    Converting {batch_label}_report.docx -> .pdf ...")
+                pdf_path = _convert_to_pdf(docx_path)
+                if pdf_path:
+                    pdf_paths.append(pdf_path)
+                    print(f"[pdf]    Saved: {pdf_path}")
+
+    # Clean up all temp JPEGs only after all documents are written
     if cleanup:
         cleaned_count = 0
         for entry in entries:
@@ -226,5 +276,6 @@ def build_report_from_mongo(
                     pass
         print(f"[cleanup] Auto-deleted {cleaned_count:,} temporary screenshot JPEG files from disk.")
 
-    print(f"[report] Done. {total_batches} Word document(s) + {len(pdf_paths)} PDF(s) saved in: {output_dir}")
+    print(f"[report] Done. {len(docx_paths)} Word document(s) + {len(pdf_paths)} PDF(s) saved in: {output_dir}")
     return {"docx_paths": docx_paths, "pdf_paths": pdf_paths}
+

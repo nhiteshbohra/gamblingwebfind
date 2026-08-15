@@ -86,14 +86,14 @@ async def run(concurrency: int = None, limit: int = 0, mode: str = "new"):
             write_result(domain, url=url, status=status, reason=matched_reasons)
             run_stats[status] += 1
 
-            # ── Deep crawl: extract outbound gambling links from gambling pages ──
+            # ── Deep crawl: extract outbound gambling links from verified gambling pages ──
             if is_gambling and result.html:
                 outbound = extract_outbound_domains(result.html, source_url=url)
                 if len(outbound) >= MIN_OUTBOUND_LINKS:
                     inserted, _ = seed_discovered_domains(outbound, discovered_from=domain)
                     if inserted:
                         run_stats["deep_crawl_new"] += inserted
-            # ─────────────────────────────────────────────────────────────────────
+            # ─────────────────────────────────────────────────────────────────────────────
 
         pbar.update(1)
         pbar.set_postfix({"Left": total_pending - pbar.n})

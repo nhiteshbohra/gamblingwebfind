@@ -7,7 +7,7 @@ import os
 import socket
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 import aiohttp
@@ -30,6 +30,8 @@ HEADERS = {
     )
 }
 
+MODULE_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = MODULE_DIR.parent
 CRAWL = "CC-MAIN-2024-22"
 BASE_URL = (
     f"https://data.commoncrawl.org/"
@@ -37,7 +39,7 @@ BASE_URL = (
     f"crawl={CRAWL}/subset=warc/"
 )
 MANIFEST_NAME = f"{CRAWL}.warc.paths.gz"
-CHECKPOINT_FILE = Path("checkpoint.json")
+CHECKPOINT_FILE = MODULE_DIR / "checkpoint.json"
 PARQUET_MAX_RETRIES = 3
 
 
@@ -134,7 +136,8 @@ def export_domains_to_mongo(
     operations = []
     total_written = 0
 
-    today_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    ist_tz = timezone(timedelta(hours=5, minutes=30))
+    today_date = datetime.now(ist_tz).strftime("%Y-%m-%d")
 
     for domain, status in domain_results:
         op = UpdateOne(
@@ -175,6 +178,9 @@ def export_domains_to_mongo(
 
 def get_paths_file() -> Path:
     candidates = [
+        MODULE_DIR / "manifests" / MANIFEST_NAME,
+        MODULE_DIR / MANIFEST_NAME,
+        PROJECT_ROOT / "manifests" / MANIFEST_NAME,
         Path("manifests") / MANIFEST_NAME,
         Path(MANIFEST_NAME),
         Path("whirlwind-python") / MANIFEST_NAME,
@@ -576,9 +582,9 @@ def main():
         batch_label = f"Batch {batch_num}/{total_batches}"
         overall_pbar.set_description(f"Overall [{batch_label}]")
 
-        print(f"\n{'─' * 70}")
+        print(f"\n{'-' * 70}")
         print(f"[{batch_label}] Processing {len(batch_files)} Parquet files")
-        print(f"{'─' * 70}")
+        print(f"{'-' * 70}")
 
         # Use prefetched result if ready, otherwise query now
         if prefetch_future is not None:

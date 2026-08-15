@@ -5,6 +5,8 @@ import urllib.parse
 from PIL import Image
 from playwright.async_api import async_playwright, Browser, Playwright
 
+from checking_url.classifier import classify, load_keywords
+
 import hashlib
 
 def _url_to_filename(url: str) -> str:
@@ -20,7 +22,7 @@ def _url_to_filename(url: str) -> str:
     return f"{clean_domain}_{url_hash}.jpg"
 
 def is_valid_screenshot(filepath: str, min_size_bytes: int = 4000) -> bool:
-    """Validate that screenshot exists, is a valid JPEG, > min_size_bytes, and not a blank single-color image."""
+    """Validate that screenshot exists, is a valid JPEG, > min_size_bytes (>=4KB), and not a blank/solid single-color image."""
     if not os.path.exists(filepath):
         return False
     if os.path.getsize(filepath) < min_size_bytes:
@@ -36,6 +38,7 @@ def is_valid_screenshot(filepath: str, min_size_bytes: int = 4000) -> bool:
         return True
     except Exception:
         return False
+
 
 class BrowserPool:
     def __init__(self, concurrency: int = 15):
@@ -79,14 +82,21 @@ class BrowserPool:
                     pass
                 self.playwright = None
 
-    async def capture_url(self, url: str, output_dir: str, retries: int = 3) -> tuple[str | None, str, str]:
+    async def capture_url(self, url: str, output_dir: str, retries: int = 3, keywords: set = None) -> tuple[str | None, str, list | str]:
+        """
+        Double-layer capture function:
+          Layer 1: Real-time WAF / 403 Forbidden / Parked lander check.
+          Layer 2: Real-time live HTML keyword re-verification (classify >= 3 keywords).
+          If verified: takes screenshot and returns (filepath, "success", matched_reasons).
+          If failed: returns (None, "regular" | "blocked" | "dead", reason).
+        """
         os.makedirs(output_dir, exist_ok=True)
         filename = _url_to_filename(url)
         filepath = os.path.join(output_dir, filename)
 
         # Re-use an existing valid screenshot if it's already on disk
         if is_valid_screenshot(filepath):
-            return filepath, "success", ""
+            return filepath, "success", []
 
         urls_to_try = [url]
         if url.startswith("https://"):
@@ -110,15 +120,9 @@ class BrowserPool:
                 page = await context.new_page()
 
                 # ── Navigation ──────────────────────────────────────────────
-                # Attempt 0 → domcontentloaded (fast, enough for most sites)
-                # Attempt 1 → load            (waits for all resources)
-                # Attempt 2 → commit          (bare minimum; heavily blocking sites)
                 nav_strategies = ['domcontentloaded', 'load', 'commit']
                 wait_strategy = nav_strategies[min(attempt, len(nav_strategies) - 1)]
-
-                # Navigation timeout increases with each retry so slow sites
-                # get more time on subsequent attempts: 15s → 20s → 25s
-                nav_timeout = 15000 + attempt * 5000
+                nav_timeout = 25000 + attempt * 10000
 
                 page.set_default_timeout(nav_timeout)
                 response = None
@@ -131,51 +135,96 @@ class BrowserPool:
                         last_failure_type = "blocked"
                     else:
                         last_failure_type = "dead"
-                    # Fall back to bare 'commit' so we capture at least partial content
                     try:
-                        response = await page.goto(target_url, timeout=8000, wait_until='commit')
+                        response = await page.goto(target_url, timeout=12000, wait_until='commit')
                     except Exception:
                         pass
+
+                # ── LAYER 1: Response & WAF / 403 / Parked Status Check ───────
+                is_blocked_page = False
+                is_dead_page = False
 
                 if response:
                     status_code = response.status
                     if status_code in (403, 429):
+                        is_blocked_page = True
                         last_failure_type = "blocked"
                         last_reason = f"HTTP {status_code} Blocked"
                     elif status_code == 404:
+                        is_dead_page = True
                         last_failure_type = "dead"
                         last_reason = "HTTP 404 Not Found"
                     elif status_code >= 500:
+                        is_dead_page = True
                         last_failure_type = "dead"
                         last_reason = f"HTTP {status_code} Server Error"
 
-                # ── WAF / parked page detection ──────────────────────────────
+                raw_html = ""
                 try:
-                    content = (await page.content()).lower()
-                    if any(m in content for m in ("checking your browser", "cf-challenge", "captcha", "just a moment", "cf_chl_opt")):
+                    raw_html = await page.content()
+                    content_lower = raw_html.lower()
+                    title_lower = (await page.title()).lower()
+                    full_text = title_lower + " " + content_lower
+
+                    waf_markers = (
+                        "checking your browser", "cf-challenge", "captcha", "just a moment",
+                        "cf_chl_opt", "403 forbidden", "error 403", "you don't have permission to access",
+                        "access denied", "403 - forbidden", "403: forbidden", "forbidden - 403"
+                    )
+                    parked_markers = (
+                        "this domain is for sale", "domain for sale", "buy this domain",
+                        "parked by", "sedo.com", "hugedomains.com", "dan.com"
+                    )
+
+                    if any(m in full_text for m in waf_markers):
+                        is_blocked_page = True
                         last_failure_type = "blocked"
-                        last_reason = "Cloudflare / WAF Blocked"
-                    elif any(m in content for m in ("this domain is for sale", "domain for sale", "buy this domain", "parked by", "sedo.com")):
+                        last_reason = "Cloudflare / WAF / 403 Forbidden Page"
+                    elif any(m in full_text for m in parked_markers):
+                        is_dead_page = True
                         last_failure_type = "dead"
                         last_reason = "Domain Parked / For Sale"
                 except Exception:
                     pass
 
+                # If blocked or dead page detected, abort immediately
+                if is_blocked_page or is_dead_page:
+                    await context.close()
+                    context = None
+                    if os.path.exists(filepath):
+                        try:
+                            # User requested NOT to delete the image, keep it in folder
+                            pass # os.remove(filepath)
+                        except Exception:
+                            pass
+                    return None, last_failure_type, last_reason
+
+                # ── LAYER 2: Live HTML Keyword Re-Classification ─────────────
+                if raw_html:
+                    is_gambling, matched_reasons = classify(
+                        raw_html, url=target_url, keywords=keywords, min_keywords=1
+                    )
+                    if not is_gambling:
+                        # Page is reachable but NOT gambling — reclassify as regular!
+                        await context.close()
+                        context = None
+                        if os.path.exists(filepath):
+                            try:
+                                # User requested NOT to delete the image, keep it in folder
+                                pass # os.remove(filepath)
+                            except Exception:
+                                pass
+                        return None, "regular", matched_reasons
+                else:
+                    matched_reasons = []
+
                 # ── Wait for full page render ────────────────────────────────
-                # networkidle = no pending network requests for 500ms.
-                # This catches pages that fire XHR/fetch calls after DOMContentLoaded
-                # to load their real content (very common on gambling sites).
-                # We cap it at 8s — pages that keep background-polling will still
-                # get captured after the timeout with whatever has rendered.
                 try:
                     await page.wait_for_load_state('networkidle', timeout=8000)
                 except Exception:
-                    pass  # Timed out — capture what's rendered so far
+                    pass
 
                 # ── Trigger lazy-loaded content ──────────────────────────────
-                # Scroll to the bottom then back to top so images, hero sections,
-                # and any element that only loads when entering the viewport
-                # are rendered before the screenshot is taken.
                 try:
                     await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                     await asyncio.sleep(0.5)
@@ -185,14 +234,33 @@ class BrowserPool:
                     pass
 
                 # ── Settle delay ─────────────────────────────────────────────
-                # Small fixed pause after all the above so CSS animations,
-                # cookie banners, and splash screens have time to finish.
-                # Increases with each retry to give slower sites more time.
                 settle_delay = 1.0 + attempt * 0.5   # 1.0s → 1.5s → 2.0s
                 await asyncio.sleep(settle_delay)
 
+                # ── Clean modal & dark translation overlays ──────────────────
+                try:
+                    await page.evaluate("""() => {
+                        document.querySelectorAll('.translation-overlay, .modal-backdrop, [class*="overlay"]:not([class*="hero"]), #cookie-law-info-again').forEach(el => el.remove());
+                    }""")
+                except Exception:
+                    pass
+
                 # ── Take screenshot ──────────────────────────────────────────
-                raw_bytes = await page.screenshot(type='png', full_page=False)
+                raw_bytes = await page.screenshot(type='png', full_page=False, timeout=25000)
+
+                # Check if image is suspiciously small (< 45 KB PNG) or mostly dark spinner screen
+                if len(raw_bytes) < 45000:
+                    # Give Single Page Apps / React / Angular 5 extra seconds to finish rendering
+                    await asyncio.sleep(5.0)
+                    try:
+                        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                        await asyncio.sleep(0.5)
+                        await page.evaluate("window.scrollTo(0, 0)")
+                        await asyncio.sleep(0.5)
+                    except Exception:
+                        pass
+                    raw_bytes = await page.screenshot(type='png', full_page=False)
+
                 await context.close()
                 context = None
 
@@ -202,13 +270,16 @@ class BrowserPool:
                 img.save(filepath, format='JPEG', quality=68, optimize=True)
 
                 if is_valid_screenshot(filepath):
-                    return filepath, "success", ""
+                    return filepath, "success", matched_reasons
                 else:
                     if os.path.exists(filepath):
                         try:
-                            os.remove(filepath)
+                            # User requested NOT to delete the image, keep it in folder
+                            pass # os.remove(filepath)
                         except Exception:
                             pass
+
+
 
             except Exception as e:
                 err_text = str(e)

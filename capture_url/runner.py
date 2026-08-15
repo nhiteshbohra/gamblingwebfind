@@ -20,12 +20,14 @@ load_dotenv(dotenv_path=Path(__file__).resolve().parent.parent / ".env")
 
 from db.mongo_client import find_pending_capture, checked_domains, source_domains
 from capture_url.screenshot import BrowserPool, is_valid_screenshot
+from checking_url.classifier import load_keywords
 
-OUTPUT_DIR = os.path.join("output", "screenshots")
+OUTPUT_DIR = os.getenv("SCREENSHOT_DIR", os.path.join("output", "screenshots"))
 
 
 async def run(concurrency: int = None, limit: int = 0) -> list[str]:
     concurrency = concurrency or int(os.getenv("SCREENSHOT_CONCURRENCY", 15))
+    keywords = load_keywords()
 
     pending = list(find_pending_capture(limit=limit))
     if not pending:
@@ -44,54 +46,98 @@ async def run(concurrency: int = None, limit: int = 0) -> list[str]:
     pbar = tqdm(total=total_pending, desc="Capturing", unit="domain", dynamic_ncols=True)
     pbar.set_postfix({"Left": total_pending})
 
-    run_captured = 0
-    run_failed = 0
+    stats = {
+        "captured": 0,
+        "regular": 0,
+        "blocked": 0,
+        "dead": 0,
+    }
 
     async def process(doc):
-        nonlocal run_captured, run_failed
         domain = doc["_id"]
         url = doc.get("url", f"https://{domain}")
 
         async with sem:
-            path, failure_type, reason = await pool.capture_url(url, OUTPUT_DIR, retries=3)
+            path, failure_type, reason = await pool.capture_url(url, OUTPUT_DIR, retries=3, keywords=keywords)
 
         if path and is_valid_screenshot(path):
-            run_captured += 1
+            stats["captured"] += 1
             checked_domains().update_one(
                 {"_id": domain},
                 {"$set": {
                     "screenshot_taken": True,
                     "screenshot_failed_reason": None,
+                    "reason": reason if isinstance(reason, list) and reason else doc.get("reason", []),
                 }}
             )
-        else:
-            run_failed += 1
-            new_status = "blocked" if failure_type == "blocked" else "dead"
-            fail_reason = reason or ("HTTP 403 / Blocked" if new_status == "blocked" else "page not reachable or blank")
-
-            # Update checked_domains with reclassified status (dead / blocked)
+        elif failure_type == "regular":
+            stats["regular"] += 1
+            # Reclassify as regular (not gambling) — remove screenshot & export fields
             checked_domains().update_one(
                 {"_id": domain},
                 {
                     "$set": {
-                        "status": new_status,
-                        "screenshot_taken": False,
-                        "screenshot_failed_reason": fail_reason,
-                        "exported": False,
+                        "status": "regular",
+                        "reason": reason if isinstance(reason, list) else [],
                     },
                     "$unset": {
-                        "export_status": "",
+                        "screenshot_taken": "",
+                        "screenshot_failed_reason": "",
+                        "exported": "",
                         "exported_at": ""
                     }
                 }
             )
-
-            # Update source collection domain_Listed
-            active_val = "blocked" if new_status == "blocked" else False
             source_domains().update_one(
                 {"_id": domain},
-                {"$set": {"active": active_val}}
+                {"$set": {"active": True}}
             )
+        elif failure_type == "blocked":
+            stats["blocked"] += 1
+            # Reclassify as blocked (403 / Cloudflare / WAF)
+            checked_domains().update_one(
+                {"_id": domain},
+                {
+                    "$set": {
+                        "status": "blocked",
+                        "reason": ["http_403_or_blocked"],
+                    },
+                    "$unset": {
+                        "screenshot_taken": "",
+                        "screenshot_failed_reason": "",
+                        "exported": "",
+                        "exported_at": ""
+                    }
+                }
+            )
+            source_domains().update_one(
+                {"_id": domain},
+                {"$set": {"active": "blocked"}}
+            )
+        else:
+            stats["dead"] += 1
+            # Reclassify as dead / unreachable
+            fail_reason = [str(reason)] if reason and isinstance(reason, str) else (reason if isinstance(reason, list) else ["unreachable"])
+            checked_domains().update_one(
+                {"_id": domain},
+                {
+                    "$set": {
+                        "status": "dead",
+                        "reason": fail_reason,
+                    },
+                    "$unset": {
+                        "screenshot_taken": "",
+                        "screenshot_failed_reason": "",
+                        "exported": "",
+                        "exported_at": ""
+                    }
+                }
+            )
+            source_domains().update_one(
+                {"_id": domain},
+                {"$set": {"active": False}}
+            )
+
         pbar.update(1)
         pbar.set_postfix({"Left": total_pending - pbar.n})
 
@@ -101,5 +147,15 @@ async def run(concurrency: int = None, limit: int = 0) -> list[str]:
         await pool.close()
         pbar.close()
 
-    print(f"[capture] Done. Processed={len(pending)}: captured={run_captured} failed={run_failed}")
+    print("\n" + "=" * 60)
+    print("                CAPTURE & VERIFICATION SUMMARY                ")
+    print("=" * 60)
+    print(f" Total Domains Checked in this run : {total_pending:,}")
+    print(f"  * Screenshots Captured (Gambling): {stats['captured']:,}")
+    print(f"  * Reclassified as Regular Site   : {stats['regular']:,}")
+    print(f"  * Reclassified as Blocked (403)  : {stats['blocked']:,}")
+    print(f"  * Reclassified as Dead / Offline : {stats['dead']:,}")
+    print("=" * 60 + "\n")
+
     return processed_ids
+

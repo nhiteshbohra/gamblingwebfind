@@ -2,7 +2,7 @@
 
 ## Overview
 
-**gamblingwebfind** is a four-stage Python pipeline for discovering, classifying, and documenting online gambling websites. All stages share a single MongoDB instance (`gamblingsites`) and a single `.env` configuration file at the project root.
+**gamblingwebfind** is a multi-stage Python pipeline for discovering, classifying, and documenting online gambling websites. All stages share a single MongoDB instance (`gamblingsites` by default, customizable via `.env`) and a single `.env` configuration file at the project root.
 
 ---
 
@@ -45,9 +45,12 @@
 │           → BeautifulSoup text extraction                            │
 │           → Keyword matching against gambling_top_500_keywords.json  │
 │           Rule: >= 3 keyword matches → status = "gambling"           │
-│  Output : checked_domains { status, reason, checked_at, ... }        │
+│  Deep   : checking_url/deep_crawl.py                                 │
+│           Extracts outbound gambling links from aggregator pages     │
+│           Saves new domains → domain_Listed { source:"deep_crawl" }  │
+│  Output : checked_domains { status, reason, added_date, ... }        │
 │           domain_Listed.processed = true   (stamps after each check) │
-│  Export : output/verify_results.xlsx (4 sheets)                      │
+│  Export : output/verify_results.xlsx (4 sheets, clickable links)     │
 │                                                                      │
 │  Status values written:                                              │
 │    gambling  — >= 3 keyword matches confirmed                        │
@@ -83,17 +86,18 @@ Every document in `domain_Listed` carries a `processed` field that prevents Stag
 | State | Value | Meaning |
 |-------|-------|---------|
 | Newly inserted by Stage 0 or Stage 1 | `false` | Not yet checked — eligible for Stage 2 |
+| Discovered via Deep Crawl in Stage 2 | `false` | Outbound domain from aggregator — eligible for Stage 2 |
 | Just checked by Stage 2 | `true` | Done — Stage 2 will never touch it again |
-| Imported from Excel via `import_output_excel.py` | `true` | Already has results — skip |
+| Synced via `compare_processed_domains.py` | `true` | Matched with existing results in `checked_domains` |
 
 **How Stage 2 filters:** `{ active: true, processed: { $ne: true } }`  
 Using `$ne: true` (not equal to true) means legacy documents without the field are treated as unprocessed — fully backward compatible.
 
-**Atomicity:** `write_result()` in `db/mongo_client.py` writes to `checked_domains` AND flips `processed: true` on the source document in the same function call — no crash window between the two writes.
+**Atomicity:** `write_result()` in `db/mongo_client.py` writes to `checked_domains` AND flips `processed: true` on the source document in the same function call.
 
 ---
 
-## MongoDB — Database: `gamblingsites`
+## MongoDB Schema Specifications
 
 ### Collection 1: `domain_Listed` — Source of domains to process
 
@@ -103,157 +107,138 @@ Using `$ne: true` (not equal to true) means legacy documents without the field a
   "domain": "we-play.poker",
   "active": true,
   "processed": false,
-  "added_date": "2026-08-13"
+  "added_date": "2026-08-13",
+  "source": "searxng_search"
 }
 ```
 
 | Field | Type | Set by | Description |
 |-------|------|--------|-------------|
-| `_id` | string | Stage 0/1 | Domain name (primary key) |
-| `domain` | string | Stage 0/1 | e.g. `"bet365.com"` |
+| `_id` | string | Stage 0/1/DeepCrawl | Domain name (primary key) |
+| `domain` | string | Stage 0/1/DeepCrawl | e.g. `"bet365.com"` |
 | `active` | bool/string | Stage 0/1 | `true` = reachable, `false` = dead, `"blocked"` = WAF |
 | `processed` | bool | Stage 2 | `false` on insert; `true` after Stage 2 checks it |
-| `added_date` | string | Stage 0/1 | First import date `YYYY-MM-DD` — set once, never overwritten |
+| `added_date` | string | Stage 0/1/DeepCrawl | First import date `YYYY-MM-DD` — set once via `$setOnInsert` |
+| `source` | string | Stage 0/1/DeepCrawl | Origin e.g. `"searxng_search"`, `"common_crawl"`, `"deep_crawl"` |
+| `discovered_from` | string | Stage 2 DeepCrawl | Aggregator domain that contained the link (optional) |
 
-### Collection 2: `checked_domains` — Classification results
+### Collection 2: `checked_domains` — Minimal classification results
+
+Documents follow a strict minimal schema to eliminate database bloat:
 
 ```json
+// Gambling domain (before capture/export)
 {
   "_id": "we-play.poker",
   "domain": "we-play.poker",
   "url": "https://we-play.poker",
   "status": "gambling",
-  "reason": ["play now", "cashier", "casino", "poker", "wager", "responsible gambling"],
-  "checked_at": "2026-08-13 19:45:00 IST",
-  "screenshot_taken": true,
-  "screenshot_failed_reason": null,
+  "reason": ["play now", "cashier", "casino", "poker", "wager"],
   "added_date": "2026-08-13",
-  "exported": true,
-  "exported_at": "2026-08-13"
+  "screenshot_taken": false,
+  "screenshot_failed_reason": null
+}
+
+// Regular / Blocked / Dead domain
+{
+  "_id": "example.org",
+  "domain": "example.org",
+  "url": "https://example.org",
+  "status": "regular",
+  "reason": ["sports"],
+  "added_date": "2026-08-13"
 }
 ```
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `_id` | string | Domain name (primary key) |
-| `domain` | string | Same as `_id` |
-| `url` | string | Full normalized URL |
-| `status` | string | `"gambling"` / `"regular"` / `"blocked"` / `"dead"` |
-| `reason` | array | Matched keyword signals from the 500-keyword list |
-| `checked_at` | string | Timestamp of classification in IST |
-| `screenshot_taken` | bool | `true` after successful screenshot |
-| `screenshot_failed_reason` | string | Error message if capture failed, else `null` |
-| `added_date` | string | First import date — `YYYY-MM-DD`, set once |
-| `exported` | bool | `true` once included in a report |
-| `exported_at` | string | Export date — `YYYY-MM-DD` |
+| Field | Type | Present On | Description |
+|-------|------|------------|-------------|
+| `_id` | string | All docs | Domain name (primary key) |
+| `domain` | string | All docs | Same as `_id` |
+| `url` | string | All docs | Full normalized URL |
+| `status` | string | All docs | `"gambling"` / `"regular"` / `"blocked"` / `"dead"` |
+| `reason` | array | All docs | Matched keyword signals |
+| `added_date` | string | All docs | First import date — `YYYY-MM-DD` |
+| `screenshot_taken` | bool | `gambling` only | `true` after successful screenshot |
+| `screenshot_failed_reason` | string | `gambling` only | Error message if capture failed, else `null` |
+| `exported` | bool | Exported docs only | `true` once included in an export report |
+| `exported_at` | string | Exported docs only | Export date — `YYYY-MM-DD` |
 
 ---
 
-## File Structure & What Each File Does
+## File Structure & Module Organization
 
 ```
 gamblingwebfind/
 │
-├── .env                              ← Single config for all stages
+├── .env                              ← Single config for all pipeline stages
 ├── .env.example                      ← Template with all variables documented
-├── main.py                           ← Interactive menu entry point (Options 0–5)
+├── main.py                           ← Interactive menu entry point (Options 0–4)
 ├── gambling_top_500_keywords.json    ← 500 gambling signal keywords for Stage 2
 ├── requirements.txt                  ← All Python dependencies
 │
 ├── keywordssearch/                   ← STAGE 0 — SearXNG web search
-│   ├── searxng_search.py             ← Core: search → extract domains → save to MongoDB
-│   │                                    • start_searxng_docker(): auto-starts Docker
-│   │                                    • search_keyword_urls(): calls SearXNG JSON API
-│   │                                    • save_domains_to_mongo(): $setOnInsert with processed:false
-│   ├── docker-compose.yml            ← Defines Redis + SearXNG containers
+│   ├── searxng_search.py             ← Docker auto-start + search + save to MongoDB
+│   ├── docker-compose.yml            ← Redis + SearXNG container definitions
 │   └── searxng/
-│       └── settings.yml              ← SearXNG config: JSON API on, web engines only
+│       └── settings.yml              ← SearXNG config (JSON API enabled)
 │
 ├── keywordsindomainfetch/            ← STAGE 1 — Common Crawl domain extraction
-│   ├── find_domains.py               ← Main script:
-│   │                                    • Downloads CC-MAIN-2024-22 parquet index
-│   │                                    • DuckDB SQL LIKE queries for keyword domains
-│   │                                    • DNS check → HTTP probe → MongoDB upsert
-│   │                                    • Checkpoint/resume system
-│   └── manifests/                    ← Cached CC crawl manifest (.warc.paths.gz)
+│   ├── find_domains.py               ← Common Crawl DuckDB SQL query → DNS/HTTP probe
+│   └── manifests/                    ← Cached CC crawl manifest files
 │
-├── db/                               ← Shared MongoDB layer (used by all stages)
-│   └── mongo_client.py               ← Central DB module:
-│                                        • get_db(): singleton MongoDB connection
-│                                        • source_domains(): domain_Listed collection
-│                                        • checked_domains(): checked_domains collection
-│                                        • find_active_domains(): { active:true, processed:{$ne:true} }
-│                                        • write_result(): writes to checked_domains AND flips processed:true atomically
-│                                        • mark_domain_processed(): flip processed:true on source doc
-│                                        • find_pending_capture(): gambling + screenshot_taken:false
-│                                        • seed_from_csv(): bulk import from CSV file
-│                                        • normalize_url(): strips tracking params, normalises scheme
-│                                        • extract_domain(): tldextract registered domain
-│                                        NOTE: _id (domain name) is the ONLY index — no extra indexes created
+├── db/                               ← Shared MongoDB layer
+│   └── mongo_client.py               ← Connection singleton, write_result(), seed_discovered_domains()
 │
 ├── checking_url/                     ← STAGE 2 — URL fetching & classification
-│   ├── runner.py                     ← Orchestrator:
-│   │                                    • Loads keywords once at startup
-│   │                                    • asyncio.gather() across all pending domains
-│   │                                    • Semaphore-limited concurrency
-│   ├── fetcher.py                    ← Two-tier HTTP fetcher:
-│   │                                    Tier 1: Scrapling AsyncFetcher (curl_cffi, fast)
-│   │                                    Tier 2: StealthyFetcher (real browser, Cloudflare solver)
-│   │                                    • Per-domain rate limiting via checked_domains.last_updated_at
-│   │                                    • Failure classification: blocked / dead_confirmed / connection_failed
-│   └── classifier.py                 ← Gambling keyword matcher:
-│                                        • load_keywords(): reads gambling_top_500_keywords.json
-│                                        • _extract_text(): BeautifulSoup visible text + meta tags
-│                                        • classify(): >= 3 matches → gambling; hard-excludes .gov/.edu
+│   ├── runner.py                     ← Orchestrator (async fetch + classification + deep crawl hook)
+│   ├── fetcher.py                    ← Two-tier HTTP fetcher (Fast AsyncFetcher + StealthyFetcher)
+│   ├── classifier.py                 ← Keyword matcher & parked lander detector
+│   └── deep_crawl.py                 ← Outbound link extractor for aggregator gambling pages
 │
 ├── capture_url/                      ← STAGE 3 — Screenshot capture & reporting
-│   ├── runner.py                     ← Orchestrator:
-│   │                                    • Fetches gambling domains with screenshot_taken=false
-│   │                                    • BrowserPool for concurrent Playwright captures
-│   │                                    • Reclassifies dead/blocked on capture failure
-│   ├── screenshot.py                 ← Playwright BrowserPool:
-│   │                                    • Progressive nav strategy per retry (domcontentloaded → load → commit)
-│   │                                    • wait_for_load_state('networkidle'): waits for all XHR to finish
-│   │                                    • Scroll trigger: scrolls bottom → top to load lazy content
-│   │                                    • Settle delay: 1s → 1.5s → 2.0s per retry
-│   │                                    • is_valid_screenshot(): size + colour-variance validation
-│   ├── excel_exporter.py             ← MongoDB → Excel workbooks:
-│   │                                    • export_verify_workbook(): 4 sheets (Gambling/Blocked/Dead/Regular)
-│   │                                    • export_capture_workbook(): 2 sheets (Captured/Failed)
-│   └── docx_report_generator.py      ← MongoDB → Word report:
-│                                        • 2 targets per page (hyperlink + screenshot)
-│                                        • Auto-deletes temp JPEGs after embedding
+│   ├── runner.py                     ← Orchestrator (Playwright BrowserPool)
+│   ├── screenshot.py                 ← Playwright capture with full-load wait strategy
+│   ├── excel_exporter.py             ← MongoDB → Excel workbooks (clickable hyperlinks)
+│   └── docx_report_generator.py      ← MongoDB → Word/PDF reports (2 targets/page, clickable hyperlinks)
 │
-└── project_sup/                      ← Manual utility scripts (run independently)
-    └── mongodbupdate/
-        ├── import_output_excel.py    ← Bulk Excel importer:
-        │                                • Reads Verified/Rejected/Dead/Blocked sheets
-        │                                • Upserts into domain_Listed (processed:true) + checked_domains
-        │                                • $setOnInsert for added_date — never overwrites existing
-        ├── update_export_status.py   ← Marks domains as exported in MongoDB:
-        │                                • Sets exported:true, export_status, exported_at, screenshot_taken
-        │                                • Reads from a CSV of already-exported domains
-        └── arrange_docx_report.py    ← Post-processing Word report tool:
-                                         • Re-arranges existing report to 2 items per page
-                                         • Matches CSV target numbers to DOCX screenshot images
-                                         • Supports batch splitting (e.g. 1000 targets per file)
+└── project_sup/                      ← Project support & utility scripts
+    └── helping_code/
+        ├── audit_db.py               ← Database health check & interactive/automated schema cleanup
+        ├── cleanup_db.py             ← Wrapper delegating directly to audit_db.py --fix
+        ├── compare_dbs.py            ← Interactive tool to compare & sync domains between two DBs
+        ├── compare_processed_domains.py.py ← Syncs processed=True flag for domains in checked_domains
+        ├── batch_splitter.py         ← Splits CSV and PDF reports into batch subfolders
+        ├── import_output_excel.py    ← Bulk Excel importer into MongoDB
+        ├── merge_pdfs.py             ← PDF merger tool
+        └── arrange_docx_report.py    ← Post-processing Word report formatting tool
 ```
 
 ---
 
 ## Output Directory Structure
 
-All generated reports land in a single `output/` folder at the project root:
+All generated reports land in a timestamped folder inside `output/` with flexible export modes:
 
 ```
 gamblingwebfind/
 └── output/
-    ├── verify_results.xlsx                        ← Stage 2 output (4 sheets)
-    │                                                 Gambling | Blocked | Dead | Regular
-    ├── capture_report_<YYYY-MM-DD_HH-MM-SS>.docx ← Stage 3 Word report
-    │                                                 2 targets per page, clickable links
-    └── capture_results_<YYYY-MM-DD_HH-MM-SS>.xlsx ← Stage 3 Excel (Captured / Failed)
+    └── <YYYYMMDD_HHMMSS>/
+        ├── captured_domains_combined.xlsx         ← Single Master Excel (if Single/Both chosen)
+        ├── capture_report_combined.docx           ← Single Master Word (if Single/Both chosen)
+        ├── capture_report_combined.pdf            ← Single Master PDF (if Single/Both chosen)
+        │
+        ├── batch_001/                             ← Batched Deliverables (if Batch/Both chosen)
+        │   ├── batch_001_domains.xlsx
+        │   ├── batch_001_report.docx
+        │   └── batch_001_report.pdf
+        ├── batch_002/
+        │   ├── batch_002_domains.xlsx
+        │   ├── batch_002_report.docx
+        │   └── batch_002_report.pdf
+        │
+        └── failed_domains.xlsx                    ← Failed domains with failure reasons
 ```
+
 
 ---
 
@@ -261,16 +246,52 @@ gamblingwebfind/
 
 ```env
 # ── SearXNG Keyword Search (Stage 0) ──────────────────────────────────────────
-# SearXNG runs via Docker (auto-started when you pick Option 0)
 SEARXNG_BASE_URL=http://127.0.0.1:8080
-SEARXNG_MAX_PAGES=4         # Pages per keyword (10 results/page)
-SEARXNG_PAGE_DELAY=1.0      # Seconds between pages
-SEARXNG_TIMEOUT=10.0        # HTTP timeout per request
+SEARXNG_MAX_PAGES=4
+SEARXNG_PAGE_DELAY=1.0
+SEARXNG_TIMEOUT=10.0
 
 # ── MongoDB Configuration ──────────────────────────────────────────────────────
 MONGO_URI=mongodb://localhost:27017/
 MONGO_DB_NAME=gamblingsites
-MONGO_COLLECTION=domain_Listed        # Stage 0/1 output — Stage 2 source
+MONGO_DB2_NAME=gamblingsitetry
+MONGO_COLLECTION=domain_Listed
+CHECKED_COLLECTION=checked_domains
+
+# ── Stage 1 — Common Crawl Tuning ─────────────────────────────────────────────
+MAX_WORKERS=200
+TIMEOUT=5.0
+MONGO_BATCH_SIZE=1000
+PARQUET_BATCH_SIZE=20
+EXPORT_TO_MONGO=true
+
+# ── Stage 2 — URL Checking Tuning ─────────────────────────────────────────────
+FETCH_TIMEOUT=10
+PER_DOMAIN_DELAY=2.0
+MAX_CONCURRENT_FETCHES=20
+STEALTH_FALLBACK=false
+STEALTH_TIMEOUT=60
+STEALTH_CONCURRENCY=3
+
+# ── Deep Crawl Link Extraction ────────────────────────────────────────────────
+DEEP_CRAWL_MIN_LINKS=3
+DEEP_CRAWL_STRICT=false
+
+# ── Stage 3 — Screenshot Tuning ───────────────────────────────────────────────
+SCREENSHOT_CONCURRENCY=15
+```
+
+---
+
+## Key Architectural Principles
+
+1. **`processed` flag:** Every domain is checked at most once. Stage 2 only picks up `processed != true` documents. Once checked, `write_result()` atomically flips it to `true` alongside writing the result.
+2. **Deep Crawl Aggregator Discovery:** When an aggregator page is identified as gambling, outbound external links are extracted, filtered against a strict blocklist, and seeded into `domain_Listed` for future checks.
+3. **Clickable Hyperlinks:** All exported URLs in Excel, Word, and PDF reports are built with active `https://` OpenXML and openpyxl web hyperlinks.
+4. **Minimal Schema Design:** No bloat fields (`checked_at`, `last_updated_at`). Screenshot and export metadata exist only on relevant documents.
+5. **Unified `.env` Config:** Single `.env` drives pipeline execution and helper utility tools.
+6. **Automated DB Health & Cleanup:** `audit_db.py` audits schema health and repairs bloat or missing flags safely.
+ce
 CHECKED_COLLECTION=checked_domains    # Stage 2/3 output
 KEYWORDS_COLLECTION=keywords
 
