@@ -92,8 +92,6 @@ def sync_screenshots_to_db() -> dict:
         return {"total": 0, "synced": 0, "invalid": 0}
 
     fn_map = build_filename_to_doc_map(image_files)
-    now_ts = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
-
     checked_ops = []
     source_ops = []
     synced_count = 0
@@ -123,10 +121,8 @@ def sync_screenshots_to_db() -> dict:
                         "url": url,
                         "status": "gambling",
                         "screenshot_taken": True,
-                        "screenshot_filename": fn,
                         "screenshot_failed_reason": None,
                         "exported": False,
-                        "synced_at": now_ts,
                     }
                 },
                 upsert=True,

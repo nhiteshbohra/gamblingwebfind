@@ -218,12 +218,11 @@ def build_report_from_mongo(
         domain = d.get("domain") or d.get("_id")
         url = d.get("url") or f"https://{domain}"
         
-        candidates = []
-        if d.get("screenshot_filename"):
-            candidates.append(d["screenshot_filename"])
-        candidates.append(_url_to_filename(url))
-        candidates.append(_url_to_filename(f"https://{domain}"))
-        candidates.append(_url_to_filename(f"http://{domain}"))
+        candidates = [
+            _url_to_filename(url),
+            _url_to_filename(f"https://{domain}"),
+            _url_to_filename(f"http://{domain}"),
+        ]
 
         src_jpg = None
         filename = None
