@@ -95,12 +95,15 @@ def _convert_to_pdf(docx_path: str) -> str | None:
     return None
 
 
+from xml.sax.saxutils import escape as xml_escape
+
 def add_clickable_hyperlink(paragraph, url: str, text: str, font_size_pt=12.0):
     """Inject an active, clickable OpenXML hyperlink run with 12pt blue underlined text."""
     full_url = url if (url.startswith("http://") or url.startswith("https://")) else f"https://{url}"
     part = paragraph.part
     r_id = part.relate_to(full_url, docx.opc.constants.RELATIONSHIP_TYPE.HYPERLINK, is_external=True)
 
+    safe_text = xml_escape(str(text or ""))
     hyperlink = parse_xml(f'<w:hyperlink {nsdecls("w")} {nsdecls("r")} r:id="{r_id}"/>')
     run = parse_xml(f'<w:r {nsdecls("w")}/>')
 
@@ -110,7 +113,7 @@ def add_clickable_hyperlink(paragraph, url: str, text: str, font_size_pt=12.0):
     rPr.append(parse_xml(f'<w:u {nsdecls("w")} w:val="single"/>'))
     rPr.append(parse_xml(f'<w:sz {nsdecls("w")} w:val="{int(font_size_pt * 2)}"/>'))
     run.append(rPr)
-    run.append(parse_xml(f'<w:t {nsdecls("w")}>{text}</w:t>'))
+    run.append(parse_xml(f'<w:t {nsdecls("w")} xml:space="preserve">{safe_text}</w:t>'))
     hyperlink.append(run)
     paragraph._p.append(hyperlink)
 
@@ -204,14 +207,26 @@ def build_report_from_mongo(
 
     captured = list(checked_domains().find(query))
     screenshots_dir = os.path.join("output", "screenshots")
+    dest_screenshots_dir = os.path.join(output_dir, "screenshots")
+    os.makedirs(dest_screenshots_dir, exist_ok=True)
 
     # Only include entries where the JPEG is actually on disk
     entries = []
     missing_ids = []
+    import shutil
     for d in captured:
-        jpg_path = os.path.join(screenshots_dir, _url_to_filename(d["url"]))
-        if os.path.exists(jpg_path):
-            entries.append({"url": d["url"], "screenshot_path": jpg_path})
+        filename = _url_to_filename(d["url"])
+        src_jpg = os.path.join(screenshots_dir, filename)
+        dest_jpg = os.path.join(dest_screenshots_dir, filename)
+
+        if os.path.exists(src_jpg):
+            try:
+                shutil.move(src_jpg, dest_jpg)
+                entries.append({"url": d["url"], "screenshot_path": dest_jpg})
+            except Exception:
+                entries.append({"url": d["url"], "screenshot_path": src_jpg})
+        elif os.path.exists(dest_jpg):
+            entries.append({"url": d["url"], "screenshot_path": dest_jpg})
         else:
             missing_ids.append(d["_id"])
 

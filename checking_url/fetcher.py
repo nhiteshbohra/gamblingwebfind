@@ -58,11 +58,17 @@ class FetchResult:
 
 def _result_from_response(url: str, resp, latency: float) -> FetchResult:
     """Turn a scrapling Response into a FetchResult, applying body-marker sniffing."""
-    status = resp.status
-    try:
-        html = resp.body.decode(resp.encoding or 'utf-8', errors='ignore')
-    except Exception:
-        html = ''
+    if resp is None:
+        return FetchResult(url=url, latency=latency, failure_type='connection_failed')
+    
+    status = getattr(resp, "status", 0)
+    raw_body = getattr(resp, "body", None)
+    if isinstance(raw_body, bytes):
+        html = raw_body.decode(getattr(resp, "encoding", "utf-8") or "utf-8", errors="ignore")
+    elif isinstance(raw_body, str):
+        html = raw_body
+    else:
+        html = ""
 
     if status >= 400 or not html.strip():
         ft = _classify_failure(status_code=status, html=html)
@@ -81,7 +87,7 @@ def _result_from_response(url: str, resp, latency: float) -> FetchResult:
 
 async def fetch(url: str, domain_id: str, timeout_seconds=10, per_domain_delay=2.0, retries=2) -> FetchResult:
     """Fetch a URL using AsyncFetcher with TLS/browser impersonation."""
-    start = asyncio.get_event_loop().time()
+    start = asyncio.get_running_loop().time()
     try:
         resp = await AsyncFetcher.get(
             url,
@@ -92,9 +98,9 @@ async def fetch(url: str, domain_id: str, timeout_seconds=10, per_domain_delay=2
             retries=retries,
         )
     except Exception as e:
-        latency = asyncio.get_event_loop().time() - start
+        latency = asyncio.get_running_loop().time() - start
         return FetchResult(url=url, latency=latency, error=str(e), failure_type='connection_failed')
 
-    latency = asyncio.get_event_loop().time() - start
+    latency = asyncio.get_running_loop().time() - start
     return _result_from_response(url, resp, latency)
 

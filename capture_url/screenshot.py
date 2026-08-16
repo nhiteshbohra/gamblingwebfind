@@ -2,7 +2,7 @@ import os
 import io
 import asyncio
 import urllib.parse
-from PIL import Image
+from PIL import Image, ImageStat
 from playwright.async_api import async_playwright, Browser, Playwright
 
 from checking_url.classifier import classify, load_keywords
@@ -21,8 +21,13 @@ def _url_to_filename(url: str) -> str:
         return f"{clean_domain}_{clean_path}_{url_hash}.jpg"
     return f"{clean_domain}_{url_hash}.jpg"
 
-def is_valid_screenshot(filepath: str, min_size_bytes: int = 4000) -> bool:
-    """Validate that screenshot exists, is a valid JPEG, > min_size_bytes (>=4KB), and not a blank/solid single-color image."""
+def is_valid_screenshot(filepath: str, min_size_bytes: int = 6000) -> bool:
+    """
+    Validate that screenshot:
+    1. Exists and is >= 6KB.
+    2. Is a valid uncorrupted image.
+    3. Is NOT a blank solid color or near-blank white/black screen (stat.stddev < 3.0).
+    """
     if not os.path.exists(filepath):
         return False
     if os.path.getsize(filepath) < min_size_bytes:
@@ -33,7 +38,10 @@ def is_valid_screenshot(filepath: str, min_size_bytes: int = 4000) -> bool:
         with Image.open(filepath) as img:
             gray = img.convert('L')
             extrema = gray.getextrema()
-            if extrema[0] == extrema[1]:  # Completely solid color (blank white/black)
+            if extrema[0] == extrema[1]:
+                return False
+            stat = ImageStat.Stat(gray)
+            if stat.stddev[0] < 3.0:  # Pure white, pure dark, or empty flat background
                 return False
         return True
     except Exception:
@@ -64,8 +72,20 @@ class BrowserPool:
                 )
 
     async def ensure_browser(self):
-        if not self.browser or not self.browser.is_connected():
-            await self.start()
+        async with self._lock:
+            if not self.playwright:
+                self.playwright = await async_playwright().start()
+            if not self.browser or not self.browser.is_connected():
+                self.browser = await self.playwright.chromium.launch(
+                    headless=True,
+                    args=[
+                        '--disable-dev-shm-usage',
+                        '--no-sandbox',
+                        '--disable-setuid-sandbox',
+                        '--disable-gpu',
+                        '--disable-blink-features=AutomationControlled'
+                    ]
+                )
 
     async def close(self):
         async with self._lock:
@@ -106,6 +126,7 @@ class BrowserPool:
 
         last_failure_type = "dead"
         last_reason = "timeout or blank"
+        matched_reasons = []  # guard: always defined even if raw_html is empty on success path
 
         for attempt in range(retries):
             await self.ensure_browser()
@@ -199,21 +220,15 @@ class BrowserPool:
                             pass
                     return None, last_failure_type, last_reason
 
-                # ── LAYER 2: Live HTML Keyword Re-Classification ─────────────
+                # ── LAYER 2: Live HTML Parked / WAF Re-check ─────────────────────────
                 if raw_html:
-                    is_gambling, matched_reasons = classify(
-                        raw_html, url=target_url, keywords=keywords, min_keywords=1
+                    decision, matched_reasons = classify(
+                        raw_html, url=target_url, keywords=keywords
                     )
-                    if not is_gambling:
-                        # Page is reachable but NOT gambling — reclassify as regular!
+                    # Only reject if page changed to a parked lander or negative archetype during navigation
+                    if any("excluded:" in str(r) for r in matched_reasons):
                         await context.close()
                         context = None
-                        if os.path.exists(filepath):
-                            try:
-                                # User requested NOT to delete the image, keep it in folder
-                                pass # os.remove(filepath)
-                            except Exception:
-                                pass
                         return None, "regular", matched_reasons
                 else:
                     matched_reasons = []
@@ -274,12 +289,11 @@ class BrowserPool:
                 else:
                     if os.path.exists(filepath):
                         try:
-                            # User requested NOT to delete the image, keep it in folder
-                            pass # os.remove(filepath)
+                            os.remove(filepath)
                         except Exception:
                             pass
-
-
+                    last_failure_type = "dead"
+                    last_reason = "Blank / solid color render discarded"
 
             except Exception as e:
                 err_text = str(e)

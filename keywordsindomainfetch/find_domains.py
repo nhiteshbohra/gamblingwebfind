@@ -51,8 +51,8 @@ def get_config():
     """Retrieve settings from .env file or default fallbacks."""
     return {
         "mongo_uri": os.getenv("MONGO_URI", "mongodb://localhost:27017/"),
-        "db_name": os.getenv("MONGO_DB_NAME", "domain_finder"),
-        "collection": os.getenv("MONGO_COLLECTION", "domains"),
+        "db_name": os.getenv("MONGO_DB_NAME", "gamblingsites"),
+        "collection": os.getenv("MONGO_COLLECTION", "domain_Listed"),
         "export_enabled": os.getenv("EXPORT_TO_MONGO", "true").lower() in ("true", "1", "yes"),
         "batch_size": int(os.getenv("MONGO_BATCH_SIZE", "1000")),
         "max_workers": int(os.getenv("MAX_WORKERS", "200")),

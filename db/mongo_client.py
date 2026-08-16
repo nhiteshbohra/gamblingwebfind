@@ -34,7 +34,15 @@ def get_db():
     if _client is None:
         uri = os.getenv("MONGO_URI", "mongodb://localhost:27017/")
         db_name = os.getenv("MONGO_DB_NAME", "gamblingsites")
-        _client = MongoClient(uri)
+        _client = MongoClient(
+            uri,
+            serverSelectionTimeoutMS=10000,
+            connectTimeoutMS=10000,
+            socketTimeoutMS=30000,
+            maxPoolSize=100,
+            minPoolSize=5,
+            retryWrites=True,
+        )
         _db = _client[db_name]
     return _db
 
@@ -122,40 +130,41 @@ def find_blocked_domains(limit: int = 0):
                     return
 
 
-def find_gambling_domains_by_date(added_date: str, limit: int = 0):
-    """Yield domains currently marked as gambling with the specified added_date."""
-    query = {"status": "gambling", "added_date": added_date}
-    cur = checked_domains().find(query)
+def find_unconfirmed_domains(limit: int = 0):
+    """Yield domains previously marked as unconfirmed in checked_domains."""
+    seen = set()
+    cur_checked = checked_domains().find({"status": "unconfirmed"})
     if limit:
-        cur = cur.limit(limit)
-    for doc in cur:
+        cur_checked = cur_checked.limit(limit)
+    for doc in cur_checked:
         domain = doc.get("domain") or doc.get("_id")
-        if domain:
-            yield {
-                "domain": domain,
-                "_id": domain,
-                "url": doc.get("url", f"https://{domain}"),
-                "added_date": doc.get("added_date"),
-            }
+        if domain and domain not in seen:
+            seen.add(domain)
+            yield {"domain": domain, "_id": domain, "url": doc.get("url", f"https://{domain}")}
+            if limit and len(seen) >= limit:
+                return
 
 
 # ── Result writer ─────────────────────────────────────────────────────────────
 
-from datetime import datetime, timezone, timedelta
+def write_result(
+    domain: str,
+    *,
+    status: str,
+    reason: list,
+    url: str = None,
+    screenshot_taken: bool | None = None,
+    screenshot_failed_reason: str | None = None,
+):
+    """Upsert a classification result into checked_domains AND sync active/processed
+    in domain_Listed.
 
-IST = timezone(timedelta(hours=5, minutes=30))
-
-
-def write_result(domain: str, *, status: str, reason: list, url: str = None):
-    """Upsert a classification result into checked_domains AND mark the
-    source domain as processed in domain_Listed.
-
-    Minimal document schema — only gambling domains get screenshot fields,
-    and only on first insert. No checked_at / last_updated_at bloat.
-
-    Before export:  { _id, domain, url, status, reason, added_date }
-    After capture:  + screenshot_taken, screenshot_failed_reason
-    After export:   + exported, exported_at
+    Statuses handled:
+      - 'gambling': live verified gambling site (+ immediate screenshot flag)
+      - 'regular': non-gambling site
+      - 'unconfirmed': Ollama was offline for a 1-2 keyword site (processed=False to re-run!)
+      - 'blocked': 403 / Cloudflare WAF
+      - 'dead': 404 / Connection failed / Parked lander
     """
     today_date = datetime.now(IST).strftime("%Y-%m-%d")
 
@@ -164,49 +173,63 @@ def write_result(domain: str, *, status: str, reason: list, url: str = None):
         "url": url or f"https://{domain}",
         "status": status,
         "reason": reason or [],
-        "added_date": today_date,
     }
+
+    if screenshot_taken is not None:
+        set_fields["screenshot_taken"] = bool(screenshot_taken)
+        set_fields["screenshot_failed_reason"] = screenshot_failed_reason
 
     update = {"$set": set_fields}
 
-    # screenshot fields only for gambling sites, only on first insert
-    if status == "gambling":
-        update["$setOnInsert"] = {
-            "screenshot_taken": False,
-            "screenshot_failed_reason": None,
-        }
+    on_insert_fields = {"added_date": today_date}
 
-    checked_domains().update_one(
-        {"_id": domain},
-        update,
-        upsert=True,
-    )
+    if status == "gambling" and screenshot_taken is None:
+        on_insert_fields["screenshot_taken"] = False
+        on_insert_fields["screenshot_failed_reason"] = None
 
-    # Sync active status in domain_Listed to match new classification.
-    # gambling / regular  ->  active = True   (site is live and classified)
-    # blocked             ->  active = "blocked"
-    # dead                ->  active = False
-    active_val = "blocked" if status == "blocked" else (False if status == "dead" else True)
-    source_domains().update_one(
-        {"_id": domain},
-        {"$set": {"processed": True, "active": active_val}},
-    )
+    update["$setOnInsert"] = on_insert_fields
+
+    import time
+    for attempt in range(3):
+        try:
+            checked_domains().update_one(
+                {"_id": domain},
+                update,
+                upsert=True,
+            )
+
+            # Sync status in source domain_Listed
+            # If unconfirmed (Ollama was down), leave processed=False so it gets re-run!
+            if status == "unconfirmed":
+                source_domains().update_one(
+                    {"_id": domain},
+                    {"$set": {"processed": False, "active": True}},
+                )
+            elif status == "blocked":
+                source_domains().update_one(
+                    {"_id": domain},
+                    {"$set": {"processed": True, "active": "blocked"}},
+                )
+            elif status == "dead":
+                source_domains().update_one(
+                    {"_id": domain},
+                    {"$set": {"processed": True, "active": False}},
+                )
+            else:  # gambling or regular
+                source_domains().update_one(
+                    {"_id": domain},
+                    {"$set": {"processed": True, "active": True}},
+                )
+            break
+        except Exception as e:
+            if attempt < 2:
+                time.sleep(0.5 * (attempt + 1))
+            else:
+                print(f"[write_result WARNING] Failed writing to MongoDB for domain '{domain}': {e}")
 
 
 def get_checked(domain: str) -> dict | None:
     return checked_domains().find_one({"_id": domain})
-
-
-def mark_domain_processed(domain: str):
-    """Flip processed=True on the source domain_Listed document.
-
-    Called by checking_url/runner.py after write_result() so that
-    re-runs of the checker skip this domain entirely.
-    """
-    source_domains().update_one(
-        {"_id": domain},
-        {"$set": {"processed": True}},
-    )
 
 
 def find_pending_capture(limit: int = 0):
@@ -215,6 +238,30 @@ def find_pending_capture(limit: int = 0):
     if limit:
         cur = cur.limit(limit)
     return cur
+
+
+def find_unexported_gambling_domains(limit: int = 0):
+    """Gambling domains that have valid screenshots captured and are pending report export."""
+    query = {
+        "status": "gambling",
+        "screenshot_taken": True,
+        "exported": {"$ne": True},
+    }
+    cur = checked_domains().find(query)
+    if limit:
+        cur = cur.limit(limit)
+    return cur
+
+
+def mark_domains_exported(domain_ids: list[str]):
+    """Mark domain list as exported with timestamp."""
+    if not domain_ids:
+        return
+    now_ts = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
+    checked_domains().update_many(
+        {"_id": {"$in": domain_ids}},
+        {"$set": {"exported": True, "exported_at": now_ts}},
+    )
 
 
 # ── CSV seeder ────────────────────────────────────────────────────────────────

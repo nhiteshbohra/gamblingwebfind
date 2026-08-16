@@ -20,6 +20,7 @@ from dotenv import load_dotenv
 load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env")
 
 from db.mongo_client import get_db
+from checking_url.ai_classifier import check_ollama_status
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 KEYWORDS_FILE = PROJECT_ROOT / "gambling_top_500_keywords.json"
@@ -81,18 +82,21 @@ def run_keywords_search():
 
 
 def ask_checking_mode() -> str:
-    """Prompt user to choose whether to check new unprocessed URLs or re-check blocked URLs."""
+    """Prompt user to choose whether to check new unprocessed URLs, re-check blocked URLs, or re-check unconfirmed URLs."""
     print("\nSelect checking target:")
     print("  1. Check new unprocessed URLs (default)")
     print("  2. Re-check blocked URLs (403 / WAF)")
-    sub_choice = input("Enter choice (1-2) [default: 1]: ").strip()
+    print("  3. Re-check unconfirmed URLs (Ollama AI re-evaluation)")
+    sub_choice = input("Enter choice (1-3) [default: 1]: ").strip()
     if sub_choice == "2":
         return "blocked"
+    if sub_choice == "3":
+        return "unconfirmed"
     return "new"
 
 
 def run_checking_url(mode: str = None):
-    print("\n--- checking_url ---")
+    print("\n--- checking_url (Fetch, AI Classify & Capture Screenshots) ---")
     if mode is None:
         mode = ask_checking_mode()
 
@@ -107,7 +111,7 @@ def run_checking_url(mode: str = None):
 
 
 def run_capture_url():
-    print("\n--- capture_url ---")
+    print("\n--- capture_url (Export Reports: Word, PDF & Excel) ---")
     from capture_url.runner import run as capture_run
     from capture_url.excel_exporter import export_capture_workbook
     from capture_url.docx_report_generator import build_report_from_mongo
@@ -118,7 +122,7 @@ def run_capture_url():
     limit = int(os.getenv("CAPTURE_LIMIT", 0))
     default_batch_size = int(os.getenv("EXPORT_BATCH_SIZE", 40))
 
-    # Ask user for export preference before or during run
+    # Ask user for export preference before run
     print("\n" + "=" * 55)
     print("           SELECT REPORT EXPORT FORMAT           ")
     print("=" * 55)
@@ -137,11 +141,10 @@ def run_capture_url():
     else:
         batch_size = 0
 
-
     processed_ids = asyncio.run(capture_run(concurrency=conc, limit=limit))
 
     if not processed_ids:
-        print("[+] capture_url: No gambling domains pending screenshot.")
+        print("[+] capture_url: No gambling domains pending report export.")
         return
 
     # All output goes into a timestamped run folder: output/<timestamp>/
@@ -162,13 +165,12 @@ def run_capture_url():
         domain_ids=processed_ids,
         output_dir=run_dir,
         batch_size=batch_size,
-        cleanup=True,
+        cleanup=False,
         pdf=True,
         single_file=single_file,
     )
 
-
-    print(f"\n[+] capture_url complete.")
+    print(f"\n[+] Export complete.")
     print(f"    Run folder  : {os.path.abspath(run_dir)}")
     if not single_file:
         print(f"    Batches     : {xlsx_result['batches']} (up to {batch_size} domains each)")
@@ -178,18 +180,17 @@ def run_capture_url():
     print(f"    PDF files   : {len(report_result['pdf_paths'])}")
 
 
-
 def interactive_menu():
     while True:
-        print("\n" + "=" * 55)
-        print("           GAMBLINGWEBFIND PROCESS MENU           ")
-        print("=" * 55)
-        print("0. keywordssearch")
-        print("1. keywordsindomainfetch")
-        print("2. checking_url")
-        print("3. capture_url")
+        print("\n" + "=" * 58)
+        print("             GAMBLINGWEBFIND PROCESS MENU             ")
+        print("=" * 58)
+        print("0. keywordssearch        (SearXNG / Multi-Engine Search)")
+        print("1. keywordsindomainfetch (Common Crawl Parquet Search)")
+        print("2. checking_url          (Fetch, AI Classify & Screenshot)")
+        print("3. capture_url           (Export Word, PDF & Excel Reports)")
         print("4. Exit")
-        print("=" * 55)
+        print("=" * 58)
 
         choice = input("Select an option (0-4): ").strip()
 
@@ -209,7 +210,29 @@ def interactive_menu():
 
 
 def main():
-    get_db()
+    from pymongo.errors import ServerSelectionTimeoutError
+    db_name = os.getenv("MONGO_DB_NAME", "gamblingsites")
+    try:
+        get_db().command("ping")
+        print(f"[+] MongoDB: Connected (Database: '{db_name}')")
+    except ServerSelectionTimeoutError:
+        print(f"[!] Cannot connect to MongoDB — please start MongoDB and try again.")
+        print("    Default URI: mongodb://localhost:27017/")
+        sys.exit(1)
+    except Exception as e:
+        print(f"[!] MongoDB error: {e}")
+        sys.exit(1)
+
+    # Check Ollama AI status
+    try:
+        ollama_ok, ollama_msg = asyncio.run(check_ollama_status())
+        if ollama_ok:
+            print(f"[+] Local AI: {ollama_msg}")
+        else:
+            print(f"[!] Local AI Warning: {ollama_msg}")
+            print("    (If Ollama is offline, 1-2 keyword sites will be marked 'unconfirmed' to re-run later)")
+    except Exception as e:
+        print(f"[!] Local AI status check error: {e}")
 
     parser = argparse.ArgumentParser(description="gamblingwebfind entry point")
     parser.add_argument("--seed", metavar="CSV", help="Import domains from CSV into domain_Listed and exit")

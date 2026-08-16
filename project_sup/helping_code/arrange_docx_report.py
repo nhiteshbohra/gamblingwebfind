@@ -44,12 +44,15 @@ except ImportError:
     sys.exit(1)
 
 
+from xml.sax.saxutils import escape as xml_escape
+
 def add_clickable_hyperlink(paragraph, url: str, text: str, font_size_pt=11.0):
     """Inject an active, clickable OpenXML hyperlink run into Word paragraph."""
     full_url = url if (url.startswith("http://") or url.startswith("https://")) else f"https://{url}"
     part = paragraph.part
     r_id = part.relate_to(full_url, docx.opc.constants.RELATIONSHIP_TYPE.HYPERLINK, is_external=True)
 
+    safe_text = xml_escape(str(text or ""))
     hyperlink = parse_xml(f'<w:hyperlink {nsdecls("w")} {nsdecls("r")} r:id="{r_id}"/>')
     run = parse_xml(f'<w:r {nsdecls("w")}/>')
 
@@ -59,7 +62,7 @@ def add_clickable_hyperlink(paragraph, url: str, text: str, font_size_pt=11.0):
     rPr.append(parse_xml(f'<w:u {nsdecls("w")} w:val="single"/>'))
     rPr.append(parse_xml(f'<w:sz {nsdecls("w")} w:val="{int(font_size_pt * 2)}"/>'))
     run.append(rPr)
-    run.append(parse_xml(f'<w:t {nsdecls("w")}>{text}</w:t>'))
+    run.append(parse_xml(f'<w:t {nsdecls("w")} xml:space="preserve">{safe_text}</w:t>'))
     hyperlink.append(run)
     paragraph._p.append(hyperlink)
 

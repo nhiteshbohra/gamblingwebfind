@@ -76,6 +76,10 @@ _BLOCKLIST = {
     "linkedin.com", "amazon.com", "apple.com", "microsoft.com", "t.co",
     "tiktok.com", "pinterest.com", "tumblr.com", "quora.com",
     "medium.com", "wordpress.com", "blogspot.com",
+    # Meta-search / SearXNG self-referential noise
+    "searx.be", "searxng.org", "searx.info", "search.brave.com",
+    "startpage.com", "ecosia.org", "yandex.com", "yandex.ru",
+    "baidu.com", "ask.com", "aol.com",
 }
 
 

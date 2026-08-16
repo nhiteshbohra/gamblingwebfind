@@ -16,6 +16,8 @@ IST = timezone(timedelta(hours=5, minutes=30))
 HYPERLINK_FONT = Font(color="0000FF", underline="single")
 
 
+import urllib.parse
+
 def _make_excel_urls_clickable(workbook_path: str):
     """Format Domain and URL columns in all sheets of an Excel file to be clickable hyperlinks."""
     try:
@@ -36,19 +38,30 @@ def _make_excel_urls_clickable(workbook_path: str):
                 for row in range(2, ws.max_row + 1):
                     cell = ws.cell(row=row, column=url_col_idx)
                     val = str(cell.value or "").strip()
-                    if val:
+                    if val and not val.startswith("#"):
                         target = val if (val.startswith("http://") or val.startswith("https://")) else f"https://{val}"
-                        cell.hyperlink = target
-                        cell.font = HYPERLINK_FONT
+                        try:
+                            # Validate URL is parseable
+                            parsed = urllib.parse.urlparse(target)
+                            if parsed.netloc:
+                                cell.hyperlink = target
+                                cell.font = HYPERLINK_FONT
+                        except Exception:
+                            pass
 
             if domain_col_idx:
                 for row in range(2, ws.max_row + 1):
                     cell = ws.cell(row=row, column=domain_col_idx)
                     val = str(cell.value or "").strip()
-                    if val:
+                    if val and not val.startswith("#"):
                         target = val if (val.startswith("http://") or val.startswith("https://")) else f"https://{val}"
-                        cell.hyperlink = target
-                        cell.font = HYPERLINK_FONT
+                        try:
+                            parsed = urllib.parse.urlparse(target)
+                            if parsed.netloc:
+                                cell.hyperlink = target
+                                cell.font = HYPERLINK_FONT
+                        except Exception:
+                            pass
 
         wb.save(workbook_path)
     except Exception as e:
