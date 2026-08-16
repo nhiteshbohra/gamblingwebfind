@@ -38,6 +38,13 @@ async def run(concurrency: int = None, limit: int = 0) -> list[str]:
     concurrency = concurrency or int(os.getenv("SCREENSHOT_CONCURRENCY", 15))
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
+    # 0. Sync any screenshots existing on disk with MongoDB
+    try:
+        from project_sup.helping_code.sync_screenshots_to_db import sync_screenshots_to_db
+        sync_screenshots_to_db()
+    except Exception as e:
+        print(f"[export] Screenshot sync warning: {e}")
+
     # 1. First, check if there are any un-screenshotted gambling domains that need fallback capture
     pending_capture = list(find_pending_capture(limit=limit))
     if pending_capture:

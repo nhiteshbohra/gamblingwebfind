@@ -215,18 +215,32 @@ def build_report_from_mongo(
     missing_ids = []
     import shutil
     for d in captured:
-        filename = _url_to_filename(d["url"])
-        src_jpg = os.path.join(screenshots_dir, filename)
-        dest_jpg = os.path.join(dest_screenshots_dir, filename)
+        domain = d.get("domain") or d.get("_id")
+        url = d.get("url") or f"https://{domain}"
+        
+        candidates = []
+        if d.get("screenshot_filename"):
+            candidates.append(d["screenshot_filename"])
+        candidates.append(_url_to_filename(url))
+        candidates.append(_url_to_filename(f"https://{domain}"))
+        candidates.append(_url_to_filename(f"http://{domain}"))
 
-        if os.path.exists(src_jpg):
+        src_jpg = None
+        filename = None
+        for cand in candidates:
+            cand_path = os.path.join(screenshots_dir, cand)
+            if os.path.exists(cand_path):
+                src_jpg = cand_path
+                filename = cand
+                break
+
+        if src_jpg and filename:
+            dest_jpg = os.path.join(dest_screenshots_dir, filename)
             try:
-                shutil.move(src_jpg, dest_jpg)
-                entries.append({"url": d["url"], "screenshot_path": dest_jpg})
+                shutil.copy2(src_jpg, dest_jpg)
+                entries.append({"url": url, "screenshot_path": dest_jpg})
             except Exception:
-                entries.append({"url": d["url"], "screenshot_path": src_jpg})
-        elif os.path.exists(dest_jpg):
-            entries.append({"url": d["url"], "screenshot_path": dest_jpg})
+                entries.append({"url": url, "screenshot_path": src_jpg})
         else:
             missing_ids.append(d["_id"])
 
