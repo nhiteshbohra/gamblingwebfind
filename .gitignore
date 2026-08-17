@@ -1,55 +1,74 @@
-# --- Python ---
+# --- Python Bytecode & Build ---
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
+*.py[cod]
+*$py.class
 *.egg-info/
 .eggs/
 build/
 dist/
 
-# --- Virtual environments ---
+# --- Virtual Environments ---
 venv/
 .venv/
 env/
 ENV/
 
-# --- Presence runtime data (rebuilt by the app, never hand-edited) ---
+# --- Testing, Pytest & Coverage ---
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+test-results/
+test_run.log
+
+# --- Runtime Outputs & Media Data ---
+output/
+screenshots/
 data/
 logs/
-output/
+*.log
 *.db-journal
 *.sqlite
 *.sqlite3
 data/presence.db
 all domainsearched/
 !config/
-# ^ remove the line above if you never keep a tracked CSV in config/
 
+# --- Office Temporary Lock Files ---
+~$*.xlsx
+~$*.docx
+~$*.pptx
+*.lock
 
-# --- Config secrets (keep settings.yaml tracked, but not any env/secret file) ---
+# --- Config Secrets & Environment ---
 .env
 .env.*
 !.env.example
 *.secret.yaml
 config/settings.local.yaml
 
-# --- Docker / SearXNG runtime state ---
+# --- Docker / SearXNG Runtime State ---
 searxng/data/
 searxng/uwsgi.ini
 docker-volumes/
 
-# --- Editors / OS cruft ---
+# --- Browser & Playwright ---
+.playwright/
+playwright-report/
+
+# --- Editors & OS Artifacts ---
 .vscode/
 .idea/
 .DS_Store
 Thumbs.db
+*.swp
+*.swo
 
-# --- Logs (redundant with logs/ above, kept explicit for safety) ---
-*.log
-
-# --- Temp / scratch files agents sometimes leave behind ---
+# --- Temporary Files, Patches & Scratch Output ---
 *.tmp
+*.diff
+*.patch
+*.orig
 *_test_output*
 spec_audit*.md
 *.zip
