@@ -233,42 +233,66 @@ def detect_negative_archetype(text: str) -> tuple[bool, str]:
     return False, ""
 
 
+# Hospitality / Food & Dining override signals
+# If >= 2 of these appear, the page is almost certainly a hotel, restaurant, or dining venue.
+HOSPITALITY_OVERRIDE_SIGNALS = {
+    # Hotel / accommodation
+    "hotel", "resort", "motel", "inn", "lodge", "hostel", "bed and breakfast", "b&b",
+    "book a room", "room booking", "check-in", "check-out", "check in", "check out",
+    "room rates", "room rate", "per night", "nightly rate", "hotel room", "guest room",
+    "suite", "deluxe room", "standard room", "double room", "single room", "twin room",
+    "amenities", "concierge", "room service", "valet parking", "free parking",
+    "swimming pool", "gym", "fitness center", "free wifi", "complimentary breakfast",
+    "tripadvisor", "booking.com", "expedia", "agoda", "makemytrip", "oyo rooms",
+    # Restaurant / dining
+    "restaurant", "dining", "dine in", "cuisine", "food menu", "dinner menu",
+    "lunch menu", "breakfast menu", "our menu", "view menu", "order online",
+    "make a reservation", "book a table", "table reservation", "reservations",
+    "head chef", "executive chef", "culinary",
+    "buffet", "a la carte", "fine dining", "rooftop dining", "outdoor seating",
+    "takeaway", "takeout", "food delivery", "zomato", "swiggy",
+    "cafe", "bistro", "bar & grill", "steakhouse", "seafood restaurant",
+    # Spa / wellness
+    "spa treatments", "massage therapy", "wellness center", "facial treatment",
+}
+
+
+def is_hospitality_site(text: str) -> tuple[bool, list[str]]:
+    """Return (True, matched_signals) if page looks like a hotel / restaurant / dining venue."""
+    text_lower = text.lower() if text else ""
+    hits = [s for s in HOSPITALITY_OVERRIDE_SIGNALS if s in text_lower]
+    return len(hits) >= 2, hits
+
+
 def classify(html: str, url: str = "", keywords: set = None) -> tuple[str, list[str]]:
     """
-    Triple-Lock Tier 1 Pre-Classifier:
-    Returns: (decision, reasons)
+    Universal Keyword Threshold Pre-Classifier:
+    Returns: (decision, matched_keywords)
     Where decision is:
-      - "gambling"  : >= 5 keywords matched (confirmed immediately, no AI needed)
-      - "needs_ai"  : ALL other live pages (0-4 keywords, parked-suspected, negative archetype)
-                      → every live page goes through Ollama AI Challenge Round
+      - "gambling"  : >= 5 keywords (automatically classified as Gambling)
+      - "needs_ai"  : 3 to 4 keywords (>= 3 and < 5, routed to AI Classifier)
+      - "regular"   : < 3 keywords (strictly treated and processed as Regular Website)
     """
     if not html:
-        return "needs_ai", ["empty_html"]  # Still send to AI — don't assume regular
+        return "regular", []
 
     text = _extract_text(html)
-
     kw_set = keywords if keywords is not None else load_keywords()
 
-    # 1. Match gambling keywords (expanded 700+ list + fast-path signals)
+    # Match gambling keywords in visible text
     matched = [kw for kw in kw_set if kw in text]
 
-    # 2. High-confidence threshold: >= 5 keywords = confirmed gambling (no AI needed)
+    # Universal Keyword Rule Structure:
+    # 1. 5 or More Keywords (>= 5): Automatically Gambling
     if len(matched) >= 5:
         return "gambling", matched
 
-    # 3. Fast-path Calculator Utility Domain Check
-    url_lower = url.lower() if url else ""
-    if ("calculator" in url_lower or "calculators" in url_lower) and len(matched) < 4:
-        return "regular", ["excluded:calculator_utility_domain"]
+    # 2. 3 to 4 Keywords (>= 3 and < 5): Route to AI Classifier
+    if len(matched) >= 3:
+        return "needs_ai", matched
 
-    # 4. Negative Archetype Check — only auto-reject if >= 4 signals AND 0 gambling keywords
-    #    (Resort casinos have "dining", "careers", "contact" — don't let those trigger)
-    if len(matched) == 0:
-        is_negative, neg_reason = detect_negative_archetype(text)
-        if is_negative:
-            return "regular", [f"excluded:{neg_reason}"]
+    # 3. Less than 3 Keywords (< 3): Strictly Regular Website
+    return "regular", matched
 
-    # 5. All remaining sites (0-4 keywords, parked-suspected, etc.) -> send to AI
-    #    NOTE: Parked sites are no longer auto-rejected here.
-    #    The AI challenge round will confirm if parked OR if it's a casino in disguise.
-    return "needs_ai", matched
+
+

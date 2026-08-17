@@ -206,7 +206,7 @@ def build_report_from_mongo(
         query["_id"] = {"$in": domain_ids}
 
     captured = list(checked_domains().find(query))
-    screenshots_dir = os.path.join("output", "screenshots")
+    screenshots_dir = os.getenv("SCREENSHOT_DIR", os.path.join("output", "screenshots"))
     dest_screenshots_dir = os.path.join(output_dir, "screenshots")
     os.makedirs(dest_screenshots_dir, exist_ok=True)
 
@@ -224,11 +224,12 @@ def build_report_from_mongo(
             _url_to_filename(f"http://{domain}"),
         ]
 
+        from capture_url.screenshot import is_valid_screenshot
         src_jpg = None
         filename = None
         for cand in candidates:
             cand_path = os.path.join(screenshots_dir, cand)
-            if os.path.exists(cand_path):
+            if os.path.exists(cand_path) and is_valid_screenshot(cand_path):
                 src_jpg = cand_path
                 filename = cand
                 break
@@ -244,8 +245,11 @@ def build_report_from_mongo(
             missing_ids.append(d["_id"])
 
     if missing_ids:
-        print(f"[report] Warning: {len(missing_ids)} domains marked captured but JPEG not found on disk. Skipping.")
-        checked_domains().update_many({"_id": {"$in": missing_ids}}, {"$set": {"screenshot_taken": False}})
+        print(f"[report] Warning: {len(missing_ids)} domain(s) marked captured but JPEG not found on disk. Marking screenshot_taken=False.")
+        checked_domains().update_many(
+            {"_id": {"$in": missing_ids}},
+            {"$set": {"screenshot_taken": False, "screenshot_failed_reason": "Screenshot JPEG missing on disk"}}
+        )
 
     if not entries:
         print("[report] No valid screenshot entries found. No Word docs generated.")

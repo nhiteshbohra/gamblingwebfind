@@ -1,0 +1,572 @@
+diff -ru '--exclude=.git' /home/claude/original_copy/gamblingwebfind-remaking-2/.env.example /home/claude/project/gamblingwebfind-remaking-2/.env.example
+--- /home/claude/original_copy/gamblingwebfind-remaking-2/.env.example	2026-08-16 20:53:28.000000000 +0000
++++ /home/claude/project/gamblingwebfind-remaking-2/.env.example	2026-08-17 06:06:21.855530571 +0000
+@@ -54,4 +54,6 @@
+ OLLAMA_MODEL=gambling-analyst
+ AI_MODE=hybrid               # hybrid (borderline only) | all (every page) | off
+ AI_TIMEOUT=15.0              # seconds per Ollama inference request
+-AI_CONCURRENCY=5             # maximum parallel AI inferences
++AI_CONCURRENCY=10            # maximum parallel AI inferences (raised from 5 — was far below
++                              # MAX_CONCURRENT_FETCHES=20, causing routine timeouts under
++                              # batch load; tune based on what your Ollama host can sustain)
+diff -ru '--exclude=.git' /home/claude/original_copy/gamblingwebfind-remaking-2/Modelfile /home/claude/project/gamblingwebfind-remaking-2/Modelfile
+--- /home/claude/original_copy/gamblingwebfind-remaking-2/Modelfile	2026-08-16 20:53:28.000000000 +0000
++++ /home/claude/project/gamblingwebfind-remaking-2/Modelfile	2026-08-17 06:03:10.694864664 +0000
+@@ -26,7 +26,7 @@
+    - Traditional Indian Games: Teen Patti, Andar Bahar, Jhandi Munda, 7 Up Down, Mang Patta, Real-money Rummy / Points Rummy.
+    - Live Dealer / International Casino: Roulette, Blackjack, Baccarat, Dragon Tiger, Sic Bo, Live Casino streaming.
+    - Slots & Crash Games: Aviator, Crash X, Spaceman, JetX, Rocket game, Mines, Plinko, Megaways, Spin & Win, Wheel of Fortune.
+-   - IMPORTANT: Casino resort / hotel casino / tribal casino / riverboat casino with gaming floors ARE gambling sites even if they also offer dining, careers, and entertainment sections.
++   - IMPORTANT: A casino resort / hotel casino / tribal casino / riverboat casino website is "gambling" ONLY if the site ITSELF advertises or offers its own gaming floor, slots, table games, or a players club/loyalty program for wagering (e.g. "Visit our casino floor", "Slot machines", "Table games", "Rewards Club"). A hotel or restaurant site that merely mentions "casino" in passing (address, nearby attraction, area name, a review, or historical reference) and does NOT itself offer gambling is "regular".
+ 
+ C. Lottery & Prize Draw Platforms:
+    - Any online lottery site, state lottery result portal, or lottery prediction site (e.g. bhagyashree lottery, nagaland lottery, kerala lottery, sikkim state lottery).
+@@ -56,8 +56,16 @@
+ - Genuine E-Commerce: Must have shopping cart, product listings with prices, shipping policy for physical goods.
+ - News / Wiki / Government: News articles about gambling (reporting on raids), Wikipedia gambling history articles, Government anti-gambling warnings — the website itself must not offer gambling.
+ - Free Casual Gaming (No Real Money): Video games on Steam/console with in-game cosmetics ONLY, NO real money cash-out mechanism at all.
++- Hospitality (Hotels/Resorts): Booking/reservation pages, room listings, check-in/check-out info, amenities, dining menus, event/conference spaces — even if "casino" appears in the property name, nearby-attraction text, or an address, AS LONG AS the site is not itself advertising a gaming floor, slots, or table games as something visitors can play there.
++- Restaurants: Menus, reservations, delivery/order-online links, location/hours — including restaurants located inside or near a casino resort, as long as the restaurant's own page is about dining, not gambling.
+ 
+-IMPORTANT: Simply having the words "contact", "careers", "entertainment", "dining", "lifestyle" does NOT make it non-gambling. Casino resorts use all these words.
++NEGATIVE EXAMPLES (classify these as "regular"):
++- A hotel page saying "walking distance to the casino district" → regular (no gaming floor offered by this site).
++- A steakhouse whose address happens to be inside a casino resort, with a menu and reservation form → regular.
++- A travel blog or news article reviewing/describing a casino resort → regular (it's not the operator).
++- A university/college page (even without .edu domain) with admissions, courses, faculty, or campus life content → regular.
++
++IMPORTANT: Simply having the words "contact", "careers", "entertainment", "dining", "lifestyle" does NOT by itself make a site gambling OR non-gambling — look for whether the SITE ITSELF is offering wagering, betting IDs, casino games, or lottery products.
+ 
+ ================================================================================
+ 3. RESOLUTION POLICY:
+@@ -65,9 +73,9 @@
+ - If a site has real-money cash stakes, betting IDs, live casino games, Satta Matka, or lottery → "gambling".
+ - If the site is a casino resort/hotel/tribal casino with a gaming floor → "gambling".
+ - If the site teaches blackjack/card counting for real casino use → "gambling".
+-- If the site is purely educational, e-commerce for physical goods, or news/government → "regular".
++- If the site is purely educational, e-commerce for physical goods, hospitality/dining, or news/government → "regular".
+ - If borderline: check if there is ANY mechanism to deposit real money or obtain a betting ID. If yes → "gambling".
+-- WHEN IN DOUBT → classify as "gambling". It is better to flag a false gambling site than to miss a real one.
++- WHEN IN DOUBT and you cannot cite a specific gambling mechanism (deposit flow, betting ID, casino game, lottery product) present on THIS site → classify as "regular" with confidence below 0.6, so it can be reviewed further. Do not classify as "gambling" based on vague thematic association (e.g. the word "casino" appearing without an actual gambling offering) — false positives on legitimate businesses (hotels, colleges, restaurants) are a real cost, not a safe default.
+ 
+ ================================================================================
+ 4. STRICT JSON OUTPUT FORMAT:
+Only in /home/claude/project/gamblingwebfind-remaking-2/checking_url: __pycache__
+diff -ru '--exclude=.git' /home/claude/original_copy/gamblingwebfind-remaking-2/checking_url/ai_classifier.py /home/claude/project/gamblingwebfind-remaking-2/checking_url/ai_classifier.py
+--- /home/claude/original_copy/gamblingwebfind-remaking-2/checking_url/ai_classifier.py	2026-08-16 20:53:28.000000000 +0000
++++ /home/claude/project/gamblingwebfind-remaking-2/checking_url/ai_classifier.py	2026-08-17 06:05:06.309139686 +0000
+@@ -41,7 +41,7 @@
+ # ── Configuration ─────────────────────────────────────────────────────────────
+ OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
+ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gambling-analyst")
+-AI_CONCURRENCY = int(os.getenv("AI_CONCURRENCY", 5))
++AI_CONCURRENCY = int(os.getenv("AI_CONCURRENCY", 10))
+ 
+ # Dynamic timeout bounds (seconds) — replaces hardcoded AI_TIMEOUT
+ AI_TIMEOUT_MIN = float(os.getenv("AI_TIMEOUT_MIN", 8.0))    # fastest simple pages
+@@ -206,7 +206,10 @@
+ 
+ 
+ # Conviction threshold: if AI says "regular" with confidence below this → override to gambling
+-REGULAR_CONVICTION_THRESHOLD = 0.75
++# Lowered from 0.75 — the 3B local model's confidence scores are not well-calibrated enough
++# to justify discarding a "regular" verdict on score alone; low-confidence regulars still get
++# a real Round 2 evidence challenge instead of being auto-flipped.
++REGULAR_CONVICTION_THRESHOLD = 0.50
+ 
+ # Non-gambling archetype patterns
+ NON_GAMBLING_EVIDENCE_MAP = {
+@@ -479,6 +482,7 @@
+             "key_triggers": [f"provider:{p}" for p in detected_providers] + (matched_keywords or []),
+             "reason": f"Active iGaming game provider CDN/assets detected: {', '.join(detected_providers)}",
+             "challenge_override": False,
++            "decision_path": "provider_cdn_detected",
+         }
+ 
+     # 98% Proof: High-conviction cashier / Telegram / WhatsApp betting funnel with matched keywords
+@@ -490,6 +494,7 @@
+             "key_triggers": [f"funnel:{f}" for f in detected_funnels] + (matched_keywords or []),
+             "reason": f"Active betting transaction funnel detected: {', '.join(detected_funnels[:2])}",
+             "challenge_override": False,
++            "decision_path": "funnel_detected",
+         }
+ 
+     title, meta_desc, cta_buttons, body_text = clean_page_text(html, max_chars=2500)
+@@ -523,25 +528,33 @@
+     round1 = await _call_ollama(round1_prompt, url)
+ 
+     # Ollama offline / timeout handler
++    # NOTE: Previously this defaulted straight to "gambling" whenever a domain anchor or
++    # strong keywords matched — meaning a large share of "gambling" verdicts under load
++    # (backlog/timeouts) reflected zero actual AI judgment. Now every timeout/offline case
++    # returns "unconfirmed" and gets re-queued (runner.py mode="unconfirmed") instead of
++    # being silently counted as a confirmed gambling result. The domain/keyword signal is
++    # still surfaced in key_triggers so a human reviewing "unconfirmed" items can prioritize.
+     if round1 is None:
+         if is_g_domain:
+             return {
+-                "verdict": "gambling",
+-                "confidence": 0.85,
+-                "category": "domain_anchor_gambling",
++                "verdict": "unconfirmed",
++                "confidence": 0.0,
++                "category": "unconfirmed",
+                 "key_triggers": [domain_signal],
+-                "reason": f"ollama_timeout_confirmed_by_domain_anchor({domain_signal})",
+-                "challenge_override": True,
++                "reason": f"ollama_timeout_domain_anchor_present({domain_signal})_requeue",
++                "challenge_override": False,
++                "decision_path": "ai_timeout_domain_anchor",
+             }
+         strong_matches = [k for k in (matched_keywords or []) if k in STRONG_GAMBLING_SIGNALS]
+         if strong_matches:
+             return {
+-                "verdict": "gambling",
+-                "confidence": 0.70,
+-                "category": "possible_gambling",
++                "verdict": "unconfirmed",
++                "confidence": 0.0,
++                "category": "unconfirmed",
+                 "key_triggers": strong_matches,
+-                "reason": f"ollama_timeout_strong_keywords_matched: {', '.join(strong_matches[:3])}",
+-                "challenge_override": True,
++                "reason": f"ollama_timeout_strong_keywords_present: {', '.join(strong_matches[:3])}_requeue",
++                "challenge_override": False,
++                "decision_path": "ai_timeout_strong_keywords",
+             }
+         return {
+             "verdict": "unconfirmed",
+@@ -550,6 +563,7 @@
+             "key_triggers": [],
+             "reason": "ollama_timeout_no_signals",
+             "challenge_override": False,
++            "decision_path": "ai_timeout_no_signals",
+         }
+ 
+     verdict = str(round1.get("verdict", "")).strip().lower()
+@@ -567,31 +581,34 @@
+             "key_triggers": triggers,
+             "reason": str(round1.get("reason", "AI Round 1 gambling classification")),
+             "challenge_override": False,
++            "decision_path": "round1_gambling",
+         }
+ 
+     # ── ROUND 2: Challenge — AI must prove "regular" verdict with Ground Truth ──
+     if verdict == "regular":
+-        # If Domain Anchor is active, regular is prohibited unless verified .gov
+-        if is_g_domain:
++        # Domain Anchor: previously this was a hard override — ANY domain-name substring
++        # match forced "gambling" regardless of what the AI found in the actual content.
++        # That's why parked/for-sale domains and non-.edu colleges/hotels/restaurants with
++        # a gambling-adjacent name got force-flagged even with zero corroborating content.
++        # Now the anchor only locks the verdict when there's at least one corroborating
++        # content-level signal (a real keyword match on the page). A bare domain-name
++        # match with no content corroboration is passed into the Round 2 challenge instead,
++        # so the AI still has to find real evidence before "gambling" sticks.
++        if is_g_domain and matched_keywords:
+             return {
+                 "verdict": "gambling",
+                 "confidence": 0.90,
+                 "category": "domain_anchor_gambling",
+                 "key_triggers": [domain_signal] + (matched_keywords or []),
+-                "reason": f"Domain anchor ({domain_signal}) locked as gambling despite AI regular guess",
++                "reason": f"Domain anchor ({domain_signal}) corroborated by matched keywords {matched_keywords[:3]} — locked as gambling despite AI regular guess",
+                 "challenge_override": True,
++                "decision_path": "domain_anchor_lock",
+             }
+ 
+-        # Low confidence -> override directly
+-        if confidence < REGULAR_CONVICTION_THRESHOLD:
+-            return {
+-                "verdict": "gambling",
+-                "confidence": 0.65,
+-                "category": "possible_gambling",
+-                "key_triggers": matched_keywords or [],
+-                "reason": f"AI Round 1 low-confidence regular ({confidence:.2f}) — overridden to gambling",
+-                "challenge_override": True,
+-            }
++        # Low confidence -> send to Round 2 evidence challenge instead of an immediate flip
++        # (previously this auto-flipped to gambling below REGULAR_CONVICTION_THRESHOLD with
++        # no evidence check at all; now it only affects which prompt framing Round 2 gets,
++        # the challenge below runs regardless of confidence).
+ 
+         # High confidence "regular" -> Challenge for specific proof
+         round2_prompt = f"""URL: {url}
+@@ -620,23 +637,18 @@
+         round2 = await _call_ollama(round2_prompt, url)
+ 
+         if round2 is None:
++            # Same fix as the Round 1 timeout handler: don't guess "gambling" on a timeout,
++            # requeue as "unconfirmed" and let the strong-keyword signal ride along for
++            # prioritization instead of silently becoming a confirmed verdict.
+             strong_matches = [k for k in (matched_keywords or []) if k in STRONG_GAMBLING_SIGNALS]
+-            if strong_matches:
+-                return {
+-                    "verdict": "gambling",
+-                    "confidence": 0.65,
+-                    "category": "possible_gambling",
+-                    "key_triggers": strong_matches,
+-                    "reason": f"challenge_timeout_strong_keywords: {', '.join(strong_matches[:3])}",
+-                    "challenge_override": True,
+-                }
+             return {
+                 "verdict": "unconfirmed",
+                 "confidence": 0.0,
+                 "category": "unconfirmed",
+-                "key_triggers": [],
+-                "reason": "challenge_timeout",
++                "key_triggers": strong_matches,
++                "reason": "challenge_timeout_requeue" + (f" (strong_keywords: {', '.join(strong_matches[:3])})" if strong_matches else ""),
+                 "challenge_override": False,
++                "decision_path": "ai_timeout_strong_keywords" if strong_matches else "ai_timeout_no_signals",
+             }
+ 
+         r2_verdict = str(round2.get("verdict", "")).strip().lower()
+@@ -652,6 +664,7 @@
+                 "key_triggers": round2.get("key_triggers", []),
+                 "reason": f"Challenge round corrected to gambling: {r2_reason}",
+                 "challenge_override": True,
++                "decision_path": "round2_gambling",
+             }
+ 
+         # Validate Ground Truth in HTML (Anti-Hallucination)
+@@ -665,6 +678,7 @@
+                 "key_triggers": matched_keywords or round2.get("key_triggers", []),
+                 "reason": f"{eval_msg} (Claimed: '{r2_reason[:80]}')",
+                 "challenge_override": True,
++                "decision_path": "round2_hallucination_reject",
+             }
+ 
+         return {
+@@ -674,6 +688,7 @@
+             "key_triggers": round2.get("key_triggers", []),
+             "reason": f"Ground-truth verified regular: {eval_msg}",
+             "challenge_override": False,
++            "decision_path": "round2_regular_verified",
+         }
+ 
+     return {
+@@ -683,4 +698,5 @@
+         "key_triggers": [],
+         "reason": "ollama_unconfirmed",
+         "challenge_override": False,
++        "decision_path": "unrecognized_round1_verdict",
+     }
+diff -ru '--exclude=.git' /home/claude/original_copy/gamblingwebfind-remaking-2/checking_url/classifier.py /home/claude/project/gamblingwebfind-remaking-2/checking_url/classifier.py
+--- /home/claude/original_copy/gamblingwebfind-remaking-2/checking_url/classifier.py	2026-08-16 20:53:28.000000000 +0000
++++ /home/claude/project/gamblingwebfind-remaking-2/checking_url/classifier.py	2026-08-17 06:06:06.725020718 +0000
+@@ -252,8 +252,19 @@
+     # 1. Match gambling keywords (expanded 700+ list + fast-path signals)
+     matched = [kw for kw in kw_set if kw in text]
+ 
+-    # 2. High-confidence threshold: >= 5 keywords = confirmed gambling (no AI needed)
+-    if len(matched) >= 5:
++    # 1b. Split out WEAK/AMBIGUOUS matches (e.g. "win", "bet", "odds", "prize", "stake")
++    #     which individually appear on tons of non-gambling sites (hotels, e-commerce,
++    #     crypto/finance content, restaurants advertising "prize draws", etc).
++    #     WEAK_GAMBLING_SIGNALS was previously defined but never actually used anywhere —
++    #     every keyword counted equally toward the auto-gambling fast path below.
++    strong_matched = [kw for kw in matched if kw not in WEAK_GAMBLING_SIGNALS]
++    weak_matched = [kw for kw in matched if kw in WEAK_GAMBLING_SIGNALS]
++
++    # 2. High-confidence threshold: >= 5 STRONG keywords = confirmed gambling (no AI needed).
++    #    Weak/ambiguous matches no longer count toward this auto-confirm threshold on their
++    #    own — a page with 5 hits of "win"/"bet"/"prize" but no real gambling terms now goes
++    #    to needs_ai instead of being auto-confirmed as gambling.
++    if len(strong_matched) >= 5:
+         return "gambling", matched
+ 
+     # 3. Fast-path Calculator Utility Domain Check
+@@ -261,9 +272,11 @@
+     if ("calculator" in url_lower or "calculators" in url_lower) and len(matched) < 4:
+         return "regular", ["excluded:calculator_utility_domain"]
+ 
+-    # 4. Negative Archetype Check — only auto-reject if >= 4 signals AND 0 gambling keywords
++    # 4. Negative Archetype Check — only auto-reject if >= 4 signals AND 0 STRONG gambling
++    #    keywords (weak-only matches, e.g. a hotel loyalty page mentioning "prize", no
++    #    longer disqualify a page from the fast regular path).
+     #    (Resort casinos have "dining", "careers", "contact" — don't let those trigger)
+-    if len(matched) == 0:
++    if len(strong_matched) == 0:
+         is_negative, neg_reason = detect_negative_archetype(text)
+         if is_negative:
+             return "regular", [f"excluded:{neg_reason}"]
+diff -ru '--exclude=.git' /home/claude/original_copy/gamblingwebfind-remaking-2/checking_url/fetcher.py /home/claude/project/gamblingwebfind-remaking-2/checking_url/fetcher.py
+--- /home/claude/original_copy/gamblingwebfind-remaking-2/checking_url/fetcher.py	2026-08-16 20:53:28.000000000 +0000
++++ /home/claude/project/gamblingwebfind-remaking-2/checking_url/fetcher.py	2026-08-17 06:06:16.769221061 +0000
+@@ -15,6 +15,24 @@
+ 
+ from scrapling.fetchers import AsyncFetcher
+ 
++# Reuse the single canonical parked/for-sale marker list from classifier.py instead of
++# keeping a second, shorter, independently-maintained copy here. Previously this file had
++# its own short list (10 markers) while classifier.py had a much larger one (40+ markers)
++# used later in the pipeline — meaning a parked page whose marker was only in the *larger*
++# list would slip past this pre-classification check, reach the AI stage, and (before the
++# domain-anchor fix) could get force-locked to "gambling" purely because the domain name
++# contained a gambling-adjacent token. Importing the same list here means parked pages are
++# now caught as early and consistently as possible, before they ever reach the classifier.
++try:
++    from checking_url.classifier import PARKED_AND_FOR_SALE_MARKERS as _PARKED_BODY_MARKERS
++except ImportError:
++    # Fallback if imported standalone / circular import issue — keep a minimal safety net.
++    _PARKED_BODY_MARKERS = [
++        "this domain is for sale", "domain for sale", "buy this domain",
++        "parked by", "domain parking", "sedo.com", "dan.com/domain",
++        "godaddy.com/domains", "afternic.com",
++    ]
++
+ IMPERSONATE = "chrome"
+ 
+ _BLOCKED_BODY_MARKERS = [
+@@ -22,12 +40,6 @@
+     "enable javascript and cookies", "cf_chl_opt", "ray id",
+ ]
+ 
+-_PARKED_BODY_MARKERS = [
+-    "this domain is for sale", "domain for sale", "buy this domain",
+-    "parked by", "domain parking", "sedo.com", "dan.com/domain",
+-    "godaddy.com/domains", "afternic.com",
+-]
+-
+ 
+ def _classify_failure(status_code=None, html=None, error=None):
+     """Return failure_type string."""
+diff -ru '--exclude=.git' /home/claude/original_copy/gamblingwebfind-remaking-2/checking_url/runner.py /home/claude/project/gamblingwebfind-remaking-2/checking_url/runner.py
+--- /home/claude/original_copy/gamblingwebfind-remaking-2/checking_url/runner.py	2026-08-16 20:53:28.000000000 +0000
++++ /home/claude/project/gamblingwebfind-remaking-2/checking_url/runner.py	2026-08-17 06:06:44.034974937 +0000
+@@ -98,91 +98,108 @@
+ 
+             url = f"https://{domain}"
+ 
+-        # 1. Fetch HTML
+-        async with fetch_sem:
+-            result = await fetch(url, domain, timeout_seconds=timeout, per_domain_delay=delay)
+-
+-        if result.failure_type:
+-            status_map = {"blocked": "blocked", "dead_confirmed": "dead", "connection_failed": "dead"}
+-            final_status = status_map.get(result.failure_type, "dead")
+-            write_result(domain, url=url, status=final_status, reason=[result.failure_type])
+-            run_stats[final_status] += 1
+-            pbar.update(1)
+-            pbar.set_postfix({"Left": total_pending - pbar.n})
+-            return
+-
+-        # 2. Layer 2: Heuristic Pre-Screen (700+ keywords)
+-        decision, matched_reasons = classify(result.html or "", url=url, keywords=keywords)
++            # 1. Fetch HTML
++            async with fetch_sem:
++                result = await fetch(url, domain, timeout_seconds=timeout, per_domain_delay=delay)
++
++            if result.failure_type:
++                status_map = {"blocked": "blocked", "dead_confirmed": "dead", "connection_failed": "dead"}
++                final_status = status_map.get(result.failure_type, "dead")
++                write_result(domain, url=url, status=final_status, reason=[result.failure_type],
++                             decision_path=f"fetch_{result.failure_type}")
++                run_stats[final_status] += 1
++                pbar.update(1)
++                pbar.set_postfix({"Left": total_pending - pbar.n})
++                return
+ 
+-        final_status = "regular"
+-        final_reasons = matched_reasons
++            # 2. Layer 2: Heuristic Pre-Screen (700+ keywords)
++            decision, matched_reasons = classify(result.html or "", url=url, keywords=keywords)
+ 
+-        if decision == "gambling":
+-            # >= 5 keywords -> Confirmed Gambling immediately
+-            final_status = "gambling"
+-            run_stats["gambling"] += 1
+-
+-        elif decision == "needs_ai":
+-            # All live sites with < 5 keywords -> 2-Round AI Challenge
+-            run_stats["ai_evaluated"] += 1
+-            ai_res = await classify_with_challenge(
+-                result.html or "",
+-                url=url,
+-                matched_keywords=matched_reasons
+-            )
+-            ai_verdict = ai_res.get("verdict", "unconfirmed")
++            final_status = "regular"
++            final_reasons = matched_reasons
++            final_decision_path = "unknown"
+ 
+-            if ai_verdict == "gambling":
++            if decision == "gambling":
++                # >= 5 keywords -> Confirmed Gambling immediately
+                 final_status = "gambling"
++                final_decision_path = "keyword_5plus_fastpath"
+                 run_stats["gambling"] += 1
+-                run_stats["ai_gambling"] += 1
+-                final_reasons = list(set(matched_reasons + ai_res.get("key_triggers", [])))
+-                if not final_reasons and ai_res.get("reason"):
+-                    final_reasons = [ai_res["reason"]]
+-                if ai_res.get("challenge_override"):
+-                    run_stats["challenge_overrides"] = run_stats.get("challenge_overrides", 0) + 1
+-            elif ai_verdict == "regular":
+-                final_status = "regular"
+-                run_stats["regular"] += 1
+-                final_reasons = [ai_res.get("reason", "AI challenge verified regular")]
+-            else:
+-                # Ollama was offline or timed out -> unconfirmed (re-queued)
+-                final_status = "unconfirmed"
+-                run_stats["unconfirmed"] += 1
+-                final_reasons = ["ollama_offline_or_timeout"]
+-
+-        else:
+-            # Strong negative archetype (4+ signals, 0 keywords) -> regular
+-            final_status = "regular"
+-            run_stats["regular"] += 1
++                run_stats["decision_paths"] = run_stats.get("decision_paths", {})
++                run_stats["decision_paths"][final_decision_path] = run_stats["decision_paths"].get(final_decision_path, 0) + 1
+ 
+-        # 3. If Gambling -> Take Screenshot Immediately
+-        if final_status == "gambling":
+-            ss_path, ss_status, ss_reason = await browser_pool.capture_url(
+-                url, OUTPUT_SCREENSHOT_DIR, retries=2, keywords=keywords
+-            )
+-            if ss_path and is_valid_screenshot(ss_path):
+-                run_stats["screenshots_taken"] += 1
+-                write_result(
+-                    domain,
++            elif decision == "needs_ai":
++                # All live sites with < 5 keywords -> 2-Round AI Challenge
++                run_stats["ai_evaluated"] += 1
++                ai_res = await classify_with_challenge(
++                    result.html or "",
+                     url=url,
+-                    status="gambling",
+-                    reason=final_reasons,
+-                    screenshot_taken=True,
+-                    screenshot_failed_reason=None,
++                    matched_keywords=matched_reasons
+                 )
++                ai_verdict = ai_res.get("verdict", "unconfirmed")
++                final_decision_path = ai_res.get("decision_path", "unknown")
++                run_stats["decision_paths"] = run_stats.get("decision_paths", {})
++                run_stats["decision_paths"][final_decision_path] = run_stats["decision_paths"].get(final_decision_path, 0) + 1
++
++                if ai_verdict == "gambling":
++                    final_status = "gambling"
++                    run_stats["gambling"] += 1
++                    run_stats["ai_gambling"] += 1
++                    final_reasons = list(set(matched_reasons + ai_res.get("key_triggers", [])))
++                    if not final_reasons and ai_res.get("reason"):
++                        final_reasons = [ai_res["reason"]]
++                    if ai_res.get("challenge_override"):
++                        run_stats["challenge_overrides"] = run_stats.get("challenge_overrides", 0) + 1
++                elif ai_verdict == "regular":
++                    final_status = "regular"
++                    run_stats["regular"] += 1
++                    final_reasons = [ai_res.get("reason", "AI challenge verified regular")]
++                else:
++                    # Ollama was offline or timed out -> unconfirmed (re-queued).
++                    # This now also covers cases that previously guessed "gambling" on a
++                    # domain-anchor/keyword match alone without a real AI verdict — see
++                    # decision_path (ai_timeout_domain_anchor / ai_timeout_strong_keywords)
++                    # to distinguish those from genuine no-signal timeouts.
++                    final_status = "unconfirmed"
++                    run_stats["unconfirmed"] += 1
++                    final_reasons = [ai_res.get("reason", "ollama_offline_or_timeout")]
++
+             else:
+-                fail_msg = str(ss_reason) if ss_reason else "Screenshot failed or timed out"
+-                write_result(
+-                    domain,
+-                    url=url,
+-                    status="gambling",
+-                    reason=final_reasons,
+-                    screenshot_taken=False,
+-                    screenshot_failed_reason=fail_msg,
++                # Strong negative archetype (4+ signals, 0 keywords) -> regular
++                final_status = "regular"
++                final_decision_path = "negative_archetype_regular" if matched_reasons and str(matched_reasons[0]).startswith("excluded:") else "no_keywords_regular"
++                run_stats["regular"] += 1
++                run_stats["decision_paths"] = run_stats.get("decision_paths", {})
++                run_stats["decision_paths"][final_decision_path] = run_stats["decision_paths"].get(final_decision_path, 0) + 1
++
++            # 3. If Gambling -> Take Screenshot Immediately
++            if final_status == "gambling":
++                ss_path, ss_status, ss_reason = await browser_pool.capture_url(
++                    url, OUTPUT_SCREENSHOT_DIR, retries=2, keywords=keywords
+                 )
+-        else:
+-            write_result(domain, url=url, status=final_status, reason=final_reasons)
++                if ss_path and is_valid_screenshot(ss_path):
++                    run_stats["screenshots_taken"] += 1
++                    write_result(
++                        domain,
++                        url=url,
++                        status="gambling",
++                        reason=final_reasons,
++                        screenshot_taken=True,
++                        screenshot_failed_reason=None,
++                        decision_path=final_decision_path,
++                    )
++                else:
++                    fail_msg = str(ss_reason) if ss_reason else "Screenshot failed or timed out"
++                    write_result(
++                        domain,
++                        url=url,
++                        status="gambling",
++                        reason=final_reasons,
++                        screenshot_taken=False,
++                        screenshot_failed_reason=fail_msg,
++                        decision_path=final_decision_path,
++                    )
++            else:
++                write_result(domain, url=url, status=final_status, reason=final_reasons, decision_path=final_decision_path)
+ 
+         except Exception as e:
+             pbar.update(1)
+@@ -229,6 +246,15 @@
+     blocked_label = "Still Blocked (403 / WAF)" if mode == "blocked" else "Blocked (403 / WAF)"
+     print(f"  * {blocked_label:<31}: {run_stats['blocked']:,}")
+     print(f"  * Dead / Unreachable             : {run_stats['dead']:,}")
+-    print("=" * 65 + "\n")
++    print("=" * 65)
++
++    decision_paths = run_stats.get("decision_paths", {})
++    if decision_paths:
++        print(" DECISION PATH BREAKDOWN (which rule produced each result)")
++        print("-" * 65)
++        for path_name, count in sorted(decision_paths.items(), key=lambda kv: -kv[1]):
++            print(f"  {path_name:<40}: {count:,}")
++        print("=" * 65)
++    print()
+ 
+     return run_stats
+Only in /home/claude/project/gamblingwebfind-remaking-2/db: __pycache__
+diff -ru '--exclude=.git' /home/claude/original_copy/gamblingwebfind-remaking-2/db/mongo_client.py /home/claude/project/gamblingwebfind-remaking-2/db/mongo_client.py
+--- /home/claude/original_copy/gamblingwebfind-remaking-2/db/mongo_client.py	2026-08-16 20:53:28.000000000 +0000
++++ /home/claude/project/gamblingwebfind-remaking-2/db/mongo_client.py	2026-08-17 06:05:24.006212518 +0000
+@@ -155,6 +155,7 @@
+     url: str = None,
+     screenshot_taken: bool | None = None,
+     screenshot_failed_reason: str | None = None,
++    decision_path: str | None = None,
+ ):
+     """Upsert a classification result into checked_domains AND sync active/processed
+     in domain_Listed.
+@@ -165,6 +166,13 @@
+       - 'unconfirmed': Ollama was offline for a 1-2 keyword site (processed=False to re-run!)
+       - 'blocked': 403 / Cloudflare WAF
+       - 'dead': 404 / Connection failed / Parked lander
++
++    decision_path (optional): which specific rule produced this verdict, e.g.
++    'keyword_5plus_fastpath', 'domain_anchor_lock', 'ai_timeout_domain_anchor',
++    'round2_hallucination_reject', 'negative_archetype_regular', etc.
++    Lets you run db.checked_domains.aggregate([{"$group": {"_id": "$decision_path",
++    "count": {"$sum": 1}}}]) to see exactly which rule is driving your results,
++    without needing to eyeball individual documents.
+     """
+     today_date = datetime.now(IST).strftime("%Y-%m-%d")
+ 
+@@ -173,6 +181,7 @@
+         "url": url or f"https://{domain}",
+         "status": status,
+         "reason": reason or [],
++        "decision_path": decision_path or "unknown",
+     }
+ 
+     if screenshot_taken is not None:

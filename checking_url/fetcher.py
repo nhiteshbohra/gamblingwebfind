@@ -15,17 +15,29 @@ for _logger_name in ("scrapling", "curl_cffi", "urllib3", "asyncio", "playwright
 
 from scrapling.fetchers import AsyncFetcher
 
+# Reuse the single canonical parked/for-sale marker list from classifier.py instead of
+# keeping a second, shorter, independently-maintained copy here. Previously this file had
+# its own short list (10 markers) while classifier.py had a much larger one (40+ markers)
+# used later in the pipeline — meaning a parked page whose marker was only in the *larger*
+# list would slip past this pre-classification check, reach the AI stage, and (before the
+# domain-anchor fix) could get force-locked to "gambling" purely because the domain name
+# contained a gambling-adjacent token. Importing the same list here means parked pages are
+# now caught as early and consistently as possible, before they ever reach the classifier.
+try:
+    from checking_url.classifier import PARKED_AND_FOR_SALE_MARKERS as _PARKED_BODY_MARKERS
+except ImportError:
+    # Fallback if imported standalone / circular import issue — keep a minimal safety net.
+    _PARKED_BODY_MARKERS = [
+        "this domain is for sale", "domain for sale", "buy this domain",
+        "parked by", "domain parking", "sedo.com", "dan.com/domain",
+        "godaddy.com/domains", "afternic.com",
+    ]
+
 IMPERSONATE = "chrome"
 
 _BLOCKED_BODY_MARKERS = [
     "checking your browser", "cf-challenge", "captcha", "just a moment",
     "enable javascript and cookies", "cf_chl_opt", "ray id",
-]
-
-_PARKED_BODY_MARKERS = [
-    "this domain is for sale", "domain for sale", "buy this domain",
-    "parked by", "domain parking", "sedo.com", "dan.com/domain",
-    "godaddy.com/domains", "afternic.com",
 ]
 
 
@@ -98,6 +110,23 @@ async def fetch(url: str, domain_id: str, timeout_seconds=10, per_domain_delay=2
             retries=retries,
         )
     except Exception as e:
+        # If HTTPS failed (e.g. SSL cert issue, connection refused), try plain HTTP once
+        if url.startswith("https://"):
+            http_url = "http://" + url[8:]
+            try:
+                resp = await AsyncFetcher.get(
+                    http_url,
+                    timeout=timeout_seconds,
+                    impersonate=IMPERSONATE,
+                    stealthy_headers=True,
+                    follow_redirects=True,
+                    retries=1,
+                )
+                latency = asyncio.get_running_loop().time() - start
+                return _result_from_response(http_url, resp, latency)
+            except Exception:
+                pass
+
         latency = asyncio.get_running_loop().time() - start
         return FetchResult(url=url, latency=latency, error=str(e), failure_type='connection_failed')
 

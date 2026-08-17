@@ -36,19 +36,25 @@ load_dotenv(dotenv_path=Path(__file__).resolve().parent.parent / ".env")
 from db.mongo_client import find_active_domains, find_blocked_domains, find_unconfirmed_domains, write_result, get_db
 from checking_url.fetcher import fetch
 from checking_url.classifier import load_keywords, classify
-from checking_url.ai_classifier import classify_with_challenge, close_ai_session
-from capture_url.screenshot import BrowserPool, is_valid_screenshot
+from checking_url.ai_classifier import classify_with_challenge, close_ai_session, _timeout_mgr
+from capture_url.screenshot import BrowserPool, is_valid_screenshot, delete_screenshot
 
 OUTPUT_SCREENSHOT_DIR = os.getenv("SCREENSHOT_DIR", os.path.join("output", "screenshots"))
 
 
 async def run(concurrency: int = None, limit: int = 0, mode: str = "new"):
     get_db()
+    output_screenshot_dir = os.getenv("SCREENSHOT_DIR", OUTPUT_SCREENSHOT_DIR)
+    os.makedirs(output_screenshot_dir, exist_ok=True)
     concurrency = concurrency or int(os.getenv("MAX_CONCURRENT_FETCHES", 20))
     timeout = float(os.getenv("FETCH_TIMEOUT", 10))
     delay = float(os.getenv("PER_DOMAIN_DELAY", 2.0))
 
     keywords = load_keywords()
+
+    # Reset the dynamic timeout EMA so a prior crashed/saturated run's inflated
+    # timeouts don't carry over and slow down this fresh batch.
+    await _timeout_mgr.reset_ema()
 
     if mode == "blocked":
         pending = list(find_blocked_domains(limit=limit))
@@ -67,7 +73,6 @@ async def run(concurrency: int = None, limit: int = 0, mode: str = "new"):
 
     total_pending = len(pending)
     print(f"[check] {total_pending} {mode} domains to process.")
-    os.makedirs(OUTPUT_SCREENSHOT_DIR, exist_ok=True)
 
     # Initialize BrowserPool for immediate screenshotting of confirmed gambling sites
     browser_pool = BrowserPool(concurrency=min(concurrency, 10))
@@ -98,91 +103,118 @@ async def run(concurrency: int = None, limit: int = 0, mode: str = "new"):
 
             url = f"https://{domain}"
 
-        # 1. Fetch HTML
-        async with fetch_sem:
-            result = await fetch(url, domain, timeout_seconds=timeout, per_domain_delay=delay)
+            # 1. Fetch HTML
+            async with fetch_sem:
+                result = await fetch(url, domain, timeout_seconds=timeout, per_domain_delay=delay)
 
-        if result.failure_type:
-            status_map = {"blocked": "blocked", "dead_confirmed": "dead", "connection_failed": "dead"}
-            final_status = status_map.get(result.failure_type, "dead")
-            write_result(domain, url=url, status=final_status, reason=[result.failure_type])
-            run_stats[final_status] += 1
-            pbar.update(1)
-            pbar.set_postfix({"Left": total_pending - pbar.n})
-            return
+            if result.failure_type:
+                if result.failure_type == "connection_failed":
+                    final_status = "unconfirmed"
+                    final_reason = f"Network error: {result.error or 'connection_failed'}"
+                elif result.failure_type == "blocked":
+                    final_status = "blocked"
+                    final_reason = "Blocked: Cloudflare WAF / HTTP 403 Forbidden"
+                else:
+                    final_status = "dead"
+                    final_reason = f"Dead: {result.error or 'unreachable'}"
 
-        # 2. Layer 2: Heuristic Pre-Screen (700+ keywords)
-        decision, matched_reasons = classify(result.html or "", url=url, keywords=keywords)
+                delete_screenshot(domain, output_screenshot_dir)
+                write_result(domain, url=url, status=final_status, reason=final_reason, screenshot_taken=False)
+                run_stats[final_status] += 1
+                pbar.update(1)
+                pbar.set_postfix({"Left": total_pending - pbar.n})
+                return
 
-        final_status = "regular"
-        final_reasons = matched_reasons
+            # 2. Universal Keyword Threshold:
+            #    < 3 keywords   -> Strictly Regular Website
+            #    3 to 4 keywords -> Route to AI Classifier
+            #    >= 5 keywords  -> Automatically Gambling
+            decision, matched_keywords = classify(result.html or "", url=url, keywords=keywords)
+            num_matched = len(matched_keywords)
 
-        if decision == "gambling":
-            # >= 5 keywords -> Confirmed Gambling immediately
-            final_status = "gambling"
-            run_stats["gambling"] += 1
-
-        elif decision == "needs_ai":
-            # All live sites with < 5 keywords -> 2-Round AI Challenge
-            run_stats["ai_evaluated"] += 1
-            ai_res = await classify_with_challenge(
-                result.html or "",
-                url=url,
-                matched_keywords=matched_reasons
-            )
-            ai_verdict = ai_res.get("verdict", "unconfirmed")
-
-            if ai_verdict == "gambling":
+            if decision == "gambling":
+                # >= 5 keywords: Keyword-Triggered Gambling
                 final_status = "gambling"
+                final_reason = f"{num_matched} keywords matched"
                 run_stats["gambling"] += 1
-                run_stats["ai_gambling"] += 1
-                final_reasons = list(set(matched_reasons + ai_res.get("key_triggers", [])))
-                if not final_reasons and ai_res.get("reason"):
-                    final_reasons = [ai_res["reason"]]
-                if ai_res.get("challenge_override"):
-                    run_stats["challenge_overrides"] = run_stats.get("challenge_overrides", 0) + 1
-            elif ai_verdict == "regular":
+
+            elif decision == "needs_ai":
+                # 3 to 4 keywords: Route to AI Classifier
+                run_stats["ai_evaluated"] += 1
+                ai_res = await classify_with_challenge(
+                    result.html or "",
+                    url=url,
+                    matched_keywords=matched_keywords,
+                    fast_mode=(mode == "unconfirmed"),
+                )
+                ai_verdict = ai_res.get("verdict", "unconfirmed")
+
+                if ai_verdict == "gambling":
+                    final_status = "gambling"
+                    run_stats["gambling"] += 1
+                    run_stats["ai_gambling"] += 1
+                    final_reason = ai_res.get("reason", "AI confirmed gambling")
+                elif ai_verdict == "regular":
+                    final_status = "regular"
+                    run_stats["regular"] += 1
+                    final_reason = ai_res.get("reason", "AI rejected: Regular website")
+                    delete_screenshot(domain, output_screenshot_dir)
+                else:
+                    # Ollama offline or timeout -> Unconfirmed fallback
+                    final_status = "unconfirmed"
+                    run_stats["unconfirmed"] += 1
+                    final_reason = ai_res.get("reason", "Unconfirmed: AI timeout/offline")
+                    delete_screenshot(domain, output_screenshot_dir)
+
+            else:
+                # Less than 3 keywords: Strictly Regular Website
                 final_status = "regular"
+                final_reason = f"{num_matched} keywords matched (regular)" if num_matched > 0 else "0 keywords matched"
                 run_stats["regular"] += 1
-                final_reasons = [ai_res.get("reason", "AI challenge verified regular")]
-            else:
-                # Ollama was offline or timed out -> unconfirmed (re-queued)
-                final_status = "unconfirmed"
-                run_stats["unconfirmed"] += 1
-                final_reasons = ["ollama_offline_or_timeout"]
+                delete_screenshot(domain, output_screenshot_dir)
 
-        else:
-            # Strong negative archetype (4+ signals, 0 keywords) -> regular
-            final_status = "regular"
-            run_stats["regular"] += 1
-
-        # 3. If Gambling -> Take Screenshot Immediately
-        if final_status == "gambling":
-            ss_path, ss_status, ss_reason = await browser_pool.capture_url(
-                url, OUTPUT_SCREENSHOT_DIR, retries=2, keywords=keywords
-            )
-            if ss_path and is_valid_screenshot(ss_path):
-                run_stats["screenshots_taken"] += 1
-                write_result(
-                    domain,
-                    url=url,
-                    status="gambling",
-                    reason=final_reasons,
-                    screenshot_taken=True,
-                    screenshot_failed_reason=None,
+            # 3. Screenshot Capture & Error Management Rules
+            # Strict Proof Requirement: Only capture if validated as gambling
+            if final_status == "gambling":
+                ss_path, ss_status, ss_reason = await browser_pool.capture_url(
+                    url, output_screenshot_dir, retries=2, keywords=keywords
                 )
+                if ss_path and is_valid_screenshot(ss_path):
+                    run_stats["screenshots_taken"] += 1
+                    write_result(
+                        domain,
+                        url=url,
+                        status="gambling",
+                        reason=final_reason,
+                        screenshot_taken=True,
+                        screenshot_failed_reason=None,
+                    )
+                else:
+                    # Network Error / Unconfirmed Fallback & Immediate Cleanup Rule
+                    delete_screenshot(domain, output_screenshot_dir)
+                    if ss_status in ("blocked", "dead"):
+                        write_result(
+                            domain,
+                            url=url,
+                            status=ss_status,
+                            reason=f"{ss_status.capitalize()}: {ss_reason}",
+                            screenshot_taken=False,
+                            screenshot_failed_reason=str(ss_reason),
+                        )
+                        run_stats[ss_status] += 1
+                    else:
+                        write_result(
+                            domain,
+                            url=url,
+                            status="unconfirmed",
+                            reason=f"Unconfirmed: Screenshot error ({ss_reason})",
+                            screenshot_taken=False,
+                            screenshot_failed_reason=str(ss_reason),
+                        )
+                        run_stats["unconfirmed"] += 1
             else:
-                fail_msg = str(ss_reason) if ss_reason else "Screenshot failed or timed out"
-                write_result(
-                    domain,
-                    url=url,
-                    status="gambling",
-                    reason=final_reasons,
-                    screenshot_taken=False,
-                    screenshot_failed_reason=fail_msg,
-                )
-        else:
-            write_result(domain, url=url, status=final_status, reason=final_reasons)
+                delete_screenshot(domain, output_screenshot_dir)
+                write_result(domain, url=url, status=final_status, reason=final_reason, screenshot_taken=False)
 
         except Exception as e:
             pbar.update(1)

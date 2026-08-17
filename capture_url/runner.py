@@ -1,18 +1,18 @@
 """
-capture_url/runner.py — Decoupled Report Exporter & Fallback Screenshotter.
+capture_url/runner.py — Decoupled Report Exporter.
 
-Since screenshots are captured immediately during checking_url, this runner:
-1. Queries MongoDB for unexported gambling domains (screenshot_taken=True, exported!=True).
-2. If any pending gambling domain is missing a screenshot (fallback), it captures it.
-3. Returns the list of processed domain IDs for instant Word, PDF & Excel export.
+This runner:
+1. Queries MongoDB for unexported gambling domains (status="gambling", screenshot_taken=True, exported=False).
+2. Verifies that the screenshot file actually exists on disk in output/screenshots and is valid.
+3. If screenshot is missing/invalid on disk, updates MongoDB:
+   screenshot_taken=False, screenshot_failed_reason="Screenshot JPEG missing on disk".
+4. Returns the list of verified domain IDs for instant Word, PDF & Excel export.
 """
-import asyncio
 import logging
 import os
 from pathlib import Path
 
 from dotenv import load_dotenv
-from tqdm import tqdm
 
 for _logger_name in ("scrapling", "curl_cffi", "urllib3", "asyncio", "playwright"):
     _lg = logging.getLogger(_logger_name)
@@ -24,69 +24,78 @@ load_dotenv(dotenv_path=Path(__file__).resolve().parent.parent / ".env")
 
 from db.mongo_client import (
     find_unexported_gambling_domains,
-    find_pending_capture,
     checked_domains,
-    write_result,
 )
-from capture_url.screenshot import BrowserPool, is_valid_screenshot
-from checking_url.classifier import load_keywords
+from capture_url.screenshot import _url_to_filename, is_valid_screenshot
 
 OUTPUT_DIR = os.getenv("SCREENSHOT_DIR", os.path.join("output", "screenshots"))
 
 
 async def run(concurrency: int = None, limit: int = 0) -> list[str]:
-    concurrency = concurrency or int(os.getenv("SCREENSHOT_CONCURRENCY", 15))
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    output_screenshot_dir = os.getenv("SCREENSHOT_DIR", OUTPUT_DIR)
+    os.makedirs(output_screenshot_dir, exist_ok=True)
 
-    # 0. Sync any screenshots existing on disk with MongoDB
-    try:
-        from project_sup.helping_code.sync_screenshots_to_db import sync_screenshots_to_db
-        sync_screenshots_to_db()
-    except Exception as e:
-        print(f"[export] Screenshot sync warning: {e}")
-
-    # 1. First, check if there are any un-screenshotted gambling domains that need fallback capture
-    pending_capture = list(find_pending_capture(limit=limit))
-    if pending_capture:
-        print(f"[export] Found {len(pending_capture)} gambling domain(s) needing screenshot capture...")
-        keywords = load_keywords()
-        pool = BrowserPool(concurrency=concurrency)
-        await pool.start()
-        sem = asyncio.Semaphore(concurrency)
-        pbar = tqdm(total=len(pending_capture), desc="Capturing Missing", unit="domain", dynamic_ncols=True)
-
-        async def capture_missing(doc):
-            domain = doc["_id"]
-            url = doc.get("url", f"https://{domain}")
-            async with sem:
-                path, status, reason = await pool.capture_url(url, OUTPUT_DIR, retries=2, keywords=keywords)
-            if path and is_valid_screenshot(path):
-                checked_domains().update_one(
-                    {"_id": domain},
-                    {"$set": {"screenshot_taken": True, "screenshot_failed_reason": None}}
-                )
-            else:
-                fail_msg = str(reason) if reason else "Screenshot failed or timed out"
-                checked_domains().update_one(
-                    {"_id": domain},
-                    {"$set": {"screenshot_taken": False, "screenshot_failed_reason": fail_msg}}
-                )
-            pbar.update(1)
-
-        try:
-            await asyncio.gather(*[capture_missing(doc) for doc in pending_capture])
-        finally:
-            await pool.close()
-            pbar.close()
-
-    # 2. Pull all gambling domains with captured screenshots pending export
+    # 1. Pull all gambling domains with screenshot_taken=True pending export
     unexported = list(find_unexported_gambling_domains(limit=limit))
     if not unexported:
-        # Fallback: check all gambling domains if unexported is empty
-        unexported = list(checked_domains().find({"status": "gambling", "screenshot_taken": True}))
+        # Fallback query if unexported is empty
+        unexported = list(checked_domains().find({
+            "status": "gambling",
+            "screenshot_taken": True,
+            "exported": {"$ne": True}
+        }))
         if limit:
             unexported = unexported[:limit]
 
-    processed_ids = [doc["_id"] for doc in unexported]
-    print(f"[export] {len(processed_ids)} captured gambling domains ready for export.")
-    return processed_ids
+    verified_ids = []
+    missing_ids = []
+
+    for doc in unexported:
+        domain = doc.get("domain") or doc.get("_id")
+        url = doc.get("url") or f"https://{domain}"
+        candidates = [
+            _url_to_filename(url),
+            _url_to_filename(f"https://{domain}"),
+            _url_to_filename(f"http://{domain}"),
+        ]
+        found = False
+        for cand in candidates:
+            cand_path = os.path.join(output_screenshot_dir, cand)
+            if os.path.exists(cand_path) and is_valid_screenshot(cand_path):
+                found = True
+                break
+
+        if found:
+            verified_ids.append(domain)
+        else:
+            missing_ids.append(domain)
+
+    if missing_ids:
+        print(f"[export] {len(missing_ids)} gambling domain(s) have screenshot_taken=True but file missing on disk.")
+        print(f"[export] Auto-capturing missing screenshots before export...")
+        # Reset flag so screenshot_runner can pick them up
+        checked_domains().update_many(
+            {"_id": {"$in": missing_ids}},
+            {"$set": {"screenshot_taken": False, "screenshot_failed_reason": "Screenshot JPEG missing on disk"}},
+        )
+        try:
+            from capture_url.screenshot_runner import run as screenshot_run
+            cap_result = await screenshot_run(domain_ids=missing_ids)
+            # Re-check which ones now have valid screenshots on disk
+            for domain in missing_ids:
+                url = f"https://{domain}"
+                candidates = [
+                    _url_to_filename(url),
+                    _url_to_filename(f"https://{domain}"),
+                    _url_to_filename(f"http://{domain}"),
+                ]
+                for cand in candidates:
+                    if os.path.exists(os.path.join(output_screenshot_dir, cand)) and is_valid_screenshot(os.path.join(output_screenshot_dir, cand)):
+                        verified_ids.append(domain)
+                        break
+        except Exception as e:
+            print(f"[export] Screenshot auto-capture warning: {e}")
+
+    print(f"[export] {len(verified_ids)} verified gambling domains with present screenshots ready for export.")
+    return verified_ids
+

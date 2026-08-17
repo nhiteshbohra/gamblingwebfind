@@ -1,0 +1,620 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GamblingWebFind — Intelligence & Compliance Dashboard</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div id="app">
+  <!-- Top Navigation Header -->
+  <header>
+    <div class="logo-area">
+      <div class="logo-icon">🎰</div>
+      <h1>Gambling<span>WebFind</span></h1>
+    </div>
+
+    <div class="header-status-pill">
+      <span class="status-dot" id="hdr-mongo-dot"></span>
+      <span id="hdr-mongo-text">Mongo: ...</span>
+      <span style="opacity:0.3">|</span>
+      <span class="status-dot" id="hdr-ollama-dot"></span>
+      <span id="hdr-ollama-text">Ollama: ...</span>
+    </div>
+
+    <nav>
+      <button data-tab="overview" class="active" onclick="showTab('overview')">📊 Overview</button>
+      <button data-tab="pipeline" onclick="showTab('pipeline')">⚡ Pipeline</button>
+      <button data-tab="domains" onclick="showTab('domains')">🌐 Domains</button>
+    </nav>
+  </header>
+
+  <main>
+    <!-- Error / Offline Banner -->
+    <div id="global-error-banner" class="alert-banner error hidden">
+      <span style="font-size:18px">⚠️</span>
+      <span id="global-error-msg">Failed to connect to backend services.</span>
+      <button class="btn btn-ghost btn-sm" style="margin-left:auto" onclick="loadOverview()">↻ Retry</button>
+    </div>
+
+    <!-- TAB 1: OVERVIEW -->
+    <div id="tab-overview" class="tab-view">
+
+      <!-- Stage 1 & Source Domains Section -->
+      <div class="stage-section-header">
+        <span class="stage-section-tag">Stage 1 Source</span>
+        <span class="stage-section-title">Source Pipeline Queue (<code>domain_Listed</code>)</span>
+        <span class="stage-section-desc">Raw domains discovered from SearXNG search & crawling</span>
+      </div>
+
+      <div class="grid5 mb20">
+        <div class="stat-card cyan" onclick="jumpToDomains({source_all: true})">
+          <div>
+            <div class="val" id="st-src-total">…</div>
+            <div class="lbl">Total Listed Domains</div>
+          </div>
+          <div class="sub">All-time discovered &nbsp;→</div>
+        </div>
+
+        <div class="stat-card accent" onclick="jumpToDomains({status: 'unconfirmed'})">
+          <div>
+            <div class="val" id="st-src-pending" style="color:var(--cyan)">…</div>
+            <div class="lbl">Pending Stage 2 Queue</div>
+          </div>
+          <div class="sub">Awaiting classification &nbsp;→</div>
+        </div>
+
+        <div class="stat-card regular" onclick="jumpToDomains({status: 'all'})">
+          <div>
+            <div class="val" id="st-src-active">…</div>
+            <div class="lbl">Active Source Domains</div>
+          </div>
+          <div class="sub">Ready for processing &nbsp;→</div>
+        </div>
+
+        <div class="stat-card dead" onclick="jumpToDomains({status: 'dead'})">
+          <div>
+            <div class="val" id="st-src-inactive">…</div>
+            <div class="lbl">Inactive / Dead on Arrival</div>
+          </div>
+          <div class="sub">Unreachable domains &nbsp;→</div>
+        </div>
+
+        <div class="stat-card blocked" onclick="jumpToDomains({status: 'blocked'})">
+          <div>
+            <div class="val" id="st-src-blocked">…</div>
+            <div class="lbl">Blocked at Source</div>
+          </div>
+          <div class="sub">WAF / 403 on ingest &nbsp;→</div>
+        </div>
+      </div>
+
+      <!-- Stage 2 Classification Results Section -->
+      <div class="stage-section-header">
+        <span class="stage-section-tag" style="color:var(--danger)">Stage 2 Results</span>
+        <span class="stage-section-title">Classification & AI Validation (<code>checked_domains</code>)</span>
+        <span class="stage-section-desc">Verified via HTTP heuristics + anti-false positive AI</span>
+      </div>
+
+      <div class="grid5 mb20">
+        <div class="stat-card gambling" onclick="jumpToDomains({status: 'gambling'})">
+          <div>
+            <div class="val" id="st-gambling">…</div>
+            <div class="lbl">Gambling (Confirmed)</div>
+          </div>
+          <div class="sub"><span id="st-rate">…%</span> of total checked &nbsp;→</div>
+        </div>
+
+        <div class="stat-card regular" onclick="jumpToDomains({status: 'regular'})">
+          <div>
+            <div class="val" id="st-regular">…</div>
+            <div class="lbl">Regular Websites</div>
+          </div>
+          <div class="sub">Non-gambling verified &nbsp;→</div>
+        </div>
+
+        <div class="stat-card blocked" onclick="jumpToDomains({status: 'blocked'})">
+          <div>
+            <div class="val" id="st-blocked">…</div>
+            <div class="lbl">Blocked / 403 WAF</div>
+          </div>
+          <div class="sub">Cloudflare / WAF guarded &nbsp;→</div>
+        </div>
+
+        <div class="stat-card dead" onclick="jumpToDomains({status: 'dead'})">
+          <div>
+            <div class="val" id="st-dead">…</div>
+            <div class="lbl">Dead / Parked</div>
+          </div>
+          <div class="sub">404 / Connection fail &nbsp;→</div>
+        </div>
+
+        <div class="stat-card unconfirmed" onclick="jumpToDomains({status: 'unconfirmed'})">
+          <div>
+            <div class="val" id="st-unconfirmed">…</div>
+            <div class="lbl">Unconfirmed (AI Queue)</div>
+          </div>
+          <div class="sub">Pending AI re-evaluation &nbsp;→</div>
+        </div>
+      </div>
+
+      <!-- Stage 3 Compliance & Screenshots Section -->
+      <div class="stage-section-header">
+        <span class="stage-section-tag" style="color:var(--purple)">Stage 3 Verification</span>
+        <span class="stage-section-title">Screenshot Captures & Report Compliance</span>
+        <span class="stage-section-desc">Full-page visual evidence & PDF/Excel compliance bundles</span>
+      </div>
+
+      <div class="grid4 mb20">
+        <div class="stat-card regular" onclick="jumpToDomains({status: 'gambling', screenshot: 'taken'})">
+          <div>
+            <div class="val" id="st-ss-taken">…</div>
+            <div class="lbl">📸 Screenshots Captured</div>
+          </div>
+          <div class="sub">Valid evidence on disk &nbsp;→</div>
+        </div>
+
+        <div class="stat-card gambling" onclick="jumpToDomains({status: 'gambling', screenshot: 'pending'})">
+          <div>
+            <div class="val" id="st-ss-pending">…</div>
+            <div class="lbl">⚠️ Screenshot Pending / Failed</div>
+          </div>
+          <div class="sub">Queued for capture &nbsp;→</div>
+        </div>
+
+        <div class="stat-card cyan" onclick="jumpToDomains({exported: 'true'})">
+          <div>
+            <div class="val" id="st-exp-done">…</div>
+            <div class="lbl">📦 Reports Exported</div>
+          </div>
+          <div class="sub">Archived in compliance runs &nbsp;→</div>
+        </div>
+
+        <div class="stat-card unconfirmed" onclick="jumpToDomains({status: 'gambling', exported: 'false'})">
+          <div>
+            <div class="val" id="st-exp-pending">…</div>
+            <div class="lbl">⏳ Pending Export Batch</div>
+          </div>
+          <div class="sub">Captured, ready for report &nbsp;→</div>
+        </div>
+      </div>
+
+      <!-- Deep Metrics Grid -->
+      <div class="grid3 mb20">
+        <!-- Card 1: Pipeline Throughput -->
+        <div class="card">
+          <div class="card-header">
+            <div class="section-title">⚡ Ingestion Throughput</div>
+          </div>
+          <div class="metric-row">
+            <span class="metric-label">Processed through Stage 2</span>
+            <span class="metric-value" id="m-src-processed" style="color:var(--success)">…</span>
+          </div>
+          <div class="metric-row">
+            <span class="metric-label">New Domains Added Today</span>
+            <span class="metric-value" id="m-src-today" style="color:var(--cyan)">…</span>
+          </div>
+          <div class="metric-row">
+            <span class="metric-label">New Domains Added This Week</span>
+            <span class="metric-value" id="m-src-week">…</span>
+          </div>
+        </div>
+
+        <!-- Card 2: AI Intelligence & Classification -->
+        <div class="card">
+          <div class="card-header">
+            <div class="section-title">🤖 AI Classifier Breakdown</div>
+          </div>
+          <div class="metric-row">
+            <span class="metric-label">Gambling Confirmation Rate</span>
+            <span class="metric-value" id="m-rate-text">…%</span>
+          </div>
+          <div class="progress-bar-bg">
+            <div class="progress-bar-fill" id="m-rate-bar" style="width:0%"></div>
+          </div>
+          <div class="metric-row mt12">
+            <span class="metric-label">Re-classified via AI Validator</span>
+            <span class="metric-value" id="m-ai-count" style="color:var(--purple)">…</span>
+          </div>
+          <div class="metric-row">
+            <span class="metric-label">Fast-Path Keyword Matches</span>
+            <span class="metric-value" id="m-kw-count">…</span>
+          </div>
+        </div>
+
+        <!-- Card 3: Export Deliverables -->
+        <div class="card">
+          <div class="card-header">
+            <div class="section-title">📦 Compliance Output Runs</div>
+          </div>
+          <div class="metric-row">
+            <span class="metric-label">Total Export Runs</span>
+            <span class="metric-value" id="m-rep-runs">…</span>
+          </div>
+          <div class="metric-row">
+            <span class="metric-label">Exported Documents</span>
+            <span class="metric-value"><span id="m-rep-pdf" style="color:#fb7185">… PDF</span> / <span id="m-rep-xlsx" style="color:#6ee7b7">… Excel</span> / <span id="m-rep-docx" style="color:#93c5fd">… Word</span></span>
+          </div>
+          <div class="metric-row">
+            <span class="metric-label">Last Export Timestamp</span>
+            <span class="metric-value mono" id="m-rep-last" style="font-size:11px">…</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Quick Action Bar -->
+      <div class="card mb20" style="background:rgba(99, 102, 241, 0.04); border-color: rgba(99, 102, 241, 0.25);">
+        <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px">
+          <div>
+            <div style="font-weight:700;color:#fff;font-size:14px">⚡ Pipeline Quick Launch</div>
+            <div class="muted" style="font-size:12px">Launch stages or jump straight to execution control</div>
+          </div>
+          <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+            <button class="btn btn-ghost btn-sm" onclick="showTab('pipeline'); focusStage('check')">▶ Stage 2 Check</button>
+            <button class="btn btn-ghost btn-sm" onclick="showTab('pipeline'); focusStage('export')">📋 Export Reports</button>
+            <button class="btn btn-ghost btn-sm" onclick="showTab('pipeline'); focusStage('screenshot')">📸 Capture Shots</button>
+            <button class="btn btn-primary btn-sm" onclick="showTab('domains')">🌐 Browse Domains</button>
+            <button class="btn btn-ghost btn-sm" onclick="loadOverview()">↻ Refresh Stats</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Recent Activity Table -->
+      <div class="card">
+        <div class="card-header">
+          <div class="section-title">🕒 Recent Classified Domains <span class="muted" style="font-weight:400">(Latest 10)</span></div>
+          <button class="btn btn-ghost btn-sm" onclick="showTab('domains')">View All Domains →</button>
+        </div>
+        <div class="tbl-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th style="width:70px">Preview</th>
+                <th>Domain</th>
+                <th>Status</th>
+                <th>Reason / Triggers</th>
+                <th>Added Date</th>
+              </tr>
+            </thead>
+            <tbody id="recent-body">
+              <tr><td colspan="5" style="text-align:center;padding:24px" class="muted">Loading recent domains…</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB 2: PIPELINE -->
+    <div id="tab-pipeline" class="tab-view hidden">
+      <!-- Pipeline Header with Stop All Button -->
+      <div class="pipeline-header-bar mb20">
+        <div>
+          <h2 style="font-size:18px;font-weight:700;color:#fff">Pipeline Execution & Control</h2>
+          <p class="muted" style="font-size:13px">Launch automated stages or halt running processes on demand</p>
+        </div>
+        <button id="btn-stop-all" class="btn btn-danger btn-sm hidden" onclick="stopAllStages()">⏹ Stop All Running Jobs</button>
+      </div>
+
+      <div class="grid2 mb20">
+        <!-- Stage 1: Keywords Search -->
+        <div class="card" id="card-stage-keywords">
+          <div class="card-header">
+            <div style="display:flex;align-items:center;gap:10px">
+              <span style="font-size:22px">🔍</span>
+              <div>
+                <div class="section-title" style="margin:0">Stage 1 — Keywords Search</div>
+                <div class="muted" style="font-size:12px">SearxNG Multi-Engine query using top 500 keywords</div>
+              </div>
+            </div>
+            <span id="badge-keywords" class="badge badge-idle">Idle</span>
+          </div>
+          <p class="muted" style="font-size:13px;margin-bottom:14px">Searches Google/Bing via SearXNG and seeds newly discovered domains into MongoDB <code>domain_Listed</code>.</p>
+          <div style="display:flex;gap:10px;align-items:center">
+            <button id="btn-keywords" class="btn btn-primary" onclick="runStage('keywords')">▶ Start Search</button>
+            <button id="btn-stop-keywords" class="btn btn-danger hidden" onclick="stopStage('keywords')">⏹ Stop Search</button>
+          </div>
+          <div class="log-panel mt16" id="log-keywords"><p class="dim">// Logs will stream here when started...</p></div>
+        </div>
+
+        <!-- Stage 2: Check & Classify -->
+        <div class="card" id="card-stage-check">
+          <div class="card-header">
+            <div style="display:flex;align-items:center;gap:10px">
+              <span style="font-size:22px">🤖</span>
+              <div>
+                <div class="section-title" style="margin:0">Stage 2 — URL Classifier & AI</div>
+                <div class="muted" style="font-size:12px">Fast HTTP fetch + Anti-False Positive AI Validation</div>
+              </div>
+            </div>
+            <span id="badge-check" class="badge badge-idle">Idle</span>
+          </div>
+          <div class="form-row">
+            <label>Classification Mode</label>
+            <select id="check-mode">
+              <option value="new">New Unprocessed Domains (Queue)</option>
+              <option value="unconfirmed">Re-check Unconfirmed (AI Offline Re-run)</option>
+              <option value="blocked">Re-check Blocked (403 / Cloudflare WAF)</option>
+            </select>
+          </div>
+          <div style="display:flex;gap:10px;align-items:center">
+            <button id="btn-check" class="btn btn-primary" onclick="onRunCheckClick()">▶ Run Classification</button>
+            <button id="btn-stop-check" class="btn btn-danger hidden" onclick="stopStage('check')">⏹ Stop Classification</button>
+          </div>
+          <div class="log-panel mt16" id="log-check"><p class="dim">// Logs will stream here when started...</p></div>
+        </div>
+
+        <!-- Stage 3: Export Reports -->
+        <div class="card" id="card-stage-export">
+          <div class="card-header">
+            <div style="display:flex;align-items:center;gap:10px">
+              <span style="font-size:22px">📋</span>
+              <div>
+                <div class="section-title" style="margin:0">Stage 3 — Compliance Report Exporter</div>
+                <div class="muted" style="font-size:12px">Generates PDF, Excel, and Word compliance reports</div>
+              </div>
+            </div>
+            <span id="badge-export" class="badge badge-idle">Idle</span>
+          </div>
+          <div class="grid2" style="gap:12px">
+            <div class="form-row">
+              <label>Export Format</label>
+              <select id="export-fmt">
+                <option value="3" selected>Batched by PDF Size (≤24MB, PDF + Excel)</option>
+                <option value="1">Single Combined File (PDF + Excel + Word)</option>
+                <option value="2">Batched by N items</option>
+              </select>
+            </div>
+            <div class="form-row">
+              <label>Batch Size (if format 2)</label>
+              <input type="number" id="export-batch" value="40" min="1" max="1000">
+            </div>
+          </div>
+          <div style="display:flex;gap:10px;align-items:center">
+            <button id="btn-export" class="btn btn-primary" onclick="runStage('export', {format: parseInt(document.getElementById('export-fmt').value), batch_size: parseInt(document.getElementById('export-batch').value)})">▶ Generate & Export</button>
+            <button id="btn-stop-export" class="btn btn-danger hidden" onclick="stopStage('export')">⏹ Stop Export</button>
+          </div>
+          <div class="log-panel mt16" id="log-export"><p class="dim">// Logs will stream here when started...</p></div>
+        </div>
+
+        <!-- Stage 4: Missing Screenshot Capture -->
+        <div class="card" id="card-stage-screenshot">
+          <div class="card-header">
+            <div style="display:flex;align-items:center;gap:10px">
+              <span style="font-size:22px">📸</span>
+              <div>
+                <div class="section-title" style="margin:0">Stage 4 — Screenshot Capture Only</div>
+                <div class="muted" style="font-size:12px">Captures missing full-page screenshots without re-classification</div>
+              </div>
+            </div>
+            <span id="badge-screenshot" class="badge badge-idle">Idle</span>
+          </div>
+          <div class="form-row">
+            <label>Target Mode</label>
+            <select id="ss-mode" onchange="document.getElementById('ss-domains-row').classList.toggle('hidden', this.value!=='file')">
+              <option value="db">All Pending in DB (status=gambling, screenshot_taken=false)</option>
+              <option value="file">Paste Specific Domains List</option>
+            </select>
+          </div>
+          <div class="form-row hidden" id="ss-domains-row">
+            <label>Domain / URL List (one per line)</label>
+            <textarea id="ss-domains" rows="3" placeholder="bet365.com&#10;1xbet.com"></textarea>
+          </div>
+          <div style="display:flex;gap:10px;align-items:center">
+            <button id="btn-screenshot" class="btn btn-primary" onclick="runScreenshotStage()">▶ Capture Screenshots</button>
+            <button id="btn-stop-screenshot" class="btn btn-danger hidden" onclick="stopStage('screenshot')">⏹ Stop Capture</button>
+          </div>
+          <div class="log-panel mt16" id="log-screenshot"><p class="dim">// Logs will stream here when started...</p></div>
+        </div>
+      </div>
+
+      <!-- Import True Positives Section -->
+      <div class="card">
+        <div class="card-header">
+          <div style="display:flex;align-items:center;gap:10px">
+            <span style="font-size:22px">📥</span>
+            <div>
+              <div class="section-title" style="margin:0">Import Confirmed Gambling URLs</div>
+              <div class="muted" style="font-size:12px">Directly seeds confirmed gambling domains into MongoDB and queues for screenshot capture</div>
+            </div>
+          </div>
+        </div>
+        <div class="form-row">
+          <label>Paste Domains or URLs (one per line)</label>
+          <textarea id="import-domains" rows="4" placeholder="007book.biz&#10;https://www.10cric.biz&#10;royal777.com"></textarea>
+        </div>
+        <button id="btn-import" class="btn btn-primary" onclick="onRunImportClick()">📥 Import & Queue</button>
+      </div>
+    </div>
+
+    <!-- TAB 3: DOMAINS TABLE WITH ENHANCED FILTER & SEARCH CONTROLS -->
+    <div id="tab-domains" class="tab-view hidden">
+      <!-- Advanced Search & Filter Toolbar -->
+      <div class="card mb16 filter-card">
+        <div class="filter-controls-grid">
+          <!-- Text Search Field -->
+          <div class="filter-field">
+            <label>Search Domain / Reason</label>
+            <div class="search-input-wrap">
+              <input type="text" id="domain-search" placeholder="🔍 Search domain name, reason, keyword..." oninput="onSearchInput(this.value)">
+              <button class="search-clear-btn hidden" id="search-clear-btn" onclick="clearSearchInput()" title="Clear search">✕</button>
+            </div>
+          </div>
+
+          <!-- Status Dropdown -->
+          <div class="filter-field">
+            <label>Status Filter</label>
+            <select id="filter-status-select" onchange="onDropdownFilterChange('status', this.value)">
+              <option value="all">All Statuses</option>
+              <option value="gambling">🎰 Gambling (Confirmed)</option>
+              <option value="regular">🏢 Regular Website</option>
+              <option value="blocked">🛡️ Blocked / 403 WAF</option>
+              <option value="dead">💀 Dead / Unreachable</option>
+              <option value="unconfirmed">⏳ Unconfirmed (AI Queue)</option>
+            </select>
+          </div>
+
+          <!-- Screenshot Filter -->
+          <div class="filter-field">
+            <label>Screenshot Evidence</label>
+            <select id="filter-screenshot-select" onchange="onDropdownFilterChange('screenshot', this.value)">
+              <option value="all">All Evidence</option>
+              <option value="taken">📸 Screenshot Captured</option>
+              <option value="pending">⚠️ Screenshot Pending</option>
+            </select>
+          </div>
+
+          <!-- Exported Filter -->
+          <div class="filter-field">
+            <label>Export Status</label>
+            <select id="filter-export-select" onchange="onDropdownFilterChange('exported', this.value)">
+              <option value="all">All Records</option>
+              <option value="true">📦 Exported</option>
+              <option value="false">⏳ Not Exported</option>
+            </select>
+          </div>
+
+          <!-- Date Range: From Date -->
+          <div class="filter-field">
+            <label>Added From</label>
+            <input type="date" id="filter-from-date" onchange="onDateFilterChange()">
+          </div>
+
+          <!-- Date Range: To Date -->
+          <div class="filter-field">
+            <label>Added To</label>
+            <input type="date" id="filter-to-date" onchange="onDateFilterChange()">
+          </div>
+        </div>
+
+        <!-- Filter Actions Bar -->
+        <div class="filter-actions-row mt12">
+          <div class="filter-tags-summary" id="filter-tags-summary">
+            <span class="muted" style="font-size:12px">Filters: None active</span>
+          </div>
+          <div style="display:flex;gap:8px;margin-left:auto;align-items:center">
+            <button class="btn btn-ghost btn-sm" id="btn-reset-filters" onclick="resetAllFilters()">↺ Reset All Filters</button>
+            <button class="btn btn-primary btn-sm" onclick="loadDomains(1)">🔍 Apply Search</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Quick Status Filter Chips Bar -->
+      <div class="filters-bar mb16">
+        <span class="chip-btn active" data-filter="all" onclick="setFilterChip('all')">
+          All <span class="chip-count" id="chip-cnt-all">…</span>
+        </span>
+        <span class="chip-btn" data-filter="gambling" onclick="setFilterChip('gambling')">
+          🎰 Gambling <span class="chip-count" id="chip-cnt-gambling">…</span>
+        </span>
+        <span class="chip-btn" data-filter="regular" onclick="setFilterChip('regular')">
+          🏢 Regular <span class="chip-count" id="chip-cnt-regular">…</span>
+        </span>
+        <span class="chip-btn" data-filter="blocked" onclick="setFilterChip('blocked')">
+          🛡️ Blocked <span class="chip-count" id="chip-cnt-blocked">…</span>
+        </span>
+        <span class="chip-btn" data-filter="dead" onclick="setFilterChip('dead')">
+          💀 Dead <span class="chip-count" id="chip-cnt-dead">…</span>
+        </span>
+        <span class="chip-btn" data-filter="unconfirmed" onclick="setFilterChip('unconfirmed')">
+          ⏳ Unconfirmed <span class="chip-count" id="chip-cnt-unconfirmed">…</span>
+        </span>
+        <span class="chip-btn" data-filter="ss_pending" onclick="setFilterChip('ss_pending')">
+          ⚠️ Shot Pending <span class="chip-count" id="chip-cnt-ss-pending">…</span>
+        </span>
+        <span class="chip-btn" data-filter="ss_taken" onclick="setFilterChip('ss_taken')">
+          📸 Shot Taken <span class="chip-count" id="chip-cnt-ss-taken">…</span>
+        </span>
+        <span class="chip-btn" data-filter="exported" onclick="setFilterChip('exported')">
+          📦 Exported <span class="chip-count" id="chip-cnt-exported">…</span>
+        </span>
+        <span class="chip-btn" data-filter="not_exported" onclick="setFilterChip('not_exported')">
+          ⏳ Not Exported <span class="chip-count" id="chip-cnt-not-exported">…</span>
+        </span>
+
+        <div style="margin-left:auto;display:flex;align-items:center;gap:8px">
+          <span class="muted" style="font-size:12px">Rows:</span>
+          <select id="per-page-select" onchange="_domainsPerPage=parseInt(this.value);loadDomains(1)" style="width:auto;padding:4px 8px">
+            <option value="25">25</option>
+            <option value="50" selected>50</option>
+            <option value="100">100</option>
+            <option value="250">250</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- Domains Table -->
+      <div class="tbl-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th style="width:70px">Screenshot</th>
+              <th>Domain</th>
+              <th>Status</th>
+              <th>Reason / Triggers</th>
+              <th>Added Date</th>
+              <th>Exported</th>
+            </tr>
+          </thead>
+          <tbody id="domains-body">
+            <tr><td colspan="6" style="text-align:center;padding:24px" class="muted">Loading domains…</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Pagination -->
+      <div class="pagination-wrap">
+        <div class="muted" style="font-size:12px" id="domains-count-info">Showing …</div>
+        <div style="display:flex;gap:8px">
+          <button class="btn btn-ghost btn-sm" id="btn-prev" onclick="loadDomains(_domainsPage - 1)">← Previous</button>
+          <button class="btn btn-ghost btn-sm" id="btn-next" onclick="loadDomains(_domainsPage + 1)">Next →</button>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<!-- Domain Detail Drawer Overlay -->
+<div class="detail-overlay hidden" id="detail-overlay" onclick="if(event.target===this)closeDetail()">
+  <div class="detail-drawer" id="detail-panel">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px">
+      <h3 id="detail-domain-title" style="font-size:18px;font-weight:700;color:#fff;word-break:break-all"></h3>
+      <button class="btn btn-ghost btn-sm" onclick="closeDetail()">✕ Close</button>
+    </div>
+
+    <div style="margin-bottom:16px" id="detail-badge-area"></div>
+
+    <div id="detail-screenshot-area" class="mb16 hidden">
+      <label>Full-Page Capture Preview</label>
+      <img id="detail-img" class="detail-screenshot-img" src="" alt="Screenshot">
+    </div>
+
+    <div class="mb16">
+      <label>Classification & Metadata</label>
+      <pre id="detail-json"></pre>
+    </div>
+
+    <div style="margin-top:auto;display:flex;gap:10px">
+      <a id="detail-visit-link" href="#" target="_blank" rel="noopener noreferrer" class="btn btn-ghost btn-sm" style="flex:1">↗ Visit Website</a>
+      <button class="btn btn-primary btn-sm" onclick="copyDomainJson()" style="flex:1">📋 Copy Record</button>
+    </div>
+  </div>
+</div>
+
+<!-- Generic Confirmation Modal -->
+<div class="modal-overlay hidden" id="confirm-modal">
+  <div class="modal-box">
+    <div class="modal-title" id="confirm-modal-title">⚠️ Confirmation Required</div>
+    <div class="modal-desc" id="confirm-modal-desc">Are you sure you want to proceed?</div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost btn-sm" onclick="closeConfirmModal(false)">Cancel</button>
+      <button class="btn btn-danger btn-sm" id="confirm-modal-ok-btn" onclick="closeConfirmModal(true)">Confirm & Proceed</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

@@ -1,4 +1,4 @@
-FROM llama3.2:3b
+FROM qwen2.5:3b
 
 # Deterministic, fast, low-creativity parameters for classification
 PARAMETER temperature 0.1
@@ -26,7 +26,7 @@ B. Casino & Table Games:
    - Traditional Indian Games: Teen Patti, Andar Bahar, Jhandi Munda, 7 Up Down, Mang Patta, Real-money Rummy / Points Rummy.
    - Live Dealer / International Casino: Roulette, Blackjack, Baccarat, Dragon Tiger, Sic Bo, Live Casino streaming.
    - Slots & Crash Games: Aviator, Crash X, Spaceman, JetX, Rocket game, Mines, Plinko, Megaways, Spin & Win, Wheel of Fortune.
-   - IMPORTANT: Casino resort / hotel casino / tribal casino / riverboat casino with gaming floors ARE gambling sites even if they also offer dining, careers, and entertainment sections.
+   - IMPORTANT: A casino resort / hotel casino / tribal casino / riverboat casino website is "gambling" ONLY if the site ITSELF advertises or offers its own gaming floor, slots, table games, or a players club/loyalty program for wagering (e.g. "Visit our casino floor", "Slot machines", "Table games", "Rewards Club"). A hotel or restaurant site that merely mentions "casino" in passing (address, nearby attraction, area name, a review, or historical reference) and does NOT itself offer gambling is "regular".
 
 C. Lottery & Prize Draw Platforms:
    - Any online lottery site, state lottery result portal, or lottery prediction site (e.g. bhagyashree lottery, nagaland lottery, kerala lottery, sikkim state lottery).
@@ -56,8 +56,16 @@ Do NOT classify as gambling if you can provide SPECIFIC page evidence that the w
 - Genuine E-Commerce: Must have shopping cart, product listings with prices, shipping policy for physical goods.
 - News / Wiki / Government: News articles about gambling (reporting on raids), Wikipedia gambling history articles, Government anti-gambling warnings — the website itself must not offer gambling.
 - Free Casual Gaming (No Real Money): Video games on Steam/console with in-game cosmetics ONLY, NO real money cash-out mechanism at all.
+- Hospitality (Hotels/Resorts): Booking/reservation pages, room listings, check-in/check-out info, amenities, dining menus, event/conference spaces — even if "casino" appears in the property name, nearby-attraction text, or an address, AS LONG AS the site is not itself advertising a gaming floor, slots, or table games as something visitors can play there.
+- Restaurants: Menus, reservations, delivery/order-online links, location/hours — including restaurants located inside or near a casino resort, as long as the restaurant's own page is about dining, not gambling.
 
-IMPORTANT: Simply having the words "contact", "careers", "entertainment", "dining", "lifestyle" does NOT make it non-gambling. Casino resorts use all these words.
+NEGATIVE EXAMPLES (classify these as "regular"):
+- A hotel page saying "walking distance to the casino district" → regular (no gaming floor offered by this site).
+- A steakhouse whose address happens to be inside a casino resort, with a menu and reservation form → regular.
+- A travel blog or news article reviewing/describing a casino resort → regular (it's not the operator).
+- A university/college page (even without .edu domain) with admissions, courses, faculty, or campus life content → regular.
+
+IMPORTANT: Simply having the words "contact", "careers", "entertainment", "dining", "lifestyle" does NOT by itself make a site gambling OR non-gambling — look for whether the SITE ITSELF is offering wagering, betting IDs, casino games, or lottery products.
 
 ================================================================================
 3. RESOLUTION POLICY:
@@ -65,9 +73,9 @@ IMPORTANT: Simply having the words "contact", "careers", "entertainment", "dinin
 - If a site has real-money cash stakes, betting IDs, live casino games, Satta Matka, or lottery → "gambling".
 - If the site is a casino resort/hotel/tribal casino with a gaming floor → "gambling".
 - If the site teaches blackjack/card counting for real casino use → "gambling".
-- If the site is purely educational, e-commerce for physical goods, or news/government → "regular".
+- If the site is purely educational, e-commerce for physical goods, hospitality/dining, or news/government → "regular".
 - If borderline: check if there is ANY mechanism to deposit real money or obtain a betting ID. If yes → "gambling".
-- WHEN IN DOUBT → classify as "gambling". It is better to flag a false gambling site than to miss a real one.
+- WHEN IN DOUBT and you cannot cite a specific gambling mechanism (deposit flow, betting ID, casino game, lottery product) present on THIS site → classify as "regular" with confidence below 0.6, so it can be reviewed further. Do not classify as "gambling" based on vague thematic association (e.g. the word "casino" appearing without an actual gambling offering) — false positives on legitimate businesses (hotels, colleges, restaurants) are a real cost, not a safe default.
 
 ================================================================================
 4. STRICT JSON OUTPUT FORMAT:

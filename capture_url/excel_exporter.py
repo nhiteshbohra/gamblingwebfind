@@ -136,13 +136,31 @@ def export_capture_workbook(
     captured = list(checked_domains().find(captured_filter))
     failed   = list(checked_domains().find(failed_filter))
 
-    # Only include captured domains whose JPEG is on disk
-    screenshots_dir = os.path.join("output", "screenshots")
+    # Only include captured domains whose JPEG is on disk and valid
+    screenshots_dir = os.getenv("SCREENSHOT_DIR", os.path.join("output", "screenshots"))
     try:
-        from capture_url.screenshot import _url_to_filename
-        captured = [d for d in captured if os.path.exists(
-            os.path.join(screenshots_dir, _url_to_filename(d.get("url", "")))
-        )]
+        from capture_url.screenshot import _url_to_filename, is_valid_screenshot
+        verified_captured = []
+        missing_ids = []
+        for d in captured:
+            domain = d.get("domain") or d.get("_id")
+            url = d.get("url") or f"https://{domain}"
+            candidates = [
+                _url_to_filename(url),
+                _url_to_filename(f"https://{domain}"),
+                _url_to_filename(f"http://{domain}"),
+            ]
+            if any(os.path.exists(os.path.join(screenshots_dir, c)) and is_valid_screenshot(os.path.join(screenshots_dir, c)) for c in candidates):
+                verified_captured.append(d)
+            else:
+                missing_ids.append(d["_id"])
+
+        if missing_ids:
+            checked_domains().update_many(
+                {"_id": {"$in": missing_ids}},
+                {"$set": {"screenshot_taken": False, "screenshot_failed_reason": "Screenshot JPEG missing on disk"}}
+            )
+        captured = verified_captured
     except Exception:
         pass
 

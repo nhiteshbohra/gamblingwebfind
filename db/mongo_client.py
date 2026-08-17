@@ -36,14 +36,30 @@ def get_db():
         db_name = os.getenv("MONGO_DB_NAME", "gamblingsites")
         _client = MongoClient(
             uri,
-            serverSelectionTimeoutMS=10000,
-            connectTimeoutMS=10000,
+            serverSelectionTimeoutMS=5000,
+            connectTimeoutMS=5000,
             socketTimeoutMS=30000,
             maxPoolSize=100,
             minPoolSize=5,
             retryWrites=True,
         )
         _db = _client[db_name]
+        try:
+            _client.admin.command('ping')
+        except Exception:
+            # Self-healing: auto-start MongoDB daemon if offline
+            import subprocess
+            import time
+            mongod_path = r"C:\Program Files\MongoDB\Server\8.0\bin\mongod.exe"
+            mongod_cfg = r"C:\Program Files\MongoDB\Server\8.0\bin\mongod.cfg"
+            if os.path.exists(mongod_path) and os.path.exists(mongod_cfg):
+                try:
+                    subprocess.Popen([mongod_path, "--config", mongod_cfg], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    time.sleep(2)
+                except Exception:
+                    pass
+            _client = MongoClient(uri, serverSelectionTimeoutMS=10000, connectTimeoutMS=10000, socketTimeoutMS=30000)
+            _db = _client[db_name]
     return _db
 
 
@@ -78,6 +94,77 @@ def normalize_url(raw_url: str) -> str:
 def extract_domain(url: str) -> str:
     ext = tldextract.extract(url)
     return (ext.registered_domain or ext.domain).lower()
+
+
+def extract_domains_from_file(file_path: str) -> list[str]:
+    """Read domains/URLs from an Excel (.xlsx/.xls), CSV, or text file.
+
+    Robust against encoding issues, headers, multiple columns, and URLs.
+    Returns a deduplicated list of valid registered domains in order.
+    """
+    path = Path(file_path)
+    if not path.exists():
+        return []
+
+    domains = []
+    seen = set()
+
+    def _add_cand(raw: any):
+        if not raw:
+            return
+        text = str(raw).strip()
+        if not text or text.startswith("#"):
+            return
+        text = text.strip('"\' ,;')
+        token = text.split(",")[0].split()[0].strip()
+        token = token.replace("https://", "").replace("http://", "").lstrip("www.").rstrip("/").lower()
+        d = extract_domain(f"https://{token}") or token
+        if d and "." in d and d not in seen:
+            seen.add(d)
+            domains.append(d)
+
+    ext = path.suffix.lower()
+    if ext in (".xlsx", ".xls"):
+        try:
+            import openpyxl
+            wb = openpyxl.load_workbook(file_path, data_only=True, read_only=True)
+            for sheet in wb.worksheets:
+                for row in sheet.iter_rows(values_only=True):
+                    for val in row:
+                        if val is not None and "." in str(val):
+                            _add_cand(str(val))
+            wb.close()
+        except Exception:
+            try:
+                import pandas as pd
+                df = pd.read_excel(file_path)
+                for col in df.columns:
+                    for val in df[col].dropna():
+                        if "." in str(val):
+                            _add_cand(str(val))
+            except Exception as e:
+                print(f"[extract_domains_from_file] Excel read error: {e}")
+    else:
+        encodings = ("utf-8-sig", "utf-8", "latin-1", "cp1252")
+        lines = []
+        for enc in encodings:
+            try:
+                with open(file_path, "r", encoding=enc) as f:
+                    lines = f.readlines()
+                break
+            except Exception:
+                continue
+
+        for raw in lines:
+            raw = raw.strip()
+            if not raw or raw.startswith("#"):
+                continue
+            parts = [p.strip() for p in raw.replace("\t", ",").split(",") if p.strip()]
+            for p in parts:
+                if "." in p:
+                    _add_cand(p)
+
+    return domains
 
 
 # ── Source collection helpers ─────────────────────────────────────────────────
@@ -151,7 +238,7 @@ def write_result(
     domain: str,
     *,
     status: str,
-    reason: list,
+    reason: str | list,
     url: str = None,
     screenshot_taken: bool | None = None,
     screenshot_failed_reason: str | None = None,
@@ -162,18 +249,30 @@ def write_result(
     Statuses handled:
       - 'gambling': live verified gambling site (+ immediate screenshot flag)
       - 'regular': non-gambling site
-      - 'unconfirmed': Ollama was offline for a 1-2 keyword site (processed=False to re-run!)
+      - 'unconfirmed': Ollama offline/timeout or network error (processed=False to re-run!)
       - 'blocked': 403 / Cloudflare WAF
       - 'dead': 404 / Connection failed / Parked lander
     """
     today_date = datetime.now(IST).strftime("%Y-%m-%d")
 
+    # Format reason as concise short-form text
+    if isinstance(reason, list):
+        if len(reason) == 0:
+            formatted_reason = "No reason provided"
+        elif len(reason) == 1:
+            formatted_reason = str(reason[0])
+        else:
+            formatted_reason = ", ".join(str(r) for r in reason)
+    else:
+        formatted_reason = str(reason) if reason else "No reason provided"
+
     set_fields = {
         "domain": domain,
         "url": url or f"https://{domain}",
         "status": status,
-        "reason": reason or [],
+        "reason": formatted_reason,
     }
+
 
     if screenshot_taken is not None:
         set_fields["screenshot_taken"] = bool(screenshot_taken)
@@ -292,7 +391,62 @@ def seed_from_csv(path: str, active: bool = True):
     print(f"[seed] {inserted} upserted into domain_Listed, {skipped} skipped")
 
 
+def ingest_true_positives(path: str) -> tuple[int, int]:
+    """Import confirmed gambling domains from an Excel (.xlsx/.xls), CSV, or .txt file directly into
+    checked_domains as status='gambling', screenshot_taken=False.
+
+    Skips domains already present in checked_domains.
+    Returns (inserted, skipped).
+    """
+    inserted = skipped = 0
+    today_date = datetime.now(IST).strftime("%Y-%m-%d")
+
+    domains = extract_domains_from_file(path)
+    for domain in domains:
+        if not domain or "." not in domain:
+            skipped += 1
+            continue
+
+        # If already exists, reset for re-capture and re-export
+        existing = checked_domains().find_one({"_id": domain}, {"_id": 1})
+        if existing:
+            checked_domains().update_one(
+                {"_id": domain},
+                {"$set": {"screenshot_taken": False, "exported": False, "screenshot_failed_reason": None}},
+            )
+            skipped += 1
+            continue
+
+        # Insert directly as confirmed gambling true positive
+        checked_domains().update_one(
+            {"_id": domain},
+            {
+                "$set": {
+                    "domain": domain,
+                    "url": f"https://{domain}",
+                    "status": "gambling",
+                    "reason": "Manual true positive import",
+                    "screenshot_taken": False,
+                    "screenshot_failed_reason": None,
+                    "source": "manual_import",
+                },
+                "$setOnInsert": {"added_date": today_date},
+            },
+            upsert=True,
+        )
+        # Also mark processed in source collection
+        source_domains().update_one(
+            {"_id": domain},
+            {"$set": {"active": True, "processed": True}},
+            upsert=False,
+        )
+        inserted += 1
+
+    return inserted, skipped
+
+
 def seed_discovered_domains(domains: set, discovered_from: str) -> tuple[int, int]:
+
     """Bulk upsert domains discovered via deep crawl into domain_Listed.
 
     Only inserts domains NOT already present (uses $setOnInsert so existing

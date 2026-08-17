@@ -1,15 +1,15 @@
 """
-checking_url/ai_classifier.py — Local AI (Ollama + LLaMA 3.2 3B) Semantic Classifier.
+checking_url/ai_classifier.py — Local AI (Ollama) Dual-Model Classifier.
 
-Architecture: 2-Round Challenge System
-- Round 1: Standard deep semantic classification (gambling vs regular)
-- Round 2 (Challenge): If Round 1 says "regular" → AI must prove it with specific page evidence
-  - If evidence is vague/missing OR confidence < 0.75 → override to gambling
-  - Only marks "regular" when strong evidence (college/shop/news content) is provided
+Architecture: Analyst + Validator (Judge) Pattern
+- Round 1 (gambling-analyst): Standard deep semantic classification
+- Round 2 (gambling-analyst): If Round 1 says "regular" → evidence challenge
+- Validator (gambling-validator): If analyst says "gambling" → skeptic validator
+  challenges the verdict, checks if cited evidence is real, catches false positives
 
-Connects to local Ollama instance running the 'gambling-analyst' model.
-Provides async classification with DOM stripping, CTA extraction,
-JSON validation, concurrency management, and offline resiliency.
+Both models use qwen2.5:3b but with opposing system prompts:
+  analyst  → finds gambling signals
+  validator → actively looks for reasons the verdict is WRONG
 """
 import os
 import json
@@ -41,7 +41,8 @@ except ImportError:
 # ── Configuration ─────────────────────────────────────────────────────────────
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gambling-analyst")
-AI_CONCURRENCY = int(os.getenv("AI_CONCURRENCY", 5))
+OLLAMA_VALIDATOR_MODEL = os.getenv("OLLAMA_VALIDATOR_MODEL", "gambling-validator")
+AI_CONCURRENCY = int(os.getenv("AI_CONCURRENCY", 10))
 
 # Dynamic timeout bounds (seconds) — replaces hardcoded AI_TIMEOUT
 AI_TIMEOUT_MIN = float(os.getenv("AI_TIMEOUT_MIN", 8.0))    # fastest simple pages
@@ -104,6 +105,13 @@ class DynamicTimeoutManager:
                 self._ema_response_time * 1.2
             )
 
+    async def reset_ema(self):
+        """Reset EMA to base seed — call at start of a new batch to clear inflated timeouts from prior run."""
+        async with self._lock:
+            self._ema_response_time = AI_TIMEOUT_BASE
+            self._total_calls = 0
+            self._total_timeouts = 0
+
     def stats(self) -> str:
         timeout_rate = (
             f"{self._total_timeouts}/{self._total_calls}"
@@ -142,13 +150,46 @@ IGAMING_PROVIDERS = (
     "jili", "sexygaming", "fachai", "dreamgaming", "sa gaming", "wm casino", "allbet"
 )
 
-# High-conviction deposit/cashier/VIP funnel hooks
-GAMBLING_FUNNEL_MARKERS = (
-    "wa.me/", "api.whatsapp.com/send", "t.me/", "telegram.me/",
+# High-conviction deposit/cashier/VIP funnel hooks — standalone triggers (no gambling context needed)
+GAMBLING_FUNNEL_MARKERS_STRONG = (
     "get demo id", "create master id", "whatsapp betting", "telegram betting",
     "instant deposit", "instant withdrawal", "24/7 withdrawal", "fast payout",
     "usdt deposit", "trc20 deposit", "crypto cashier", "betting exchange id"
 )
+
+# Social/contact links — only a funnel when gambling context words also appear in the HTML
+# wa.me/ and t.me/ appear on millions of legitimate Indian business sites as contact buttons
+GAMBLING_FUNNEL_MARKERS_SOCIAL = (
+    "wa.me/", "api.whatsapp.com/send", "t.me/", "telegram.me/",
+)
+
+# Context words that make a social link a betting funnel
+_FUNNEL_SOCIAL_CONTEXT = (
+    "bet", "betting", "casino", "satta", "matka", "odds", "deposit", "withdraw",
+    "demo id", "bookmaker", "cricket id", "ipl", "live odds", "bonus",
+)
+
+
+def detect_gambling_funnels(html: str) -> list[str]:
+    """Detect high-conviction WhatsApp/Telegram betting funnels and cashier hooks.
+
+    Strong markers fire standalone. Social links (wa.me, t.me) only fire when
+    gambling context words are also present — prevents false positives on legitimate
+    businesses that use Telegram/WhatsApp as a customer contact channel.
+    """
+    if not html:
+        return []
+    html_lower = html.lower()
+
+    matched = [m for m in GAMBLING_FUNNEL_MARKERS_STRONG if m in html_lower]
+
+    # Social links require gambling context nearby
+    has_gambling_context = any(c in html_lower for c in _FUNNEL_SOCIAL_CONTEXT)
+    if has_gambling_context:
+        matched += [m for m in GAMBLING_FUNNEL_MARKERS_SOCIAL if m in html_lower]
+
+    return matched
+
 
 # Common non-gambling false matches on 'bet'
 NON_GAMBLING_BET_WORDS = {"between", "better", "bethesda", "alphabet", "diabetes", "alphabetical"}
@@ -161,7 +202,7 @@ def is_gambling_domain(url_or_domain: str) -> tuple[bool, str]:
     """
     if not url_or_domain:
         return False, ""
-    
+
     clean = url_or_domain.lower()
     clean = re.sub(r"^https?://", "", clean).split("/")[0].split(":")[0]
 
@@ -197,25 +238,39 @@ def detect_igaming_providers(html: str) -> list[str]:
     return [p for p in IGAMING_PROVIDERS if p in html_lower]
 
 
-def detect_gambling_funnels(html: str) -> list[str]:
-    """Detect high-conviction WhatsApp/Telegram betting funnels and cashier hooks."""
-    if not html:
-        return []
-    html_lower = html.lower()
-    return [m for m in GAMBLING_FUNNEL_MARKERS if m in html_lower]
 
+# Conviction threshold: if AI says "regular" with confidence below this → send to Round 2 challenge
+# ponytail: 0.50 not calibrated; ceiling is uncalibrated 3B model logits. Upgrade path: logistic calibration layer.
+REGULAR_CONVICTION_THRESHOLD = 0.50
 
-# Conviction threshold: if AI says "regular" with confidence below this → override to gambling
-REGULAR_CONVICTION_THRESHOLD = 0.75
-
-# Non-gambling archetype patterns
+# Non-gambling archetype patterns for ground-truth evidence verification
 NON_GAMBLING_EVIDENCE_MAP = {
+    "hotel_hospitality": [
+        "hotel", "resort", "book a room", "hotel reservation", "check-in", "check-out",
+        "guest rooms", "hotel suites", "deluxe room", "amenities", "concierge",
+        "spa & wellness", "fine dining", "restaurant", "menu", "banquet",
+        "conference rooms", "weddings & events", "resort fee", "pool & cabanas",
+        "valet parking", "directions", "tripadvisor", "room service", "stay with us"
+    ],
+    "parked_domain": [
+        "parked free", "courtesy of godaddy", "get this domain", "this domain is for sale",
+        "buy this domain", "domain for sale", "domain is parked", "sedo.com",
+        "hugedomains", "afternic", "dan.com", "parkingcrew", "bodis", "related search topics"
+    ],
+    "access_denied_error": [
+        "access denied", "you don't have permission to access", "403 forbidden",
+        "error 403", "errors.edgesuite.net", "reference #", "security service"
+    ],
     "calculator": ["calculator", "calculate", "tax calculator", "gst calculator", "emi calculator", "loan calculator", "percentage calculator", "age calculator", "bmi calculator", "calorie calculator", "currency converter", "unit converter", "salary calculator"],
     "university": ["university", "campus", "tuition", "faculty", "degree", "curriculum", "admissions", "alumni"],
     "hospital": ["hospital", "patient", "clinic", "doctor", "physician", "medical center", "healthcare"],
     "government": ["ministry", "official portal", "government of", "department of", "citizen", "public notice"],
     "ecommerce": ["add to cart", "shopping cart", "shipping policy", "product review", "return policy", "order tracking"],
     "news": ["breaking news", "journalism", "editorial board", "reuters", "associated press", "published on"],
+    "saas_enterprise_tech": ["customer service", "help desk", "sdk", "api integration", "pricing plans", "book a demo", "free trial", "enterprise", "saas", "software", "cloud platform", "developer documentation", "support ticket", "customer support"],
+    "fintech_investing_wealth": ["mutual funds", "portfolio management", "wealth management", "stock market", "brokerage", "etf", "asset management", "invest online", "trading account", "demat account", "financial advisor", "sebi registered", "mas regulated", "sec registered", "robo advisor", "sip", "investment"],
+    "entertainment_media_cinema": ["movie review", "box office", "celebrity gossip", "cinema news", "film review", "trailer", "ott release", "streaming guide", "entertainment news", "bollywood", "hollywood", "actor", "actress", "tv shows", "cinema"],
+    "sports_scores_stats": ["live cricket score", "ball by ball commentary", "ipl score", "match schedule", "point table", "player stats", "match scorecard", "fixtures", "team standings", "scorecard", "live score"],
 }
 
 # Global session and semaphore
@@ -451,19 +506,124 @@ async def classify_with_ai(
     return await classify_with_challenge(html, url)
 
 
+async def validate_gambling_verdict(
+    url: str,
+    title: str,
+    body_text: str,
+    analyst_verdict: dict,
+) -> dict:
+    """
+    Validator (Judge) Model — challenges a gambling verdict from the analyst.
+
+    Sends the analyst's full output + original page content to gambling-validator,
+    which is prompted to act as a skeptic and find reasons the verdict is WRONG.
+
+    Returns the reconciled final verdict dict.
+    Only called when analyst says 'gambling' (not for 100%-certain pre-flight detections).
+    """
+    key_triggers = analyst_verdict.get("key_triggers", [])
+    analyst_reason = analyst_verdict.get("reason", "")
+    analyst_confidence = analyst_verdict.get("confidence", 0.5)
+
+    validator_prompt = f"""URL: {url}
+Title: {title}
+Page Content: {body_text[:1200]}
+
+--- PREVIOUS MODEL VERDICT ---
+Verdict: gambling
+Confidence: {analyst_confidence}
+Triggers cited: {', '.join(str(t) for t in key_triggers[:5])}
+Reason given: {analyst_reason}
+
+Your task: Validate whether this gambling verdict is CORRECT based on the page content above.
+Is the cited evidence ACTUALLY present in the page text? Is this truly a gambling site?
+
+Respond ONLY in valid JSON:
+{{
+  "verdict": "gambling" or "regular" or "unconfirmed",
+  "confidence": 0.0 to 1.0,
+  "validation": "confirmed" or "rejected" or "uncertain",
+  "rejection_reason": null or "specific reason the prior verdict was wrong",
+  "evidence_check": "quote from page text that confirms or refutes the trigger",
+  "final_reason": "one sentence final decision reason"
+}}
+"""
+
+    # Use a separate payload with the validator model
+    payload = {
+        "model": OLLAMA_VALIDATOR_MODEL,
+        "prompt": validator_prompt,
+        "stream": False,
+        "format": "json",
+        "options": {"temperature": 0.15, "top_p": 0.90, "num_ctx": 4096},
+    }
+
+    sem = get_semaphore()
+    async with sem:
+        try:
+            session = await get_session()
+            async with session.post(
+                f"{OLLAMA_BASE_URL}/api/generate",
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=_timeout_mgr.compute_timeout(len(validator_prompt))),
+            ) as resp:
+                if resp.status == 200:
+                    result = await resp.json()
+                    val_result = parse_ai_json_response(result.get("response", ""))
+                    if val_result is None:
+                        return analyst_verdict  # validator failed → keep analyst verdict
+
+                    val_verdict = val_result.get("verdict", "gambling")
+                    val_validation = val_result.get("validation", "confirmed")
+                    rejection_reason = val_result.get("rejection_reason")
+
+                    if val_validation == "rejected" and val_verdict != "gambling":
+                        # Validator rejected the gambling verdict — override
+                        logger.info(
+                            f"[validator] REJECTED gambling for {url}: {rejection_reason}"
+                        )
+                        return {
+                            "verdict": val_verdict,
+                            "confidence": val_result.get("confidence", 0.4),
+                            "category": "validator_override",
+                            "key_triggers": key_triggers,
+                            "reason": f"Validator rejected: {rejection_reason or val_result.get('final_reason', '')}",
+                            "challenge_override": True,
+                        }
+                    elif val_validation == "uncertain":
+                        # Both models disagree — safe choice is unconfirmed
+                        return {
+                            "verdict": "unconfirmed",
+                            "confidence": 0.4,
+                            "category": "validator_uncertain",
+                            "key_triggers": key_triggers,
+                            "reason": f"Validator uncertain: {val_result.get('final_reason', '')}",
+                            "challenge_override": False,
+                        }
+                    else:
+                        # Validator confirmed gambling — add validation note to reason
+                        confirmed_result = dict(analyst_verdict)
+                        confirmed_result["reason"] = (
+                            f"{analyst_reason} [Validated: {val_result.get('evidence_check', '')[:100]}]"
+                        )
+                        return confirmed_result
+        except Exception as e:
+            logger.warning(f"[validator] Validation failed for {url}: {e}")
+    # Validator offline/timeout — fall back to analyst verdict unchanged
+    return analyst_verdict
+
+
 async def classify_with_challenge(
     html: str,
     url: str = "",
     matched_keywords: list = None,
+    fast_mode: bool = False,
 ) -> dict:
     """
-    Anti-Hallucination 2-Round AI Challenge Classifier with Domain Anchors:
+    Anti-Hallucination 2-Round AI Challenge Classifier with Domain Anchors.
 
-    1. Domain Anchor & Provider CDN Sniffing (100% deterministic)
-    2. Round 1: Standard deep semantic classification
-    3. Round 2: Challenge — AI must prove 'regular' with verified ground-truth HTML evidence
-       - If AI hallucinates features not in HTML -> overridden to gambling
-       - If domain anchor matched -> locked to gambling unless verified .gov/.edu
+    fast_mode=True: Skip Round 2 challenge — used for unconfirmed re-check to halve AI calls.
+    fast_mode=False (default): Full 2-round challenge.
     """
     # ── 0. Pre-Flight Deterministic Checks ────────────────────────────────────
     is_g_domain, domain_signal = is_gambling_domain(url)
@@ -523,25 +683,31 @@ Respond ONLY in valid JSON:
     round1 = await _call_ollama(round1_prompt, url)
 
     # Ollama offline / timeout handler
+    # NOTE: Previously this defaulted straight to "gambling" whenever a domain anchor or
+    # strong keywords matched — meaning a large share of "gambling" verdicts under load
+    # (backlog/timeouts) reflected zero actual AI judgment. Now every timeout/offline case
+    # returns "unconfirmed" and gets re-queued (runner.py mode="unconfirmed") instead of
+    # being silently counted as a confirmed gambling result. The domain/keyword signal is
+    # still surfaced in key_triggers so a human reviewing "unconfirmed" items can prioritize.
     if round1 is None:
         if is_g_domain:
             return {
-                "verdict": "gambling",
-                "confidence": 0.85,
-                "category": "domain_anchor_gambling",
+                "verdict": "unconfirmed",
+                "confidence": 0.0,
+                "category": "unconfirmed",
                 "key_triggers": [domain_signal],
-                "reason": f"ollama_timeout_confirmed_by_domain_anchor({domain_signal})",
-                "challenge_override": True,
+                "reason": f"ollama_timeout_domain_anchor_present({domain_signal})_requeue",
+                "challenge_override": False,
             }
         strong_matches = [k for k in (matched_keywords or []) if k in STRONG_GAMBLING_SIGNALS]
         if strong_matches:
             return {
-                "verdict": "gambling",
-                "confidence": 0.70,
-                "category": "possible_gambling",
+                "verdict": "unconfirmed",
+                "confidence": 0.0,
+                "category": "unconfirmed",
                 "key_triggers": strong_matches,
-                "reason": f"ollama_timeout_strong_keywords_matched: {', '.join(strong_matches[:3])}",
-                "challenge_override": True,
+                "reason": f"ollama_timeout_strong_keywords_present: {', '.join(strong_matches[:3])}_requeue",
+                "challenge_override": False,
             }
         return {
             "verdict": "unconfirmed",
@@ -555,12 +721,12 @@ Respond ONLY in valid JSON:
     verdict = str(round1.get("verdict", "")).strip().lower()
     confidence = float(round1.get("confidence", 0.5))
 
-    # Gambling verdict -> confirmed
+    # Gambling verdict -> send to Validator Model for skeptical cross-examination
     if verdict == "gambling":
         triggers = round1.get("key_triggers", [])
         if is_g_domain:
             triggers.append(domain_signal)
-        return {
+        analyst_verdict = {
             "verdict": "gambling",
             "confidence": confidence,
             "category": str(round1.get("category", "gambling")),
@@ -568,32 +734,33 @@ Respond ONLY in valid JSON:
             "reason": str(round1.get("reason", "AI Round 1 gambling classification")),
             "challenge_override": False,
         }
+        return await validate_gambling_verdict(url, title, body_text, analyst_verdict)
 
     # ── ROUND 2: Challenge — AI must prove "regular" verdict with Ground Truth ──
     if verdict == "regular":
-        # If Domain Anchor is active, regular is prohibited unless verified .gov
-        if is_g_domain:
+        if is_g_domain and matched_keywords:
             return {
                 "verdict": "gambling",
                 "confidence": 0.90,
                 "category": "domain_anchor_gambling",
                 "key_triggers": [domain_signal] + (matched_keywords or []),
-                "reason": f"Domain anchor ({domain_signal}) locked as gambling despite AI regular guess",
+                "reason": f"Domain anchor ({domain_signal}) corroborated by matched keywords {matched_keywords[:3]} — locked as gambling despite AI regular guess",
                 "challenge_override": True,
             }
 
-        # Low confidence -> override directly
-        if confidence < REGULAR_CONVICTION_THRESHOLD:
+        # Low confidence → send to Round 2 evidence challenge instead of an immediate flip
+        # fast_mode=True: skip Round 2 for unconfirmed re-check (halves AI calls)
+        if fast_mode and confidence >= REGULAR_CONVICTION_THRESHOLD:
             return {
-                "verdict": "gambling",
-                "confidence": 0.65,
-                "category": "possible_gambling",
-                "key_triggers": matched_keywords or [],
-                "reason": f"AI Round 1 low-confidence regular ({confidence:.2f}) — overridden to gambling",
-                "challenge_override": True,
+                "verdict": "regular",
+                "confidence": confidence,
+                "category": str(round1.get("category", "regular")),
+                "key_triggers": round1.get("key_triggers", []),
+                "reason": f"fast_mode: Round 1 regular ({confidence:.2f}) accepted without Round 2 challenge",
+                "challenge_override": False,
             }
 
-        # High confidence "regular" -> Challenge for specific proof
+        # High confidence "regular" → Challenge for specific proof
         round2_prompt = f"""URL: {url}
 Title: {title}
 Page Content Summary: {body_text[:1000]}
@@ -621,21 +788,12 @@ Respond ONLY in valid JSON:
 
         if round2 is None:
             strong_matches = [k for k in (matched_keywords or []) if k in STRONG_GAMBLING_SIGNALS]
-            if strong_matches:
-                return {
-                    "verdict": "gambling",
-                    "confidence": 0.65,
-                    "category": "possible_gambling",
-                    "key_triggers": strong_matches,
-                    "reason": f"challenge_timeout_strong_keywords: {', '.join(strong_matches[:3])}",
-                    "challenge_override": True,
-                }
             return {
                 "verdict": "unconfirmed",
                 "confidence": 0.0,
                 "category": "unconfirmed",
-                "key_triggers": [],
-                "reason": "challenge_timeout",
+                "key_triggers": strong_matches,
+                "reason": "challenge_timeout_requeue" + (f" (strong_keywords: {', '.join(strong_matches[:3])})" if strong_matches else ""),
                 "challenge_override": False,
             }
 
@@ -645,7 +803,7 @@ Respond ONLY in valid JSON:
         r2_reason = str(round2.get("reason", ""))
 
         if r2_verdict == "gambling":
-            return {
+            r2_analyst = {
                 "verdict": "gambling",
                 "confidence": r2_confidence,
                 "category": str(round2.get("category", "possible_gambling")),
@@ -653,12 +811,13 @@ Respond ONLY in valid JSON:
                 "reason": f"Challenge round corrected to gambling: {r2_reason}",
                 "challenge_override": True,
             }
+            return await validate_gambling_verdict(url, title, body_text, r2_analyst)
 
         # Validate Ground Truth in HTML (Anti-Hallucination)
         evidence_convincing, eval_msg = _evaluate_regular_evidence(r2_reason, r2_evidence, body_text, html)
 
         if not evidence_convincing:
-            return {
+            reject_analyst = {
                 "verdict": "gambling",
                 "confidence": 0.60,
                 "category": "possible_gambling",
@@ -666,6 +825,7 @@ Respond ONLY in valid JSON:
                 "reason": f"{eval_msg} (Claimed: '{r2_reason[:80]}')",
                 "challenge_override": True,
             }
+            return await validate_gambling_verdict(url, title, body_text, reject_analyst)
 
         return {
             "verdict": "regular",
