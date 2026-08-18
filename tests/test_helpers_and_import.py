@@ -9,9 +9,7 @@ import pandas as pd
 from unittest.mock import patch, MagicMock, AsyncMock
 
 from db.mongo_client import ingest_true_positives, checked_domains, source_domains
-from project_sup.helping_code.batch_splitter import create_batches
-from project_sup.helping_code.compare_tool import make_excel_urls_clickable
-from capture_url.screenshot_runner import run as ss_run
+from export_domains.batch_splitter import create_batches, _make_excel_urls_clickable as make_excel_urls_clickable
 
 
 class TestTruePositivesImport:
@@ -96,9 +94,6 @@ class TestHelperBatchSplitter:
             pdf_path=str(pdf_path),
             output_root=str(output_root),
             limit_mb=0.01,  # Force small batches
-            dpi=72,
-            quality=50,
-            optimize=True,
         )
 
         assert os.path.exists(output_root)
@@ -127,28 +122,3 @@ class TestHelperCompareToolAndScreenshotRunner:
         # Should format hyperlinks without error
         make_excel_urls_clickable(str(xlsx_path))
         assert os.path.exists(xlsx_path)
-
-    @pytest.mark.asyncio
-    async def test_screenshot_runner_execution(self, mock_mongo, valid_screenshot_path, isolated_env):
-        chk_col = mock_mongo["checked_domains"]
-        chk_col.insert_one({
-            "_id": "needsshot.com",
-            "domain": "needsshot.com",
-            "url": "https://needsshot.com",
-            "status": "gambling",
-            "screenshot_taken": False,
-        })
-
-        async def mock_capture(url, output_dir, **kwargs):
-            return (valid_screenshot_path, "success", None)
-
-        with patch("capture_url.screenshot_runner.BrowserPool.start", AsyncMock()), \
-             patch("capture_url.screenshot_runner.BrowserPool.close", AsyncMock()), \
-             patch("capture_url.screenshot_runner.BrowserPool.capture_url", side_effect=mock_capture):
-
-            result = await ss_run(domain_ids=["needsshot.com"], concurrency=2)
-            assert result["captured"] == 1
-            assert result["failed"] == 0
-
-            doc = chk_col.find_one({"_id": "needsshot.com"})
-            assert doc["screenshot_taken"] is True

@@ -15,6 +15,7 @@ from pathlib import Path
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
+from typing import Any
 import tldextract
 from dotenv import load_dotenv
 from pymongo import MongoClient
@@ -47,12 +48,12 @@ def get_db():
         try:
             _client.admin.command('ping')
         except Exception:
-            # Self-healing: auto-start MongoDB daemon if offline
+            # Self-healing: auto-start MongoDB daemon if configured and offline
             import subprocess
             import time
-            mongod_path = r"C:\Program Files\MongoDB\Server\8.0\bin\mongod.exe"
-            mongod_cfg = r"C:\Program Files\MongoDB\Server\8.0\bin\mongod.cfg"
-            if os.path.exists(mongod_path) and os.path.exists(mongod_cfg):
+            mongod_path = os.getenv("MONGOD_AUTOSTART_PATH", r"C:\Program Files\MongoDB\Server\8.0\bin\mongod.exe")
+            mongod_cfg = os.getenv("MONGOD_AUTOSTART_CFG", r"C:\Program Files\MongoDB\Server\8.0\bin\mongod.cfg")
+            if mongod_path and mongod_cfg and os.path.exists(mongod_path) and os.path.exists(mongod_cfg):
                 try:
                     subprocess.Popen([mongod_path, "--config", mongod_cfg], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                     time.sleep(2)
@@ -109,7 +110,7 @@ def extract_domains_from_file(file_path: str) -> list[str]:
     domains = []
     seen = set()
 
-    def _add_cand(raw: any):
+    def _add_cand(raw: Any):
         if not raw:
             return
         text = str(raw).strip()
@@ -117,7 +118,7 @@ def extract_domains_from_file(file_path: str) -> list[str]:
             return
         text = text.strip('"\' ,;')
         token = text.split(",")[0].split()[0].strip()
-        token = token.replace("https://", "").replace("http://", "").lstrip("www.").rstrip("/").lower()
+        token = token.replace("https://", "").replace("http://", "").removeprefix("www.").rstrip("/").lower()
         d = extract_domain(f"https://{token}") or token
         if d and "." in d and d not in seen:
             seen.add(d)
@@ -205,7 +206,7 @@ def find_blocked_domains(limit: int = 0):
                 return
 
     if not limit or len(seen) < limit:
-        cur_source = source_domains().find({"active": "blocked"})
+        cur_source = source_domains().find({"$or": [{"block_reason": "blocked"}, {"active": "blocked"}]})
         if limit:
             cur_source = cur_source.limit(limit - len(seen))
         for doc in cur_source:
@@ -278,17 +279,13 @@ def write_result(
         set_fields["screenshot_taken"] = bool(screenshot_taken)
         set_fields["screenshot_failed_reason"] = screenshot_failed_reason
 
-    update = {"$set": set_fields}
-
-    on_insert_fields = {"added_date": today_date}
-
-    if status == "gambling" and screenshot_taken is None:
-        on_insert_fields["screenshot_taken"] = False
-        on_insert_fields["screenshot_failed_reason"] = None
-
-    update["$setOnInsert"] = on_insert_fields
+    update = {
+        "$set": set_fields,
+        "$setOnInsert": {"added_date": today_date},
+    }
 
     import time
+    last_err = None
     for attempt in range(3):
         try:
             checked_domains().update_one(
@@ -297,8 +294,7 @@ def write_result(
                 upsert=True,
             )
 
-            # Sync status in source domain_Listed
-            # If unconfirmed (Ollama was down), leave processed=False so it gets re-run!
+            # Sync status in source domain_Listed (strictly boolean active, with block_reason)
             if status == "unconfirmed":
                 source_domains().update_one(
                     {"_id": domain},
@@ -307,7 +303,7 @@ def write_result(
             elif status == "blocked":
                 source_domains().update_one(
                     {"_id": domain},
-                    {"$set": {"processed": True, "active": "blocked"}},
+                    {"$set": {"processed": True, "active": False, "block_reason": "blocked"}},
                 )
             elif status == "dead":
                 source_domains().update_one(
@@ -319,12 +315,14 @@ def write_result(
                     {"_id": domain},
                     {"$set": {"processed": True, "active": True}},
                 )
-            break
+            return
         except Exception as e:
+            last_err = e
             if attempt < 2:
                 time.sleep(0.5 * (attempt + 1))
             else:
-                print(f"[write_result WARNING] Failed writing to MongoDB for domain '{domain}': {e}")
+                print(f"[write_result ERROR] Failed writing to MongoDB for domain '{domain}': {e}")
+                raise last_err
 
 
 def get_checked(domain: str) -> dict | None:
@@ -366,10 +364,7 @@ def mark_domains_exported(domain_ids: list[str]):
 # ── CSV seeder ────────────────────────────────────────────────────────────────
 
 def seed_from_csv(path: str, active: bool = True):
-    """Import domains from CSV into domain_Listed.
-
-    ponytail: ceiling = no progress bar; upgrade = tqdm if > 10k rows.
-    """
+    """Import domains from CSV into domain_Listed without overwriting existing domain statuses."""
     inserted = skipped = 0
     today_date = datetime.now(IST).strftime("%Y-%m-%d")
     with open(path, newline='', encoding='utf-8') as f:
@@ -382,8 +377,8 @@ def seed_from_csv(path: str, active: bool = True):
             source_domains().update_one(
                 {"_id": domain},
                 {
-                    "$set": {"_id": domain, "domain": domain, "active": active},
-                    "$setOnInsert": {"added_date": today_date},
+                    "$set": {"_id": domain, "domain": domain},
+                    "$setOnInsert": {"active": active, "processed": False, "added_date": today_date},
                 },
                 upsert=True,
             )
@@ -434,11 +429,14 @@ def ingest_true_positives(path: str) -> tuple[int, int]:
             },
             upsert=True,
         )
-        # Also mark processed in source collection
+        # Also ensure domain exists and is marked processed in source collection
         source_domains().update_one(
             {"_id": domain},
-            {"$set": {"active": True, "processed": True}},
-            upsert=False,
+            {
+                "$set": {"domain": domain, "active": True, "processed": True},
+                "$setOnInsert": {"added_date": today_date, "source": "manual_import"},
+            },
+            upsert=True,
         )
         inserted += 1
 
@@ -461,7 +459,7 @@ def seed_discovered_domains(domains: set, discovered_from: str) -> tuple[int, in
     skipped = 0
 
     for domain in domains:
-        domain = domain.strip().lower().lstrip("www.").rstrip("/")
+        domain = domain.strip().lower().removeprefix("www.").rstrip("/")
         if not domain or "." not in domain:
             skipped += 1
             continue

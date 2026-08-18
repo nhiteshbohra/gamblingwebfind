@@ -19,23 +19,15 @@ def _url_to_filename(url: str) -> str:
     return f"{clean_domain}_{url_hash}.jpg"
 
 
-def is_valid_screenshot(filepath: str, min_size_bytes: int = 5000) -> bool:
-    """Validate that screenshot exists and is a non-empty, non-corrupted image."""
-    if not os.path.exists(filepath):
+def is_valid_screenshot(filepath: str, min_size_bytes: int = 500) -> bool:
+    """Validate that screenshot exists, has content (>500 bytes), and is a readable image."""
+    if not filepath or not os.path.exists(filepath):
         return False
     if os.path.getsize(filepath) < min_size_bytes:
         return False
     try:
         with Image.open(filepath) as img:
             img.verify()
-        with Image.open(filepath) as img:
-            gray = img.convert('L')
-            extrema = gray.getextrema()
-            if extrema[0] == extrema[1]:
-                return False
-            stat = ImageStat.Stat(gray)
-            if stat.stddev[0] < 2.0:  # Pure empty flat solid background
-                return False
         return True
     except Exception:
         return False
@@ -99,6 +91,11 @@ class BrowserPool:
             if not self.playwright:
                 self.playwright = await async_playwright().start()
             if not self.browser or not self.browser.is_connected():
+                try:
+                    if self.browser:
+                        await self.browser.close()
+                except Exception:
+                    pass
                 self.browser = await self.playwright.chromium.launch(
                     headless=True,
                     args=[
@@ -140,24 +137,34 @@ class BrowserPool:
             return filepath, "success", []
 
         urls_to_try = [url]
-        if url.startswith("https://"):
-            urls_to_try.append("http://" + url[8:])
-        elif url.startswith("http://"):
-            urls_to_try.append("https://" + url[7:])
+        clean_dom = url.replace("https://", "").replace("http://", "").removeprefix("www.").rstrip("/")
+        if not url.startswith("https://www."):
+            urls_to_try.append(f"https://www.{clean_dom}")
+        urls_to_try.append(f"http://{clean_dom}")
+        urls_to_try.append(f"http://www.{clean_dom}")
 
-        last_status = "dead"
-        last_reason = "No response / Timed out after 20s (dead)"
+        last_status = "timeout"
+        last_reason = "No response after multiple protocol attempts"
 
-        for attempt in range(retries):
-            await self.ensure_browser()
+        for attempt in range(max(retries, len(urls_to_try))):
             target_url = urls_to_try[attempt % len(urls_to_try)]
             context = None
             try:
-                context = await self.browser.new_context(
-                    viewport={'width': 1280, 'height': 900},
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                    ignore_https_errors=True
-                )
+                await self.ensure_browser()
+                try:
+                    context = await self.browser.new_context(
+                        viewport={'width': 1280, 'height': 900},
+                        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                        ignore_https_errors=True
+                    )
+                except Exception:
+                    self.browser = None
+                    await self.ensure_browser()
+                    context = await self.browser.new_context(
+                        viewport={'width': 1280, 'height': 900},
+                        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                        ignore_https_errors=True
+                    )
                 page = await context.new_page()
 
                 nav_timeout = 25000  # Dynamic: captures fast sites instantly, max 25s ceiling for slow sites
@@ -172,11 +179,11 @@ class BrowserPool:
                     except Exception:
                         pass
 
-                # Quick 0.3s render settle
+                # Render settle & scroll
                 try:
-                    await asyncio.sleep(0.3)
+                    await asyncio.sleep(0.8)
                     await page.evaluate("window.scrollTo(0, document.body.scrollHeight / 3)")
-                    await asyncio.sleep(0.2)
+                    await asyncio.sleep(0.4)
                     await page.evaluate("window.scrollTo(0, 0)")
                 except Exception:
                     pass
@@ -192,6 +199,15 @@ class BrowserPool:
                 # Take screenshot directly
                 raw_bytes = await page.screenshot(type='png', full_page=False, timeout=15000)
 
+                # If blank (common on Vue/React SPAs like ballaribook), allow extra 2s for JS bundle to mount
+                img_test = Image.open(io.BytesIO(raw_bytes)).convert('L')
+                if ImageStat.Stat(img_test).stddev[0] < 2.0:
+                    try:
+                        await asyncio.sleep(2.0)
+                        raw_bytes = await page.screenshot(type='png', full_page=False, timeout=15000)
+                    except Exception:
+                        pass
+
                 await context.close()
                 context = None
 
@@ -203,35 +219,35 @@ class BrowserPool:
 
                 if is_valid_screenshot(filepath):
                     return filepath, "success", []
-                else:
-                    if os.path.exists(filepath):
-                        try:
-                            os.remove(filepath)
-                        except Exception:
-                            pass
-                    last_status = "dead"
-                    last_reason = "Blank / invalid render (dead)"
 
             except Exception as e:
                 err_text = str(e).lower()
-                last_status = "dead"
-                last_reason = "No response / Timed out after 25s (dead)"
-
-                if os.path.exists(filepath):
-                    try:
-                        os.remove(filepath)
-                    except Exception:
-                        pass
-                delete_screenshot(url, output_dir)
+                if "name_not_resolved" in err_text or "getaddrinfo" in err_text:
+                    last_status = "dns_failed"
+                    last_reason = "DNS Error: Domain name not resolved (dead)"
+                elif "connection_refused" in err_text:
+                    last_status = "connection_refused"
+                    last_reason = "Connection Refused by server (dead)"
+                elif "connection_reset" in err_text or "ssl" in err_text or "cert" in err_text:
+                    last_status = "ssl_or_reset"
+                    last_reason = "SSL / Connection Reset"
+                elif "403" in err_text or "challenge" in err_text or "cloudflare" in err_text:
+                    last_status = "blocked"
+                    last_reason = "Blocked by Cloudflare WAF / Anti-Bot"
+                elif "timeout" in err_text or "timed out" in err_text:
+                    last_status = "timeout"
+                    last_reason = "Network Timeout: Server took >25s without response (dead)"
+                else:
+                    last_status = "error"
+                    last_reason = f"Capture failed: {str(e)[:60]}"
 
                 if context:
                     try:
                         await context.close()
                     except Exception:
                         pass
-                await asyncio.sleep(1.0)
+                await asyncio.sleep(0.5)
 
-        delete_screenshot(url, output_dir)
         return None, last_status, last_reason
 
 

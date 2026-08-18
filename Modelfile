@@ -4,6 +4,7 @@ FROM qwen2.5:3b
 PARAMETER temperature 0.1
 PARAMETER top_p 0.85
 PARAMETER num_ctx 4096
+PARAMETER num_predict 400
 PARAMETER stop "```"
 PARAMETER stop "\n\n\n"
 
@@ -88,7 +89,6 @@ Example output:
   "confidence": 0.98,
   "category": "sports_betting | live_casino | satta_matka | crash_game | lottery | blackjack | casino_resort | forex_bonus | betting_id_funnel | regular",
   "key_triggers": ["Cricket Exchange", "WhatsApp ID", "UPI Deposit"],
-  "reason": "Offers live IPL match odds and WhatsApp contact to purchase betting IDs.",
-  "evidence": "Page contains 'Get Demo ID on WhatsApp' CTA, UPI deposit section, and live cricket score integration."
+  "reason": "Offers live IPL match odds and WhatsApp contact to purchase betting IDs."
 }
 """

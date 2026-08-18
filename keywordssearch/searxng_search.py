@@ -3,16 +3,23 @@ keywordssearch/searxng_search.py — Unlimited multi-engine keyword crawler.
 
 Engines (tried in order, all contribute URLs):
   1. DuckDuckGo  — direct HTML scraping, no API key, many pages
-  2. Playwright/Chromium — real browser, scrapes Google like a human, ALL pages
+  2. Playwright/Chromium — real browser, scrapes Bing like a human, ALL pages
+  3. SearXNG (optional Docker) — meta-search, many backends
+  4. Yahoo Search — direct HTML scraping
+  5. Brave Search — direct HTML scraping (curl_cffi)
+  6. Mojeek — direct HTML scraping (curl_cffi)
 
-Flow per keyword:
-  • DuckDuckGo pagination runs until no more results (unlimited pages)
-  • Playwright/Google runs until no "Next" button found (unlimited pages)
-  • All URLs from both engines are combined, deduplicated, domains extracted
-  • Domains saved to MongoDB incrementally every SAVE_EVERY_N_DOMAINS
+Live-check before insert:
+  • Existing domains ($in query) are skipped — never re-checked.
+  • New domains: HEAD https → GET https → HEAD http → GET http.
+  • Any HTTP response (200/403/404/500) → active=True (server is alive).
+  • DNS failure / connection refused / timeout after 1 retry → active=False.
+  • SSL errors ignored (ssl=False).
+  • Semaphore of 50 limits concurrent sockets.
+  • processed=False always so downstream worker can pick up active ones.
 
 MongoDB: domain_Listed collection
-  { _id: domain, domain, active: True, processed: False, added_date }
+  { _id: domain, domain, active: bool, processed: False, added_date }
 
 SearXNG Docker is still supported as an optional 3rd engine if it's running.
 Config from root .env via python-dotenv.
@@ -55,11 +62,22 @@ SAVE_EVERY_N_DOMAINS = int(os.getenv("SEARXNG_SAVE_EVERY", "50"))
 # Use DuckDuckGo direct scraping (recommended, no API key)
 USE_DUCKDUCKGO = os.getenv("USE_DUCKDUCKGO", "true").lower() == "true"
 
-# Use Playwright/Chromium to scrape Google (more results, slower)
+# Use Playwright/Chromium to scrape Bing (more results, slower)
 USE_PLAYWRIGHT = os.getenv("USE_PLAYWRIGHT", "true").lower() == "true"
 
 # Use SearXNG Docker if it's available
 USE_SEARXNG = os.getenv("USE_SEARXNG", "true").lower() == "true"
+
+# Use Brave Search scraping
+USE_BRAVE = os.getenv("USE_BRAVE", "true").lower() == "true"
+
+# Use Mojeek scraping
+USE_MOJEEK = os.getenv("USE_MOJEEK", "true").lower() == "true"
+
+# Live-check: concurrent socket limit when checking new domains
+LIVE_CHECK_CONCURRENCY = int(os.getenv("LIVE_CHECK_CONCURRENCY", "50"))
+# Live-check: per-domain timeout in seconds
+LIVE_CHECK_TIMEOUT = float(os.getenv("LIVE_CHECK_TIMEOUT", "8.0"))
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -115,9 +133,110 @@ def get_mongo_collection():
         )
 
 
+async def _live_check_domain(domain: str, session: aiohttp.ClientSession, sem: asyncio.Semaphore) -> bool:
+    """
+    Check whether a domain is reachable using the shared aiohttp session.
+    Probes in order: HEAD https, GET https, HEAD http, GET http.
+    Any HTTP response (200/403/404/500) → True (server is alive).
+    DNS failure / connection refused / timeout → False.
+    ssl=False ignores bad certs. DEFAULT_HEADERS used for realistic UA.
+    """
+    timeout = aiohttp.ClientTimeout(total=LIVE_CHECK_TIMEOUT)
+    attempts = [
+        ("HEAD", f"https://{domain}"),
+        ("GET",  f"https://{domain}"),
+        ("HEAD", f"http://{domain}"),
+        ("GET",  f"http://{domain}"),
+    ]
+    async with sem:
+        for method, url in attempts:
+            try:
+                async with session.request(
+                    method, url,
+                    allow_redirects=True,
+                    timeout=timeout,
+                    ssl=False,
+                    headers=DEFAULT_HEADERS,
+                ) as r:
+                    return True   # any response = server alive
+            except (aiohttp.ClientConnectorError,
+                    aiohttp.ServerConnectionError,
+                    asyncio.TimeoutError):
+                continue
+            except Exception:
+                continue
+    return False
+
+
+async def save_domains_to_mongo_with_livecheck(
+    domains: list[str], collection, session: aiohttp.ClientSession, batch_size: int = 500
+) -> tuple[int, int, int]:
+    """
+    1. Batch-query MongoDB for existing domains (never re-check).
+    2. Live-check only genuinely new domains concurrently.
+    3. Upsert with correct active flag; processed=False always.
+
+    Returns (new_active, new_inactive, already_in_db).
+    """
+    if not domains:
+        return 0, 0, 0
+
+    # ── Step 1: find which domains already exist ──────────────────────────────
+    existing = set()
+    for i in range(0, len(domains), batch_size):
+        chunk = domains[i: i + batch_size]
+        try:
+            docs = collection.find({"_id": {"$in": chunk}}, {"_id": 1})
+            existing.update(d["_id"] for d in docs)
+        except Exception as e:
+            print(f"  [live-check] MongoDB query error: {e}")
+
+    already_in_db = len(existing)
+    new_domains = [d for d in domains if d not in existing]
+
+    if not new_domains:
+        print(f"  [live-check] 0 new | {already_in_db} already in DB — nothing to insert")
+        return 0, 0, already_in_db
+
+    # ── Step 2: live-check new domains concurrently ───────────────────────────
+    sem = asyncio.Semaphore(LIVE_CHECK_CONCURRENCY)
+    results = await asyncio.gather(*[_live_check_domain(d, session, sem) for d in new_domains])
+
+    active_domains   = [d for d, ok in zip(new_domains, results) if ok]
+    inactive_domains = [d for d, ok in zip(new_domains, results) if not ok]
+
+    # ── Step 3: upsert with correct active flag ───────────────────────────────
+    today = datetime.now(IST).strftime("%Y-%m-%d")
+    ops = [
+        UpdateOne(
+            {"_id": d},
+            {"$setOnInsert": {"_id": d, "domain": d, "active": is_active,
+                              "processed": False, "added_date": today}},
+            upsert=True,
+        )
+        for d, is_active in zip(new_domains, results)
+    ]
+
+    inserted = 0
+    for i in range(0, len(ops), batch_size):
+        try:
+            r = collection.bulk_write(ops[i: i + batch_size], ordered=False)
+            inserted += r.upserted_count
+        except Exception as e:
+            print(f"  [live-check] MongoDB bulk write error: {e}")
+
+    print(
+        f"  [live-check] batch done | new={len(new_domains)} "
+        f"(active={len(active_domains)}, inactive={len(inactive_domains)}) "
+        f"| already_in_db={already_in_db}"
+    )
+    return len(active_domains), len(inactive_domains), already_in_db
+
+
 def save_domains_to_mongo(domains: list[str], collection, batch_size: int = 500) -> int:
     """
-    Upsert domains into domain_Listed.
+    Synchronous fallback upsert (used for the final flush in run_search).
+    Does NOT live-check — just inserts with active=True, processed=False.
     New domains get: active=True, processed=False, added_date=today.
     Existing domains are NOT overwritten (setOnInsert only).
     Returns count of new domains inserted.
@@ -803,6 +922,162 @@ async def yahoo_crawl_keyword(keyword: str, max_pages_per_var: int = 150) -> lis
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  ENGINE 5 — Brave Search (direct HTML scraping via curl_cffi GET)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _brave_get_sync(url: str) -> tuple[int, str]:
+    """GET Brave Search HTML via curl_cffi Chrome impersonation."""
+    try:
+        from curl_cffi import requests as cffi_requests
+        resp = cffi_requests.get(
+            url,
+            impersonate="chrome124",
+            headers={"Accept-Language": "en-US,en;q=0.9"},
+            timeout=30,
+        )
+        return resp.status_code, resp.text
+    except ImportError:
+        import requests as req
+        resp = req.get(url, headers=DEFAULT_HEADERS, timeout=30)
+        return resp.status_code, resp.text
+
+
+async def brave_crawl_keyword(keyword: str, max_pages_per_var: int = 50) -> list[str]:
+    """
+    Scrape Brave Search for a keyword across multiple query variations.
+    Paginates with &offset=0, 10, 20, ...
+    """
+    print(f"\n  [Brave] Starting Brave Search crawl for: '{keyword}'")
+    variations = [
+        keyword,
+        f"{keyword} site:.com",
+        f"{keyword} site:.in",
+        f"{keyword} online",
+        f"{keyword} real money",
+    ]
+    all_urls: list[str] = []
+    seen: set[str] = set()
+
+    for v_idx, query in enumerate(variations, 1):
+        stagnant = 0
+        print(f"  [Brave] '{keyword}' | variation {v_idx}/{len(variations)}: query='{query}'")
+        for offset in range(0, max_pages_per_var * 10, 10):
+            url = (
+                f"https://search.brave.com/search?"
+                f"q={urllib.parse.quote(query)}&offset={offset}&source=web"
+            )
+            try:
+                status, html = await asyncio.to_thread(_brave_get_sync, url)
+                if status != 200:
+                    print(f"  [Brave] '{keyword}' | v{v_idx} offset={offset} | HTTP {status} — next variation")
+                    break
+                soup = BeautifulSoup(html, "html.parser")
+                new_on_page = 0
+                # Selector confirmed live (2026-08-18): div.snippet a[href] returns external links.
+                # a.result-header matches 0 elements (Brave uses Svelte-generated classes server-side).
+                for a in soup.select("div.snippet a[href]"):
+                    href = a.get("href", "")
+                    if href.startswith(("http://", "https://")) and "brave.com" not in href and href not in seen:
+                        seen.add(href)
+                        all_urls.append(href)
+                        new_on_page += 1
+                print(f"  [Brave] '{keyword}' | v{v_idx} offset={offset} -> {new_on_page} new | total: {len(all_urls)}")
+                if new_on_page == 0:
+                    stagnant += 1
+                    if stagnant >= 3:
+                        print(f"  [Brave] '{keyword}' | v{v_idx} exhausted — next variation")
+                        break
+                else:
+                    stagnant = 0
+                await asyncio.sleep(1.5)
+            except Exception as e:
+                print(f"  [Brave] '{keyword}' | v{v_idx} offset={offset} | error: {e}")
+                break
+
+    print(f"  [Brave] '{keyword}' DONE -- {len(all_urls)} URLs")
+    return all_urls
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ENGINE 6 — Mojeek (direct HTML scraping via curl_cffi GET)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _mojeek_get_sync(url: str) -> tuple[int, str]:
+    """GET Mojeek HTML via curl_cffi."""
+    try:
+        from curl_cffi import requests as cffi_requests
+        resp = cffi_requests.get(
+            url,
+            impersonate="chrome124",
+            headers={"Accept-Language": "en-US,en;q=0.9"},
+            timeout=30,
+        )
+        return resp.status_code, resp.text
+    except ImportError:
+        import requests as req
+        resp = req.get(url, headers=DEFAULT_HEADERS, timeout=30)
+        return resp.status_code, resp.text
+
+
+async def mojeek_crawl_keyword(keyword: str, max_pages_per_var: int = 30) -> list[str]:
+    """
+    Scrape Mojeek for a keyword. Paginates with &s=1, 11, 21, ...
+    Mojeek is lightweight, no CAPTCHA, good EU/privacy coverage.
+    """
+    print(f"\n  [Mojeek] Starting Mojeek crawl for: '{keyword}'")
+    variations = [
+        keyword,
+        f"{keyword} casino",
+        f"{keyword} online bet",
+    ]
+    all_urls: list[str] = []
+    seen: set[str] = set()
+
+    for v_idx, query in enumerate(variations, 1):
+        stagnant = 0
+        print(f"  [Mojeek] '{keyword}' | variation {v_idx}/{len(variations)}: query='{query}'")
+        for page in range(1, max_pages_per_var + 1):
+            s_offset = (page - 1) * 10 + 1
+            url = (
+                f"https://www.mojeek.com/search?"
+                f"q={urllib.parse.quote(query)}&s={s_offset}"
+            )
+            try:
+                status, html = await asyncio.to_thread(_mojeek_get_sync, url)
+                if status == 403:
+                    # Mojeek returns 403 to all automated GET requests regardless of
+                    # impersonation. Skip the engine rather than silently burning pages.
+                    print(f"  [Mojeek] '{keyword}' | v{v_idx} | HTTP 403 — Mojeek is blocking automated access. Skipping engine.")
+                    return all_urls
+                if status != 200:
+                    print(f"  [Mojeek] '{keyword}' | v{v_idx} p{page} | HTTP {status} — next variation")
+                    break
+                soup = BeautifulSoup(html, "html.parser")
+                new_on_page = 0
+                for a in soup.select("ul.results-standard li a.ob"):
+                    href = a.get("href", "")
+                    if href.startswith(("http://", "https://")) and "mojeek.com" not in href and href not in seen:
+                        seen.add(href)
+                        all_urls.append(href)
+                        new_on_page += 1
+                print(f"  [Mojeek] '{keyword}' | v{v_idx} p{page} -> {new_on_page} new | total: {len(all_urls)}")
+                if new_on_page == 0:
+                    stagnant += 1
+                    if stagnant >= 3:
+                        print(f"  [Mojeek] '{keyword}' | v{v_idx} exhausted — next variation")
+                        break
+                else:
+                    stagnant = 0
+                await asyncio.sleep(1.0)
+            except Exception as e:
+                print(f"  [Mojeek] '{keyword}' | v{v_idx} p{page} | error: {e}")
+                break
+
+    print(f"  [Mojeek] '{keyword}' DONE -- {len(all_urls)} URLs")
+    return all_urls
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  MAIN CRAWL ORCHESTRATOR — combines all engines per keyword
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -829,10 +1104,11 @@ async def crawl_keyword_all_engines(
     all_raw_urls: list[str] = []
     unsaved_domains: list[str] = []
     new_this_kw: set[str] = set()
+    kw_active = kw_inactive = kw_skipped = 0
 
-    def process_urls(urls: list[str]):
-        """Extract domains from URLs and auto-save when threshold reached."""
-        nonlocal unsaved_domains
+    async def process_urls(urls: list[str]):
+        """Extract domains, live-check+save when SAVE_EVERY_N_DOMAINS threshold is hit."""
+        nonlocal unsaved_domains, kw_active, kw_inactive, kw_skipped
         for url in urls:
             domain = extract_domain(url)
             if domain and domain not in all_domains:
@@ -840,8 +1116,9 @@ async def crawl_keyword_all_engines(
                 new_this_kw.add(domain)
                 unsaved_domains.append(domain)
         if len(unsaved_domains) >= SAVE_EVERY_N_DOMAINS:
-            saved = save_domains_to_mongo(unsaved_domains, collection)
-            print(f"  💾 Auto-saved {saved} new domains to MongoDB (batch of {len(unsaved_domains)})")
+            a, i, s = await save_domains_to_mongo_with_livecheck(unsaved_domains, collection, session)
+            kw_active += a; kw_inactive += i; kw_skipped += s
+            print(f"  💾 Batch saved | active={a} inactive={i} skipped={s} (already in DB)")
             unsaved_domains.clear()
 
     # ── Engine 1: DuckDuckGo ─────────────────────────────────────────────────
@@ -849,7 +1126,7 @@ async def crawl_keyword_all_engines(
         try:
             ddg_urls = await duckduckgo_crawl_keyword(keyword, session)
             all_raw_urls.extend(ddg_urls)
-            process_urls(ddg_urls)
+            await process_urls(ddg_urls)
             print(f"  [DDG] Contributed {len(ddg_urls)} URLs for '{keyword}'")
         except KeyboardInterrupt:
             raise
@@ -861,7 +1138,7 @@ async def crawl_keyword_all_engines(
         try:
             pw_urls = await asyncio.to_thread(playwright_crawl_keyword_sync, keyword)
             all_raw_urls.extend(pw_urls)
-            process_urls(pw_urls)
+            await process_urls(pw_urls)
             print(f"  [PW] Contributed {len(pw_urls)} URLs for '{keyword}'")
         except KeyboardInterrupt:
             raise
@@ -873,7 +1150,7 @@ async def crawl_keyword_all_engines(
         try:
             sx_urls = await searxng_crawl_keyword(keyword, session)
             all_raw_urls.extend(sx_urls)
-            process_urls(sx_urls)
+            await process_urls(sx_urls)
             print(f"  [SearXNG] Contributed {len(sx_urls)} URLs for '{keyword}'")
         except KeyboardInterrupt:
             raise
@@ -884,26 +1161,50 @@ async def crawl_keyword_all_engines(
     try:
         yh_urls = await yahoo_crawl_keyword(keyword)
         all_raw_urls.extend(yh_urls)
-        process_urls(yh_urls)
+        await process_urls(yh_urls)
         print(f"  [Yahoo] Contributed {len(yh_urls)} URLs for '{keyword}'")
     except KeyboardInterrupt:
         raise
     except Exception as e:
         print(f"  [Yahoo] Error on '{keyword}': {e}")
 
-    # ── Final flush of remaining unsaved domains ──────────────────────────────
+    # ── Engine 5: Brave Search ────────────────────────────────────────────────
+    if USE_BRAVE:
+        try:
+            br_urls = await brave_crawl_keyword(keyword)
+            all_raw_urls.extend(br_urls)
+            await process_urls(br_urls)
+            print(f"  [Brave] Contributed {len(br_urls)} URLs for '{keyword}'")
+        except KeyboardInterrupt:
+            raise
+        except Exception as e:
+            print(f"  [Brave] Error on '{keyword}': {e}")
 
-    # ── Final flush of remaining unsaved domains ──────────────────────────────
+    # ── Engine 6: Mojeek ─────────────────────────────────────────────────────
+    if USE_MOJEEK:
+        try:
+            mj_urls = await mojeek_crawl_keyword(keyword)
+            all_raw_urls.extend(mj_urls)
+            await process_urls(mj_urls)
+            print(f"  [Mojeek] Contributed {len(mj_urls)} URLs for '{keyword}'")
+        except KeyboardInterrupt:
+            raise
+        except Exception as e:
+            print(f"  [Mojeek] Error on '{keyword}': {e}")
+
+    # ── Final flush with live-check ───────────────────────────────────────────
     if unsaved_domains:
-        saved = save_domains_to_mongo(unsaved_domains, collection)
-        print(f"  [save] Final save: {saved} new domains for '{keyword}'")
+        a, i, s = await save_domains_to_mongo_with_livecheck(unsaved_domains, collection, session)
+        kw_active += a; kw_inactive += i; kw_skipped += s
+        print(f"  [save] Final flush | active={a} inactive={i} skipped={s} (already in DB)")
         unsaved_domains.clear()
 
     total_urls = len(all_raw_urls)
     print(
         f"\n  [crawl] '{keyword}' COMPLETE | "
         f"total URLs: {total_urls} | "
-        f"new domains this keyword: {len(new_this_kw)} | "
+        f"new domains this keyword: {len(new_this_kw)} "
+        f"(active={kw_active}, inactive={kw_inactive}, skipped={kw_skipped}) | "
         f"all-time unique domains: {len(all_domains)}"
     )
     return total_urls
@@ -952,45 +1253,59 @@ async def run_search(
     print(f"[searxng_search] Keywords to process: {len(keywords)}")
     print(f"[searxng_search] Engines active:")
     print(f"  * DuckDuckGo (direct):       {'YES' if USE_DUCKDUCKGO else 'NO'}")
-    print(f"  * Playwright/Chromium:        {'YES' if USE_PLAYWRIGHT else 'NO'}")
+    print(f"  * Playwright/Chromium (Bing): {'YES' if USE_PLAYWRIGHT else 'NO'}")
     print(f"  * SearXNG (Docker):           {'YES' if searxng_available else 'NO (not running)'}")
+    print(f"  * Yahoo (direct):             YES")
+    print(f"  * Brave Search (direct):      {'YES' if USE_BRAVE else 'NO'}")
+    print(f"  * Mojeek (direct):            {'YES' if USE_MOJEEK else 'NO'}")
+    print(f"[searxng_search] Live-check concurrency: {LIVE_CHECK_CONCURRENCY} | timeout: {LIVE_CHECK_TIMEOUT}s")
     print(f"[searxng_search] Auto-save every {SAVE_EVERY_N_DOMAINS} domains | delay {PAGE_DELAY_SECONDS}s/page")
     print(f"[searxng_search] Press Ctrl+C at ANY TIME to stop and save")
     print(f"{'#'*60}\n")
 
     try:
-        async with aiohttp.ClientSession() as session:
-            for idx, keyword in enumerate(keywords, 1):
-                print(f"\n[searxng_search] -- Keyword {idx}/{len(keywords)}: '{keyword}' --")
-                try:
-                    urls_found = await crawl_keyword_all_engines(
-                        keyword=keyword,
-                        session=session,
-                        collection=collection,
-                        all_domains=all_domains,
-                        searxng_available=searxng_available,
-                    )
-                    total_urls += urls_found
-                except KeyboardInterrupt:
-                    raise
-                except Exception as e:
-                    print(f"  [searxng_search] Error on '{keyword}': {e} -- moving to next keyword")
+        async with aiohttp.ClientSession(
+            connector=aiohttp.TCPConnector(limit=200, ssl=False)
+        ) as session:
+            try:
+                for idx, keyword in enumerate(keywords, 1):
+                    print(f"\n[searxng_search] -- Keyword {idx}/{len(keywords)}: '{keyword}' --")
+                    try:
+                        urls_found = await crawl_keyword_all_engines(
+                            keyword=keyword,
+                            session=session,
+                            collection=collection,
+                            all_domains=all_domains,
+                            searxng_available=searxng_available,
+                        )
+                        total_urls += urls_found
+                    except KeyboardInterrupt:
+                        raise
+                    except Exception as e:
+                        print(f"  [searxng_search] Error on '{keyword}': {e} -- moving to next keyword")
+            except KeyboardInterrupt:
+                print(f"\n\n{'!'*60}")
+                print("[searxng_search] Ctrl+C -- saving all collected data before exit...")
+                print(f"{'!'*60}")
 
-    except KeyboardInterrupt:
-        print(f"\n\n{'!'*60}")
-        print("[searxng_search] Ctrl+C -- saving all collected data before exit...")
-        print(f"{'!'*60}")
+            # Final live-checked flush — inside the session block so the shared
+            # connection pool is still open, whether we got here normally or via Ctrl+C.
+            print(f"\n[searxng_search] -- FINAL RESULTS --")
+            print(f"[searxng_search] Total raw URLs collected : {total_urls}")
+            print(f"[searxng_search] Unique domains extracted : {len(all_domains)}")
 
-    # Final save (catches anything not flushed incrementally)
-    print(f"\n[searxng_search] -- FINAL RESULTS --")
-    print(f"[searxng_search] Total raw URLs collected : {total_urls}")
-    print(f"[searxng_search] Unique domains extracted : {len(all_domains)}")
+            final_active, final_inactive, final_skipped = \
+                await save_domains_to_mongo_with_livecheck(list(all_domains), collection, session)
 
-    final_inserted = save_domains_to_mongo(list(all_domains), collection)
-    mongo_client.close()
+    except Exception as e:
+        print(f"[searxng_search] Unexpected error in run_search: {e}")
+        final_active = final_inactive = final_skipped = 0
+    finally:
+        mongo_client.close()
 
-    print(f"[searxng_search] New domains in MongoDB   : {final_inserted}")
-    print(f"[searxng_search] Already in DB (skipped)  : {len(all_domains) - final_inserted}")
+    final_inserted = final_active + final_inactive  # total newly upserted
+    print(f"[searxng_search] New domains inserted    : {final_inserted} (active={final_active}, inactive={final_inactive})")
+    print(f"[searxng_search] Already in DB (skipped) : {final_skipped}")
 
     return {
         "total_urls": total_urls,

@@ -5,16 +5,19 @@ Rules (Updated Architecture — Triple-Lock):
 - Dead / Blocked -> handle upstream
 - Parked / For-Sale landers -> send to AI with parked flag (no longer auto-reject)
 - Negative Archetypes (Educational, E-Commerce, News/Wiki) -> auto-regular ONLY if >= 4 signals AND 0 keywords
-- >= 5 keywords -> "gambling" (confirmed immediately, no AI needed)
-- 1-4 keywords -> "needs_ai" (escalated to Ollama AI Challenge Round)
-- 0 keywords -> "needs_ai" (all live sites go through AI — no instant regular)
+- Score >= 5.0 (STRONG keywords weighted 2.0, WEAK 1.0) -> "gambling" (confirmed immediately, no AI needed)
+- Score 2.5 to <5.0 -> "needs_ai" (escalated to Ollama AI Challenge Round)
+- Score < 2.5 -> "regular" (no AI needed)
 """
 import json
 from pathlib import Path
 from bs4 import BeautifulSoup
 
-# Path to the expanded keywords JSON file
-KEYWORDS_FILE = Path(__file__).resolve().parent.parent / "gambling_top_500_keywords.json"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+def _get_keywords_file() -> Path:
+    candidates = list(PROJECT_ROOT.glob("gambling_top_*_keywords.json")) + list(PROJECT_ROOT.glob("*keyword*.json"))
+    return candidates[0] if candidates else (PROJECT_ROOT / "gambling_top_944_keywords.json")
 
 # Fast-path hardcoded gambling signals (critical terms that should never be missed)
 # These are checked BEFORE loading the full JSON for speed on high-confidence terms
@@ -25,16 +28,13 @@ FAST_PATH_GAMBLING_SIGNALS = {
     "instant lottery", "nagaland lottery", "sikkim lottery", "kerala lottery",
     # Blackjack / Card games
     "blackjack", "21count", "card counting", "pontoon", "hi-lo",
-    # Casino types
-    "casino resort", "resort casino", "hotel casino", "tribal casino", "riverboat casino",
-    "gaming resort", "casino hotel", "casino promotions", "casino dining",
     # Deposit / Bonus triggers
     "no-deposit", "deposit bonus", "forex bonus", "trading bonus", "no deposit bonus",
     "free bonus", "cashback on losses", "prize pool", "rebate",
     # Indian Satta extensions
     "fix satta", "fix matka", "jodi chart", "panel chart", "half sangam",
     "full sangam", "open close", "matka result", "disawar result",
-    # Specific site brands (missed previously)
+    # Specific site brands
     "21 blackjack", "video poker", "poker trainer", "real money app",
     "play for real money", "win real money", "real cash games",
 }
@@ -50,7 +50,6 @@ STRONG_GAMBLING_SIGNALS = {
     "online poker", "poker tournament real money", "poker cash game",
     "online blackjack", "play blackjack", "blackjack table", "card counting",
     "slot machines", "slot games", "video slots", "free spins", "claim free spins",
-    "casino resort", "resort casino", "tribal casino", "riverboat casino",
     "online lottery", "lottery result", "lottery prediction", "lucky draw winner",
     "betting id", "demo id", "whatsapp betting", "telegram betting",
     "wagering requirement", "wagering requirements", "bonus wagering",
@@ -66,39 +65,38 @@ STRONG_GAMBLING_SIGNALS = {
 }
 
 # WEAK / AMBIGUOUS signals — can appear on non-gambling sites too
-# If ONLY weak signals match and AI times out -> default to REGULAR (not gambling)
+# Weighted as 0.5 points toward the keyword threshold
 WEAK_GAMBLING_SIGNALS = {
-    "rebate",       # used in car/product pricing
-    "sic bo",       # also a dish name in some cultures
-    "free spins",   # can appear in marketing/product context
-    "free bonus",   # can appear in any promo context
-    "bonus",        # extremely generic
-    "lottery",      # state lotteries are legal and appear in many contexts
-    "jackpot",      # used in non-gambling contexts (jackpot sale, jackpot win)
-    "odds",         # used in statistics, weather forecasting etc.
-    "prize",        # used in competitions, product giveaways
-    "win",          # used everywhere
-    "stake",        # used in business/investment context
-    "bet",          # can appear in non-gambling text
-    "daily jackpot", # could be a marketing term
-    "bitcoin casino",  # crypto news sites often report on these
-    "online casino",   # crypto/tech blogs report on these
-    "sports betting",  # news sites report on betting industry
+    "rebate",
+    "sic bo",
+    "free spins",
+    "free bonus",
+    "bonus",
+    "lottery",
+    "jackpot",
+    "odds",
+    "prize",
+    "win",
+    "stake",
+    "bet",
+    "daily jackpot",
 }
 
 
 def load_keywords() -> set:
-    """Load keywords from gambling_top_500_keywords.json into a set."""
-    if KEYWORDS_FILE.exists():
-        with open(KEYWORDS_FILE, "r", encoding="utf-8") as f:
+    """Load keywords from gambling_top_*_keywords.json into a set."""
+    kw_file = _get_keywords_file()
+    if kw_file.exists():
+        with open(kw_file, "r", encoding="utf-8") as f:
             terms = json.load(f)
             kw_set = set(str(kw).strip().lower() for kw in terms if kw)
-            # Merge with fast-path signals
             kw_set.update(FAST_PATH_GAMBLING_SIGNALS)
-            print(f"[classifier] Loaded {len(kw_set)} keywords from {KEYWORDS_FILE.name}")
+            kw_set.update(STRONG_GAMBLING_SIGNALS)
+            kw_set.update(WEAK_GAMBLING_SIGNALS)
+            print(f"[classifier] Loaded {len(kw_set)} keywords from {kw_file.name}")
             return kw_set
-    print(f"[classifier WARNING] {KEYWORDS_FILE.name} not found — using fast-path signals only!")
-    return set(FAST_PATH_GAMBLING_SIGNALS)
+    print(f"[classifier WARNING] {kw_file.name} not found — using fast-path signals only!")
+    return set(FAST_PATH_GAMBLING_SIGNALS) | STRONG_GAMBLING_SIGNALS | WEAK_GAMBLING_SIGNALS
 
 
 import re
@@ -266,12 +264,12 @@ def is_hospitality_site(text: str) -> tuple[bool, list[str]]:
 
 def classify(html: str, url: str = "", keywords: set = None) -> tuple[str, list[str]]:
     """
-    Universal Keyword Threshold Pre-Classifier:
+    Weighted Keyword Threshold Pre-Classifier with Safety Gates:
     Returns: (decision, matched_keywords)
     Where decision is:
-      - "gambling"  : >= 5 keywords (automatically classified as Gambling)
-      - "needs_ai"  : 3 to 4 keywords (>= 3 and < 5, routed to AI Classifier)
-      - "regular"   : < 3 keywords (strictly treated and processed as Regular Website)
+      - "gambling"  : >= 5.0 weighted score (and not a hospitality site without remote wagering)
+      - "needs_ai"  : 2.5 to 4.5 weighted score, or hospitality-flagged sites requiring AI review
+      - "regular"   : < 2.5 weighted score, or confirmed negative archetype (educational/e-commerce)
     """
     if not html:
         return "regular", []
@@ -281,18 +279,38 @@ def classify(html: str, url: str = "", keywords: set = None) -> tuple[str, list[
 
     # Match gambling keywords in visible text
     matched = [kw for kw in kw_set if kw in text]
+    if not matched:
+        return "regular", []
 
-    # Universal Keyword Rule Structure:
-    # 1. 5 or More Keywords (>= 5): Automatically Gambling
-    if len(matched) >= 5:
+    # Calculate weighted keyword score (weak signals count as 0.5, strong count as 1.0)
+    score = sum(0.5 if kw in WEAK_GAMBLING_SIGNALS else 1.0 for kw in matched)
+
+    # Check negative archetypes (e.g. pure math calculators, academic libraries, general e-commerce)
+    is_neg, neg_reason = detect_negative_archetype(text)
+    if is_neg and score < 3.0:
+        return "regular", matched
+
+    # Check hospitality gate (hotel/resort/restaurant amenity pages)
+    is_hosp, hosp_hits = is_hospitality_site(text)
+    has_hard_online_signals = any(
+        kw in STRONG_GAMBLING_SIGNALS and kw not in ("casino", "poker", "slots")
+        for kw in matched
+    )
+
+    # 1. High Score (>= 5.0):
+    if score >= 5.0:
+        # If hospitality page without explicit online wagering proof -> route to AI review
+        if is_hosp and not has_hard_online_signals:
+            return "needs_ai", matched
         return "gambling", matched
 
-    # 2. 3 to 4 Keywords (>= 3 and < 5): Route to AI Classifier
-    if len(matched) >= 3:
+    # 2. Medium Score (>= 2.5) or Hospitality:
+    if score >= 2.5 or (is_hosp and score >= 1.5):
         return "needs_ai", matched
 
-    # 3. Less than 3 Keywords (< 3): Strictly Regular Website
+    # 3. Low Score (< 2.5): Strictly Regular Website
     return "regular", matched
+
 
 
 

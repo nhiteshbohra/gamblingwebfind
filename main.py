@@ -23,23 +23,29 @@ from db.mongo_client import get_db
 from checking_url.ai_classifier import check_ollama_status
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-KEYWORDS_FILE = PROJECT_ROOT / "gambling_top_500_keywords.json"
+
+def _get_keywords_file() -> Path:
+    candidates = list(PROJECT_ROOT.glob("gambling_top_*_keywords.json")) + list(PROJECT_ROOT.glob("*keyword*.json"))
+    return candidates[0] if candidates else (PROJECT_ROOT / "gambling_top_944_keywords.json")
 
 
-def _load_500_keywords() -> list[str]:
-    """Load all keywords from gambling_top_500_keywords.json."""
-    with open(KEYWORDS_FILE, "r", encoding="utf-8") as f:
-        terms = json.load(f)
-    return [str(k).strip().lower() for k in terms if str(k).strip()]
+def _load_keywords() -> tuple[list[str], str]:
+    """Load all keywords from dynamic keywords json file."""
+    kw_path = _get_keywords_file()
+    if kw_path.exists():
+        with open(kw_path, "r", encoding="utf-8") as f:
+            terms = json.load(f)
+        return [str(k).strip().lower() for k in terms if str(k).strip()], kw_path.name
+    return [], kw_path.name
 
 
 def run_searxng_search():
     print("\n--- keywordssearch ---")
 
-    # Auto-load from gambling_top_500_keywords.json
-    keywords = _load_500_keywords()
-    print(f"[+] Loaded {len(keywords)} keywords from {KEYWORDS_FILE.name}")
-    print(f"    First 10: {', '.join(keywords[:10])} ...")
+    keywords, kw_name = _load_keywords()
+    print(f"[+] Loaded {len(keywords)} keywords from {kw_name}")
+    if keywords:
+        print(f"    First 10: {', '.join(keywords[:10])} ...")
 
     from keywordssearch.searxng_search import run_search
     summary = asyncio.run(run_search(keywords))
@@ -91,7 +97,7 @@ def _size_based_split(domain_ids: list, pdf_limit_mb: float = 24.0) -> list[list
     Estimation: JPEG file size on disk + PDF_PAGE_OVERHEAD_BYTES per entry.
     Target ceiling is set slightly below the limit to leave headroom.
     """
-    from capture_url.screenshot import _url_to_filename
+    from export_domains.screenshot import _url_to_filename
     SCREENSHOTS_DIR = os.getenv("SCREENSHOT_DIR", os.path.join("output", "screenshots"))
     PDF_PAGE_OVERHEAD = 12_000          # ~12KB per page for text/metadata
     PDF_LIMIT_BYTES   = int(pdf_limit_mb * 1024 * 1024 * 0.92)  # 92% of 24MB as safe ceiling
@@ -132,175 +138,45 @@ def _size_based_split(domain_ids: list, pdf_limit_mb: float = 24.0) -> list[list
     return batches
 
 
-def run_capture_url():
-    print("\n--- capture_url (Export Reports: Word, PDF & Excel) ---")
-    from capture_url.runner import run as capture_run
-    from capture_url.excel_exporter import export_capture_workbook
-    from capture_url.docx_report_generator import build_report_from_mongo
-
-    IST = timezone(timedelta(hours=5, minutes=30))
-    run_ts = datetime.now(IST).strftime("%Y%m%d_%H%M%S")
-    conc = int(os.getenv("SCREENSHOT_CONCURRENCY", 15))
-    limit = int(os.getenv("CAPTURE_LIMIT", 0))
-    default_batch_size = int(os.getenv("EXPORT_BATCH_SIZE", 40))
-
-    # Ask user for export preference before run
-    print("\n" + "=" * 55)
-    print("           SELECT REPORT EXPORT FORMAT           ")
-    print("=" * 55)
-    print("0. Back to main menu")
-    print("1. Single Combined Files (1 Word, 1 PDF, 1 Excel)")
-    print("2. Batched Files (Split into batch folders of N items)")
-    print("3. Batched Files (Split by PDF size — 24MB limit, PDF + Excel only)")
-    print("=" * 55)
-    export_choice = input("Select export format (0-3) [default: 1]: ").strip()
-    if export_choice in ("0", "b", "back"):
-        return
-
-    processed_ids = asyncio.run(capture_run(concurrency=conc, limit=limit))
-
-    if not processed_ids:
-        print("[+] capture_url: No gambling domains pending report export.")
-        return
-
-    run_dir = os.path.join("output", run_ts)
-
-    # ── Option 3: Size-based PDF batching, no Word ────────────────────────────
-    if export_choice == "3":
-        print(f"\n[+] Size-based export: splitting {len(processed_ids)} domains into ≤24MB PDF batches...")
-        size_batches = _size_based_split(processed_ids, pdf_limit_mb=24.0)
-        total_pdfs = 0
-        total_xlsx = 0
-        for batch_num, batch_ids in enumerate(size_batches, 1):
-            batch_label = f"batch_{batch_num:03d}"
-            batch_dir = os.path.join(run_dir, batch_label)
-            print(f"\n[+] {batch_label}: {len(batch_ids)} domains -> {batch_dir}/")
-
-            # PDF only (no Word)
-            report_result = build_report_from_mongo(
-                domain_ids=batch_ids,
-                output_dir=batch_dir,
-                batch_size=0,           # single file per batch
-                cleanup=False,
-                pdf=True,
-                single_file=True,
-            )
-            total_pdfs += len(report_result["pdf_paths"])
-
-            # Paired Excel
-            xlsx_result = export_capture_workbook(
-                domain_ids=batch_ids,
-                output_dir=batch_dir,
-                batch_size=0,
-                single_file=True,
-            )
-            total_xlsx += len([f for f in xlsx_result["files"] if f.endswith(".xlsx")])
-
-        print(f"\n[+] Size-based export complete.")
-        print(f"    Run folder  : {os.path.abspath(run_dir)}")
-        print(f"    Batches     : {len(size_batches)}")
-        print(f"    PDF files   : {total_pdfs}")
-        print(f"    Excel files : {total_xlsx}")
-        return
-
-    # ── Options 1 & 2: original behaviour ────────────────────────────────────
-    single_file = (export_choice != "2")
-    batch_size = default_batch_size
-
-    if export_choice == "2":
-        bs_input = input(f"Enter batch size (e.g. 20, 40, 50) [0 to go back, default: {default_batch_size}]: ").strip()
-        if bs_input in ("0", "b", "back"):
-            return
-        if bs_input.isdigit() and int(bs_input) > 0:
-            batch_size = int(bs_input)
-    else:
-        batch_size = 0
-
-    if single_file:
-        print(f"\n[+] Exporting {len(processed_ids)} domains to Single Combined Word, PDF & Excel -> {run_dir}/")
-    else:
-        print(f"\n[+] Exporting {len(processed_ids)} domains in batches of {batch_size} -> {run_dir}/")
-
-    xlsx_result = export_capture_workbook(
-        domain_ids=processed_ids,
-        output_dir=run_dir,
-        batch_size=batch_size,
-        single_file=single_file,
-    )
-    report_result = build_report_from_mongo(
-        domain_ids=processed_ids,
-        output_dir=run_dir,
-        batch_size=batch_size,
-        cleanup=False,
-        pdf=True,
-        single_file=single_file,
-    )
-
-    print(f"\n[+] Export complete.")
-    print(f"    Run folder  : {os.path.abspath(run_dir)}")
-    if not single_file:
-        print(f"    Batches     : {xlsx_result['batches']} (up to {batch_size} domains each)")
-    print(f"    Captured    : {xlsx_result['captured']} | Failed: {xlsx_result['failed']}")
-    print(f"    Excel files : {len([f for f in xlsx_result['files'] if f.endswith('.xlsx')])}")
-    print(f"    Word files  : {len(report_result['docx_paths'])}")
-    print(f"    PDF files   : {len(report_result['pdf_paths'])}")
-
-
-
-def run_import_true_positives():
-    print("\n--- import_true_positives (Import Confirmed Gambling URLs from File) ---")
-    file_path = input("Enter path to Excel (.xlsx/.xls), CSV, or .txt file with gambling URLs (0 to go back): ").strip().strip('"')
-    if file_path in ("0", "b", "back") or not file_path:
-        return
-    if not os.path.exists(file_path):
-        print(f"[!] File not found: {file_path}")
-        return
-    from db.mongo_client import ingest_true_positives
-    inserted, skipped = ingest_true_positives(file_path)
-    print(f"[+] Import complete. New: {inserted} | Reset for re-capture: {skipped}")
-    if inserted + skipped > 0:
-        print(f"    Run Option 5 to capture screenshots, then Option 3 to export reports.")
-
-
-def run_screenshot_only():
-    print("\n--- screenshot_only (Capture Missing Screenshots — No Re-classification) ---")
+def run_export_domains():
+    print("\n--- export_domains (Export & Batch Splitting) ---")
     print("  0. Back to main menu")
-    print("  1. From file     (Excel .xlsx/.xls, CSV, or .txt list of domains/URLs)")
-    print("  2. From database (all status=gambling, screenshot_taken=False)")
-    mode = input("Select mode (0-2) [default: 2]: ").strip()
+    print("  1. Export from Database  (Generate Word, PDF & Excel from MongoDB)")
+    print("  2. Divide into Batches   (Split existing Excel/CSV + PDF into batch folders)")
+    mode = input("Select option (0-2) [default: 1]: ").strip()
     if mode in ("0", "b", "back"):
         return
 
-    from capture_url.screenshot_runner import run as ss_run
-    concurrency = int(os.getenv("SCREENSHOT_CONCURRENCY", 15))
+    if mode == "2":
+        from export_domains.batch_splitter import prompt_divide_into_batches
+        prompt_divide_into_batches()
+        return
 
-    if mode == "1":
-        file_path = input("Enter path to file with domains/URLs (0 to go back): ").strip().strip('"')
-        if file_path in ("0", "b", "back") or not file_path:
-            return
-        if not os.path.exists(file_path):
-            print(f"[!] File not found: {file_path}")
-            return
+    # Mode 1: Export from Database
+    from export_domains.exporter import run as export_run
 
-        from db.mongo_client import extract_domains_from_file
-        domain_ids = extract_domains_from_file(file_path)
+    limit = int(os.getenv("CAPTURE_LIMIT", 0))
+    result = asyncio.run(export_run(limit=limit))
 
-        if not domain_ids:
-            print("[!] No valid domains found in file.")
-            return
+    if not result or (result.get("captured", 0) == 0 and result.get("failed", 0) == 0):
+        print("[+] export_domains: No unexported gambling domains found.")
+        return
 
-        print(f"[+] {len(domain_ids)} domain(s) read from '{os.path.basename(file_path)}'.")
-        result = asyncio.run(ss_run(domain_ids=domain_ids, concurrency=concurrency))
+    print(f"\n[+] Export Complete:")
+    print(f"    Run ID   : {result.get('run_id')}")
+    print(f"    PDF      : {result.get('pdf') or 'N/A'}")
+    print(f"    Excel    : {result.get('xlsx') or 'N/A'}")
+    print(f"    Captured : {result.get('captured')}")
+    print(f"    Failed   : {result.get('failed')}")
 
-    else:
-        # Mode 2: query entire collection for pending screenshots
-        limit = int(os.getenv("CAPTURE_LIMIT", 0))
-        result = asyncio.run(ss_run(domain_ids=None, concurrency=concurrency, limit=limit))
-
-    print(f"[+] Done. Captured: {result['captured']} | Failed: {result['failed']} | Total: {result['total']}")
-    if result.get("excel_path"):
-        print(f"    Excel Summary : {os.path.abspath(result['excel_path'])}")
-
+    if result.get("pdf") and result.get("xlsx") and os.path.exists(result["pdf"]):
+        try:
+            ask_split = input("\n[?] Would you like to divide these exported files into batches now? (y/n) [default: n]: ").strip().lower()
+            if ask_split in ("y", "yes"):
+                from export_domains.batch_splitter import create_batches
+                create_batches(csv_path=result["xlsx"], pdf_path=result["pdf"])
+        except Exception as e:
+            print(f"[!] Batch splitting error: {e}")
 
 
 
@@ -312,29 +188,23 @@ def interactive_menu():
         print("=" * 58)
         print("1. keywordssearch        (SearXNG / Multi-Engine Search)")
         print("2. checking_url          (Fetch, AI Classify & Screenshot)")
-        print("3. capture_url           (Export Word, PDF & Excel Reports)")
-        print("4. import_true_positives (Import Confirmed Gambling URLs from File)")
-        print("5. screenshot_only       (Capture Missing Screenshots — No Re-classification)")
+        print("3. export_domains        (Export Reports & Divide into Batches)")
         print("0. Exit")
         print("=" * 58)
 
-        choice = input("Select an option (1-5, 0 to exit): ").strip()
+        choice = input("Select an option (1-3, 0 to exit): ").strip()
 
         if choice == "1":
             run_searxng_search()
         elif choice == "2":
             run_checking_url()
         elif choice == "3":
-            run_capture_url()
-        elif choice == "4":
-            run_import_true_positives()
-        elif choice == "5":
-            run_screenshot_only()
+            run_export_domains()
         elif choice == "0" or choice.lower() in ("exit", "q", "quit"):
             print("Exiting.")
             break
         else:
-            print("[!] Invalid option. Please enter 1-5 or 0 to exit.")
+            print("[!] Invalid option. Please enter 1-3 or 0 to exit.")
 
 
 def main():

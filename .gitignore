@@ -1,74 +1,42 @@
-# --- Python Bytecode & Build ---
+# Python Bytecode & Cache
 __pycache__/
 *.py[cod]
-*$py.class
-*.egg-info/
-.eggs/
-build/
-dist/
 
-# --- Virtual Environments ---
+# Virtual Environments
 venv/
 .venv/
 env/
-ENV/
 
-# --- Testing, Pytest & Coverage ---
-.pytest_cache/
-.coverage
-.coverage.*
-htmlcov/
-test-results/
-test_run.log
+# Environment Secrets
+.env
+.env.*
+!.env.example
 
-# --- Runtime Outputs & Media Data ---
+# Runtime Outputs & Media Data
 output/
 screenshots/
 data/
 logs/
 *.log
-*.db-journal
-*.sqlite
-*.sqlite3
-data/presence.db
-all domainsearched/
-!config/
 
-# --- Office Temporary Lock Files ---
-~$*.xlsx
-~$*.docx
-~$*.pptx
-*.lock
+# Pytest & Coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+test_run.log
 
-# --- Config Secrets & Environment ---
-.env
-.env.*
-!.env.example
-*.secret.yaml
-config/settings.local.yaml
-
-# --- Docker / SearXNG Runtime State ---
-searxng/data/
-searxng/uwsgi.ini
-docker-volumes/
-
-# --- Browser & Playwright ---
+# Playwright & Browser Artifacts
 .playwright/
 playwright-report/
 
-# --- Editors & OS Artifacts ---
+# Office Lock Files & Temporary Files
+~$*
+*.tmp
+*.lock
+
+# IDE & OS Files
 .vscode/
 .idea/
 .DS_Store
 Thumbs.db
-*.swp
-*.swo
-
-# --- Temporary Files, Patches & Scratch Output ---
-*.tmp
-*.diff
-*.patch
-*.orig
-*_test_output*
-spec_audit*.md
-*.zip

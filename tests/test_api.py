@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 from unittest.mock import patch, MagicMock, AsyncMock
 
 from api.main import app
-from capture_url.screenshot import _url_to_filename
+from export_domains.screenshot import _url_to_filename
 import api.jobs as jobs
 
 

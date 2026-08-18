@@ -3,15 +3,16 @@ checking_url/runner.py — Triple-Lock Async Classifier + Immediate Screenshot C
 
 New Architecture:
 1. Fast Fetch via Scrapling AsyncFetcher (curl_cffi TLS impersonation).
-2. Layer 2: Heuristic Pre-Screen (Expanded 700+ Keywords):
-   - >= 5 keywords -> Confirmed Gambling (no AI needed)
-   - 0-4 keywords  -> needs_ai (ALL live sites go through Ollama)
-   - Parked sites  -> needs_ai (AI confirms, no longer auto-rejected)
+2. Layer 2: Heuristic Pre-Screen (988 Keywords, weighted float scoring):
+   - Score >= 5.0  -> Confirmed Gambling (no AI needed)
+   - Score 2.5-5.0 -> needs_ai (escalated to Ollama)
+   - Score < 2.5   -> Regular (no AI needed)
+   - Hospitality/educational/e-commerce gatekeeping prevents false locks
 3. Layer 3: Ollama AI 2-Round Challenge System:
    - Round 1: Standard classify_with_challenge()
    - Round 2: If Round 1 says 'regular' -> Challenge: AI must prove with specific evidence
    - If evidence vague/low confidence -> override to gambling
-   - If Ollama offline + keywords matched -> gambling (not unconfirmed)
+   - If Ollama offline + keywords matched -> unconfirmed (re-queued for later)
 4. Immediate Screenshot: If status is 'gambling', Playwright BrowserPool captures immediately.
 5. MongoDB sync: updates checked_domains and domain_Listed.
 """
@@ -37,7 +38,7 @@ from db.mongo_client import find_active_domains, find_blocked_domains, find_unco
 from checking_url.fetcher import fetch
 from checking_url.classifier import load_keywords, classify
 from checking_url.ai_classifier import classify_with_challenge, close_ai_session, _timeout_mgr
-from capture_url.screenshot import BrowserPool, is_valid_screenshot, delete_screenshot
+from export_domains.screenshot import BrowserPool, is_valid_screenshot, delete_screenshot
 
 OUTPUT_SCREENSHOT_DIR = os.getenv("SCREENSHOT_DIR", os.path.join("output", "screenshots"))
 
@@ -192,16 +193,27 @@ async def run(concurrency: int = None, limit: int = 0, mode: str = "new"):
                 else:
                     # Network Error / Unconfirmed Fallback & Immediate Cleanup Rule
                     delete_screenshot(domain, output_screenshot_dir)
-                    if ss_status in ("blocked", "dead"):
+                    _DEAD_SS_STATUSES = {"dead", "dns_failed", "connection_refused", "timeout", "ssl_or_reset"}
+                    if ss_status == "blocked":
                         write_result(
                             domain,
                             url=url,
-                            status=ss_status,
-                            reason=f"{ss_status.capitalize()}: {ss_reason}",
+                            status="blocked",
+                            reason=f"Blocked: {ss_reason}",
                             screenshot_taken=False,
                             screenshot_failed_reason=str(ss_reason),
                         )
-                        run_stats[ss_status] += 1
+                        run_stats["blocked"] += 1
+                    elif ss_status in _DEAD_SS_STATUSES:
+                        write_result(
+                            domain,
+                            url=url,
+                            status="dead",
+                            reason=f"Dead: {ss_reason}",
+                            screenshot_taken=False,
+                            screenshot_failed_reason=str(ss_reason),
+                        )
+                        run_stats["dead"] += 1
                     else:
                         write_result(
                             domain,
@@ -217,6 +229,19 @@ async def run(concurrency: int = None, limit: int = 0, mode: str = "new"):
                 write_result(domain, url=url, status=final_status, reason=final_reason, screenshot_taken=False)
 
         except Exception as e:
+            domain = doc.get("domain", "")
+            if domain:
+                try:
+                    write_result(
+                        domain,
+                        url=f"https://{domain}",
+                        status="unconfirmed",
+                        reason=f"Pipeline error: {type(e).__name__}: {e}",
+                        screenshot_taken=False,
+                    )
+                    run_stats["unconfirmed"] += 1
+                except Exception:
+                    pass
             pbar.update(1)
             pbar.set_postfix({"Left": total_pending - pbar.n})
 

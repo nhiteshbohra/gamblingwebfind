@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 from db.mongo_client import checked_domains as _cd
-from capture_url.screenshot import _url_to_filename, is_valid_screenshot
+from export_domains.screenshot import _url_to_filename, is_valid_screenshot
 import os
 
 router = APIRouter(prefix="/api")

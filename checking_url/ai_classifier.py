@@ -26,17 +26,19 @@ load_dotenv(dotenv_path=Path(__file__).resolve().parent.parent / ".env")
 
 logger = logging.getLogger("ai_classifier")
 
-# Import keyword strength tiers from classifier
+# Import keyword strength tiers and hospitality helpers from classifier
 try:
-    from checking_url.classifier import STRONG_GAMBLING_SIGNALS
+    from checking_url.classifier import STRONG_GAMBLING_SIGNALS, is_hospitality_site
 except ImportError:
     STRONG_GAMBLING_SIGNALS = {
         "online casino", "sports betting", "sportsbook", "betting exchange",
         "live casino", "casino games", "online gambling", "slot machines",
-        "satta matka", "online poker", "casino resort", "online lottery",
+        "satta matka", "online poker", "online lottery",
         "responsible gambling", "teen patti", "andar bahar", "dragon tiger",
         "crypto casino", "bitcoin casino", "aviator game", "crash game",
     }
+    def is_hospitality_site(text: str):
+        return False, []
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
@@ -240,7 +242,6 @@ def detect_igaming_providers(html: str) -> list[str]:
 
 
 # Conviction threshold: if AI says "regular" with confidence below this → send to Round 2 challenge
-# ponytail: 0.50 not calibrated; ceiling is uncalibrated 3B model logits. Upgrade path: logistic calibration layer.
 REGULAR_CONVICTION_THRESHOLD = 0.50
 
 # Non-gambling archetype patterns for ground-truth evidence verification
@@ -664,10 +665,10 @@ Page Content:
 {body_text}
 
 Analyze the above website content carefully.
-Determine if this is an online gambling, sports betting, real-money gaming (poker/rummy/teen patti), casino resort, crash game (Aviator), lottery, or bookmaker platform.
+Determine if this is an online gambling, sports betting, real-money gaming (poker/rummy/teen patti), crash game (Aviator), lottery, or bookmaker platform.
 IMPORTANT RULES:
-- Real-money poker platforms (e.g. Adda52, PokerStars) and rummy/card game platforms are GAMBLING.
-- Casino resorts/hotels with gaming floors (e.g. Majestic Pride, Bellagio) are GAMBLING.
+- Real-money poker platforms, betting exchanges, sportsbooks, slot games, and rummy/card game platforms for cash are GAMBLING.
+- A hotel/resort/dining website that merely mentions a casino, gaming floor, or amenity nearby is REGULAR unless the site itself provides remote/online gambling.
 - Do NOT hallucinate features. Only evaluate what is present in the text above.
 
 Respond ONLY in valid JSON:
@@ -738,15 +739,23 @@ Respond ONLY in valid JSON:
 
     # ── ROUND 2: Challenge — AI must prove "regular" verdict with Ground Truth ──
     if verdict == "regular":
+        # Check hospitality gate before considering domain-anchor override
+        is_hosp, _ = is_hospitality_site(body_text)
+        has_providers = bool(detect_igaming_providers(html))
+        has_funnels = bool(detect_gambling_funnels(html))
+
         if is_g_domain and matched_keywords:
-            return {
-                "verdict": "gambling",
-                "confidence": 0.90,
-                "category": "domain_anchor_gambling",
-                "key_triggers": [domain_signal] + (matched_keywords or []),
-                "reason": f"Domain anchor ({domain_signal}) corroborated by matched keywords {matched_keywords[:3]} — locked as gambling despite AI regular guess",
-                "challenge_override": True,
-            }
+            if not is_hosp or has_providers or has_funnels:
+                # If domain anchor is corroborated and not a pure hotel page, route to validator
+                analyst_verdict = {
+                    "verdict": "gambling",
+                    "confidence": 0.85,
+                    "category": "domain_anchor_gambling",
+                    "key_triggers": [domain_signal] + (matched_keywords or []),
+                    "reason": f"Domain anchor ({domain_signal}) corroborated by matched keywords {matched_keywords[:3]}",
+                    "challenge_override": True,
+                }
+                return await validate_gambling_verdict(url, title, body_text, analyst_verdict)
 
         # Low confidence → send to Round 2 evidence challenge instead of an immediate flip
         # fast_mode=True: skip Round 2 for unconfirmed re-check (halves AI calls)

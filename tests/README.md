@@ -26,7 +26,7 @@ Run tests for a specific stage:
 python -m pytest tests/test_stage0_keywordssearch.py -v
 python -m pytest tests/test_stage1_domain_fetch.py -v
 python -m pytest tests/test_stage2_checking_url.py -v
-python -m pytest tests/test_stage3_capture_url.py -v
+python -m pytest tests/test_stage3_export_domains.py -v
 python -m pytest tests/test_helpers_and_import.py -v
 python -m pytest tests/test_api.py -v
 python -m pytest tests/test_end_to_end.py -v
@@ -72,8 +72,8 @@ tests/
 ├── test_stage0_keywordssearch.py     # Stage 0: Search scraping, blocklist, Mongo bulk writes (11 tests)
 ├── test_stage1_domain_fetch.py       # Stage 1: Domain normalization, CSV/Excel/CommonCrawl seeding (7 tests)
 ├── test_stage2_checking_url.py       # Stage 2: Classifier, failure sniffer, timeout EMA, AI challenge (13 tests)
-├── test_stage3_capture_url.py        # Stage 3: Screenshot validator, Excel exporter, Word/PDF reports (9 tests)
-├── test_helpers_and_import.py        # True positive ingestion, batch splitter, compare tools (6 tests)
+├── test_stage3_export_domains.py      # Stage 3: Screenshot validator, Excel exporter, Word/PDF reports (7 tests)
+├── test_helpers_and_import.py        # True positive ingestion, batch splitter, compare tools (5 tests)
 ├── test_api.py                       # FastAPI routes, log streams, reports, settings, stats (8 tests)
 ├── test_end_to_end.py                # Full pipeline lifecycle: seed -> check -> export -> stats (1 test)
 └── README.md                         # Test suite documentation (this file)

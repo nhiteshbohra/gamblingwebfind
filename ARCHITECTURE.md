@@ -61,7 +61,7 @@
                                    │  status="gambling", screenshot_taken=false
                                    ▼
 ┌──────────────────────────────────────────────────────────────────────┐
-│  STAGE 3 — capture_url/runner.py                                     │
+│  STAGE 3 — export_domains/exporter.py                                │
 │                                                                      │
 │  Input  : checked_domains WHERE status=gambling,                     │
 │                                screenshot_taken=false                │
@@ -195,11 +195,10 @@ gamblingwebfind/
 │   ├── classifier.py                 ← Keyword matcher & parked lander detector
 │   └── deep_crawl.py                 ← Outbound link extractor for aggregator gambling pages
 │
-├── capture_url/                      ← STAGE 3 — Screenshot capture & reporting
-│   ├── runner.py                     ← Orchestrator (Playwright BrowserPool)
-│   ├── screenshot.py                 ← Playwright capture with full-load wait strategy
-│   ├── excel_exporter.py             ← MongoDB → Excel workbooks (clickable hyperlinks)
-│   └── docx_report_generator.py      ← MongoDB → Word/PDF reports (2 targets/page, clickable hyperlinks)
+├── export_domains/                   ← STAGE 3 — Word, PDF & Excel Report Export & Batch Splitting
+│   ├── exporter.py                   ← Unified single-command export pipeline
+│   ├── screenshot.py                 ← Screenshot validation & image utilities
+│   └── batch_splitter.py             ← Splits Excel/CSV and PDF reports into batch subfolders
 │
 └── project_sup/                      ← Project support & utility scripts
     └── helping_code/
@@ -207,7 +206,6 @@ gamblingwebfind/
         ├── cleanup_db.py             ← Wrapper delegating directly to audit_db.py --fix
         ├── compare_dbs.py            ← Interactive tool to compare & sync domains between two DBs
         ├── compare_processed_domains.py.py ← Syncs processed=True flag for domains in checked_domains
-        ├── batch_splitter.py         ← Splits CSV and PDF reports into batch subfolders
         ├── import_output_excel.py    ← Bulk Excel importer into MongoDB
         ├── merge_pdfs.py             ← PDF merger tool
         └── arrange_docx_report.py    ← Post-processing Word report formatting tool

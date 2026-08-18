@@ -17,10 +17,6 @@ class ExportBody(BaseModel):
     format: int = 1
     batch_size: int = 40
 
-class ScreenshotBody(BaseModel):
-    mode: str = "db"
-    domains: list = []
-
 class ImportBody(BaseModel):
     domains: list = []
 
@@ -33,9 +29,10 @@ def _get_loop():
 def _run_keywords(job_id, loop):
     try:
         from keywordssearch.searxng_search import run_search
-        import json
-        kw_path = Path(__file__).resolve().parent.parent / "gambling_top_500_keywords.json"
-        with open(kw_path) as f:
+        root_dir = Path(__file__).resolve().parent.parent
+        cands = list(root_dir.glob("gambling_top_*_keywords.json")) + list(root_dir.glob("*keyword*.json"))
+        kw_path = cands[0] if cands else (root_dir / "gambling_top_944_keywords.json")
+        with open(kw_path, encoding="utf-8") as f:
             keywords = [str(k).strip().lower() for k in json.load(f) if str(k).strip()]
         with capture_prints(job_id, loop):
             fut = asyncio.run_coroutine_threadsafe(
@@ -80,56 +77,10 @@ def _run_check(job_id, mode, loop):
 
 def _run_export(job_id, fmt, batch_size, loop):
     try:
-        from capture_url.runner import run as capture_run
-        from capture_url.excel_exporter import export_capture_workbook
-        from capture_url.docx_report_generator import build_report_from_mongo
-        from datetime import datetime, timezone, timedelta
-        import os
-        IST = timezone(timedelta(hours=5, minutes=30))
-        run_ts = datetime.now(IST).strftime("%Y%m%d_%H%M%S")
-        run_dir = os.path.join("output", run_ts)
-        conc = int(os.getenv("SCREENSHOT_CONCURRENCY", 15))
+        from export_domains.exporter import run as export_run
         with capture_prints(job_id, loop):
             fut = asyncio.run_coroutine_threadsafe(
-                capture_run(concurrency=conc, limit=0), loop
-            )
-            set_job_future(job_id, fut)
-            ids = fut.result(timeout=7200)
-        if ids:
-            if fmt == 3:
-                from main import _size_based_split
-                batches = _size_based_split(ids)
-                for i, batch_ids in enumerate(batches, 1):
-                    bd = os.path.join(run_dir, f"batch_{i:03d}")
-                    build_report_from_mongo(domain_ids=batch_ids, output_dir=bd, batch_size=0, cleanup=False, pdf=True, single_file=True)
-                    export_capture_workbook(domain_ids=batch_ids, output_dir=bd, batch_size=0, single_file=True)
-            elif fmt == 2:
-                export_capture_workbook(domain_ids=ids, output_dir=run_dir, batch_size=batch_size)
-                build_report_from_mongo(domain_ids=ids, output_dir=run_dir, batch_size=batch_size, cleanup=False, pdf=True)
-            else:
-                export_capture_workbook(domain_ids=ids, output_dir=run_dir, batch_size=0, single_file=True)
-                build_report_from_mongo(domain_ids=ids, output_dir=run_dir, batch_size=0, cleanup=False, pdf=True, single_file=True)
-        finish_job(job_id, "done")
-    except asyncio.CancelledError:
-        finish_job(job_id, "stopped")
-    except Exception as e:
-        job = get_job(job_id)
-        if job and job.get("status") == "stopped":
-            finish_job(job_id, "stopped")
-        else:
-            finish_job(job_id, "failed")
-            if job:
-                job["queue"].put_nowait(f"ERROR: {e}")
-
-def _run_screenshot(job_id, domains_list, loop):
-    try:
-        from capture_url.screenshot_runner import run as ss_run
-        import os
-        conc = int(os.getenv("SCREENSHOT_CONCURRENCY", 15))
-        ids = domains_list if domains_list else None
-        with capture_prints(job_id, loop):
-            fut = asyncio.run_coroutine_threadsafe(
-                ss_run(domain_ids=ids, concurrency=conc), loop
+                export_run(limit=0), loop
             )
             set_job_future(job_id, fut)
             fut.result(timeout=7200)
@@ -144,7 +95,6 @@ def _run_screenshot(job_id, domains_list, loop):
             finish_job(job_id, "failed")
             if job:
                 job["queue"].put_nowait(f"ERROR: {e}")
-
 
 @router.post("/run/keywords")
 def run_keywords(bg: BackgroundTasks):
@@ -171,16 +121,6 @@ def run_export(body: ExportBody, bg: BackgroundTasks):
     job_id = new_job("export")
     loop = _get_loop()
     bg.add_task(_run_export, job_id, body.format, body.batch_size, loop)
-    return {"job_id": job_id}
-
-@router.post("/run/screenshot")
-def run_screenshot(body: ScreenshotBody, bg: BackgroundTasks):
-    if is_stage_running("screenshot"):
-        raise HTTPException(409, "screenshot stage already running")
-    job_id = new_job("screenshot")
-    loop = _get_loop()
-    domains = body.domains if body.mode == "file" else []
-    bg.add_task(_run_screenshot, job_id, domains, loop)
     return {"job_id": job_id}
 
 @router.post("/stop/{stage}")
@@ -210,7 +150,7 @@ def run_import(body: ImportBody):
     today = datetime.now(IST).strftime("%Y-%m-%d")
     inserted = reset = 0
     for raw in body.domains:
-        d = raw.strip().replace("https://","").replace("http://","").lstrip("www.").rstrip("/").lower()
+        d = raw.strip().replace("https://","").replace("http://","").removeprefix("www.").rstrip("/").lower()
         d = extract_domain(f"https://{d}") or d
         if not d or "." not in d:
             continue

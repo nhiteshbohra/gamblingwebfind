@@ -11,10 +11,8 @@ from unittest.mock import patch, MagicMock, AsyncMock
 from api.main import app
 from checking_url.fetcher import FetchResult
 import checking_url.runner as check_runner
-from capture_url.runner import run as capture_run
-from capture_url.excel_exporter import export_capture_workbook
-from capture_url.docx_report_generator import build_report_from_mongo
-from capture_url.screenshot import _url_to_filename
+from export_domains.exporter import run as export_run
+from export_domains.screenshot import _url_to_filename
 
 
 @pytest.mark.asyncio
@@ -123,29 +121,13 @@ async def test_full_pipeline_end_to_end_lifecycle(
     assert chk_col.count_documents({"status": "gambling", "screenshot_taken": True}) == 8
 
     # ── 4. Execute Stage 3 Report Export ──────────────────────────────────────
-    export_run_dir = out_dir / "20260817_120000"
-    export_run_dir.mkdir(parents=True, exist_ok=True)
+    with patch("export_domains.exporter._convert_to_pdf", return_value=str(out_dir / "report.pdf")):
+        export_res = await export_run(concurrency=4, limit=0)
 
-    verified_ids = await capture_run(concurrency=4, limit=0)
-    assert len(verified_ids) == 8
-
-    excel_res = export_capture_workbook(
-        domain_ids=verified_ids,
-        output_dir=str(export_run_dir),
-        batch_size=0,
-        single_file=True,
-    )
-    assert excel_res["captured"] == 8
-
-    docx_res = build_report_from_mongo(
-        domain_ids=verified_ids,
-        output_dir=str(export_run_dir),
-        batch_size=0,
-        single_file=True,
-        pdf=False,
-    )
-    assert len(docx_res["docx_paths"]) == 1
-    assert os.path.exists(docx_res["docx_paths"][0])
+    assert export_res["captured"] == 8
+    assert export_res["failed"] == 0
+    assert export_res["xlsx"] is not None
+    assert os.path.exists(export_res["xlsx"])
 
     # Assert exported state in DB
     assert chk_col.count_documents({"exported": True}) == 8

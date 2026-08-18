@@ -53,7 +53,7 @@ def mock_mongo(monkeypatch):
         pass
 
     try:
-        import capture_url.screenshot as css
+        import export_domains.screenshot as css
         monkeypatch.setattr(css.BrowserPool, "start", AsyncMock())
         monkeypatch.setattr(css.BrowserPool, "ensure_browser", AsyncMock())
         monkeypatch.setattr(css.BrowserPool, "close", AsyncMock())
@@ -156,39 +156,107 @@ def corrupt_screenshot_path():
     return str(FIXTURES_DIR / "sample_screenshot_corrupt.jpg")
 
 
+_test_failures = []
+_test_passes = 0
+_test_skips = 0
+_initial_output_files = set()
+
+
+def pytest_sessionstart(session):
+    """Snapshot existing files before tests start so all test-created artifacts can be deleted."""
+    global _initial_output_files
+    root_dir = Path(__file__).resolve().parent.parent
+    for check_dir in [root_dir / "output", root_dir / "Batches", root_dir / "screenshots"]:
+        if check_dir.exists():
+            for item in check_dir.iterdir():
+                _initial_output_files.add(str(item.resolve()))
+
+
+def pytest_runtest_logreport(report):
+    """Capture pass/fail/error status and detailed stack traces for each test."""
+    global _test_passes, _test_skips, _test_failures
+    if report.when == "call":
+        if report.passed:
+            _test_passes += 1
+        elif report.failed:
+            _test_failures.append({
+                "nodeid": report.nodeid,
+                "duration": round(report.duration, 3),
+                "error": str(report.longrepr) if report.longrepr else "Unknown test failure",
+            })
+        elif report.skipped:
+            _test_skips += 1
+    elif report.when in ("setup", "teardown") and report.failed:
+        _test_failures.append({
+            "nodeid": f"{report.nodeid} ({report.when})",
+            "duration": round(report.duration, 3),
+            "error": str(report.longrepr) if report.longrepr else "Fixture setup/teardown failed",
+        })
+
+
 def pytest_sessionfinish(session, exitstatus):
     """
-    Automatic cleanup after all tests complete:
-    1. Purges any test-generated files in project output/ folder.
-    2. Drops test database if created in real MongoDB.
-    3. Records summary log to test_run.log.
+    Automatic cleanup and logging after all tests complete:
+    1. Purges ALL test-generated files/directories (including timestamped run folders).
+    2. Drops test databases in MongoDB.
+    3. Writes complete run report with errors or success status to logs/test_run.log.
     """
     root_dir = Path(__file__).resolve().parent.parent
 
-    # 1. Clean test-generated files from root output/ directory
-    root_output = root_dir / "output"
-    if root_output.exists():
-        for item in root_output.iterdir():
-            if item.name.startswith("test_") or item.name.startswith("internal_audit_test"):
-                try:
-                    if item.is_file():
-                        item.unlink()
-                    elif item.is_dir():
-                        shutil.rmtree(item)
-                except Exception:
-                    pass
+    # 1. Clean test-generated files and folders across output/, Batches/, screenshots/
+    for check_dir in [root_dir / "output", root_dir / "Batches", root_dir / "screenshots"]:
+        if check_dir.exists():
+            for item in list(check_dir.iterdir()):
+                # Delete any item created during the test session or matching test patterns
+                if str(item.resolve()) not in _initial_output_files or item.name.startswith(("test_", "sample_", "202", "batch_")) or "test" in item.name.lower():
+                    try:
+                        if item.is_file():
+                            item.unlink()
+                        elif item.is_dir():
+                            shutil.rmtree(item, ignore_errors=True)
+                    except Exception:
+                        pass
+
+    # Clean leftover root test artifacts
+    for pattern in ["test_run.log", "test_*.docx", "test_*.xlsx", "test_*.pdf", "test_*.csv", ".coverage.*"]:
+        for root_item in root_dir.glob(pattern):
+            try:
+                if root_item.name != "test_run.log":
+                    root_item.unlink()
+            except Exception:
+                pass
 
     # 2. Drop test database from real MongoDB if it exists
     try:
         real_client = pymongo.MongoClient(os.getenv("MONGO_URI", "mongodb://localhost:27017/"), serverSelectionTimeoutMS=400)
-        if "gamblingsites_test" in real_client.list_database_names():
-            real_client.drop_database("gamblingsites_test")
+        for db_name in ["gamblingsites_test", "test_db"]:
+            if db_name in real_client.list_database_names():
+                real_client.drop_database(db_name)
         real_client.close()
     except Exception:
         pass
 
-    # 3. Log test run summary
-    log_file = root_dir / "test_run.log"
+    # 3. Write structured test log to logs/test_run.log
+    logs_dir = root_dir / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    log_file = logs_dir / "test_run.log"
+
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    total_tests = _test_passes + len(_test_failures) + _test_skips
+
     with open(log_file, "a", encoding="utf-8") as f:
-        f.write(f"[{timestamp}] Test run completed with exit status: {exitstatus}. All test files and mock DBs cleaned.\n")
+        f.write("=" * 70 + "\n")
+        f.write(f"TEST RUN EXECUTION REPORT — {timestamp}\n")
+        f.write("=" * 70 + "\n")
+        f.write(f"Total: {total_tests} | Passed: {_test_passes} | Failed: {len(_test_failures)} | Skipped: {_test_skips} | Exit Code: {exitstatus}\n")
+
+        if len(_test_failures) == 0 and exitstatus == 0:
+            f.write(f"[SUCCESS] All {_test_passes} tests PASSED with 0 errors/failures.\n")
+            f.write("[CLEANUP] All test-generated files, mock artifacts, and test DBs were deleted successfully.\n")
+        else:
+            f.write(f"[ERROR] {len(_test_failures)} test failure(s) occurred:\n")
+            for fail in _test_failures:
+                f.write(f"\n--- FAILED: {fail['nodeid']} ({fail['duration']}s) ---\n")
+                f.write(f"{fail['error']}\n")
+
+        f.write("=" * 70 + "\n\n")

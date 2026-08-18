@@ -1,523 +1,632 @@
-# gamblingwebfind
+# gamblingwebfind — Automated Online Gambling Discovery & Compliance Reporting Pipeline
 
-A high-performance, four-stage Python pipeline for discovering, classifying, and generating compliance reports for online gambling websites.
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.100%2B-009688.svg)](https://fastapi.tiangolo.com/)
+[![MongoDB](https://img.shields.io/badge/MongoDB-8.0-green.svg)](https://www.mongodb.com/)
+[![Ollama](https://img.shields.io/badge/Ollama-Local_AI-black.svg)](https://ollama.ai/)
+[![Playwright](https://img.shields.io/badge/Playwright-Chromium-red.svg)](https://playwright.dev/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+An enterprise-grade, high-performance Python pipeline for discovering, classifying, validating, and generating audit-ready compliance reports for online gambling and illegal wagering websites.
 
 ---
 
-## How It Works — Big Picture
+## 1. PROJECT OVERVIEW
+
+### Elevator Pitch
+**gamblingwebfind** is an end-to-end automated intelligence platform designed to discover online gambling and wagering portals across both live web search indices and historical web archives. By combining high-speed TLS-impersonating fetchers, a 988-keyword heuristic engine, a two-stage local LLM challenge system (Ollama `qwen2.5:3b`), and headless browser screenshot validation, the platform detects illegal betting operators with high accuracy, zero false-positive locks, and automated generation of PDF and Excel compliance reports.
+
+### Key Capabilities
+- **Multi-Source Domain Discovery**: Mined via SearXNG meta-search queries (Stage 0) and Common Crawl parquet datasets (Stage 1).
+- **TLS-Impersonating HTTP Engine**: Uses `Scrapling` with `curl_cffi` Chrome fingerprinting to bypass standard network blocks and anti-bot measures.
+- **Triple-Lock Classification**:
+  1. *988-Keyword Weighted Pre-Screen*: Instant fast-path categorization for high-confidence targets.
+  2. *Dual-Round Local AI Challenge*: Ollama-based Analyst & Validator challenge rounds for ambiguous sites ($2.5 \le \text{Score} < 5.0$).
+  3. *Proof-Required Visual Capture*: Playwright headless screenshotting to visually confirm gambling portals before generating reports.
+- **Dynamic Failure Classification**: Categorizes non-responsive domains into `blocked` (WAF/Cloudflare 403), `dead` (404/DNS failure), or `unconfirmed` (network timeout/Ollama offline) to prevent infinite re-processing loops.
+- **Audit-Ready Reporting & Batch Splitting**: Generates Word (`.docx`), PDF (`.pdf`), and Excel (`.xlsx`) report bundles with clickable hyperlinks, auto-split into target size bounds ($\le 24\text{ MB}$ or $1,000$ links) using `PyMuPDF`.
+- **REST API & Interactive CLI**: Dual control interfaces — FastAPI REST server for programmatic pipelines and an interactive terminal menu (`main.py`).
+
+### Target Users & Use Cases
+- **Regulatory Authorities & Compliance Officers**: Monitor illegal wagering operations, unlicensed sportsbooks, and unapproved betting syndicates.
+- **Cybersecurity & Brand Protection Teams**: Track domain impersonation, unauthorized affiliate networks, and brand infringement.
+- **ISP & Network Infrastructure Admins**: Identify targets for DNS sinkholing, blocklists, and legal takedown requests.
+
+---
+
+## 2. SYSTEM ARCHITECTURE
+
+### Architecture Style
+**gamblingwebfind** is structured as a modular, event-driven multi-stage processing pipeline backed by a central MongoDB data store and asynchronous Python worker pools.
 
 ```
-Stage 0: SearXNG Search          Stage 1: Common Crawl
-(live web, Docker)                (historical parquet index)
-         │                                  │
-         └──────────────┬───────────────────┘
-                        ▼
-              MongoDB: domain_Listed
-              { domain, active, processed:false, added_date }
-                        │
-                        ▼
-              Stage 2: URL Checker
-              • Fetches each domain's HTML
-              • Matches against 500 gambling keywords
-              • >= 3 matches → "gambling"
-              • Stamps processed:true when done
-                        │
-                        ▼
-              MongoDB: checked_domains
-              { status, reason, checked_at, ... }
-                        │  (gambling only)
-                        ▼
-              Stage 3: Screenshot Capture
-              • Playwright headless Chromium
-              • Full page-load wait (networkidle + scroll)
-                        │
-                        ▼
-              output/
-              ├── verify_results.xlsx
-              ├── capture_report_<ts>.docx
-              └── capture_results_<ts>.xlsx
+                  ┌──────────────────────────────────────────────┐
+                  │                 USER INTERFACE               │
+                  │   Interactive CLI (main.py) / FastAPI REST   │
+                  └──────────────────────┬───────────────────────┘
+                                         │
+         ┌───────────────────────────────┴───────────────────────────────┐
+         │                                                               │
+         ▼                                                               ▼
+┌─────────────────────────┐                                   ┌─────────────────────────┐
+│ Stage 0: SearXNG Search │                                   │ Stage 1: Common Crawl   │
+│ Live Web Discovery      │                                   │ Parquet Archive Mining  │
+└────────────┬────────────┘                                   └────────────┬────────────┘
+             │                                                             │
+             └───────────────────────────┬─────────────────────────────────┘
+                                         │
+                                         ▼
+                             ┌──────────────────────┐
+                             │ MongoDB Data Store   │
+                             │  • domain_Listed     │
+                             │  • checked_domains   │
+                             └───────────┬──────────┘
+                                         │
+                                         ▼
+                             ┌──────────────────────┐
+                             │ Stage 2: URL Checker │
+                             │  • Scrapling Fetcher │
+                             │  • Heuristics (988)  │
+                             │  • Ollama 2-Round AI │
+                             │  • Playwright Pool   │
+                             └───────────┬──────────┘
+                                         │
+                                         ▼
+                             ┌──────────────────────┐
+                             │ Stage 3: Exporter    │
+                             │  • Report Generator  │
+                             │  • Batch Splitter    │
+                             └──────────────────────┘
+```
+
+### Component Responsibilities
+
+1. **`searxng_search.py` (Stage 0)**: Runs SearXNG via Docker to execute automated keyword search queries across Google, Bing, and DuckDuckGo, extracting candidate domains.
+2. **`find_gambling.py` & `historical_common_crawl.py` (Stage 1)**: Queries AWS Common Crawl columnar parquet indexes to discover historical gambling landers.
+3. **`db/mongo_client.py` (Data Persistence Layer)**: Manages MongoDB connections, domain normalization (using `.removeprefix("www.")`), state tracking (`active`, `processed`, `status`), and retry policies.
+4. **`checking_url/` (Stage 2 Verification Engine)**:
+   - `fetcher.py`: Asynchronously fetches target pages while impersonating browser TLS fingerprints; classifies network failures (`blocked`, `dead`, `connection_failed`).
+   - `classifier.py`: Evaluates HTML against 988 keywords and regex signals, applying negative archetype gates (education, news, hospital) to suppress false positives.
+   - `ai_classifier.py`: Drives local Ollama LLM (`qwen2.5:3b`) using Analyst and Validator models to resolve ambiguous sites.
+   - `runner.py`: Orchestrates parallel async task queues, progress reporting (`tqdm`), and immediate visual proof capture via `BrowserPool`.
+5. **`export_domains/` (Stage 3 Reporting Engine)**:
+   - `exporter.py`: Compiles verified gambling results into Word documents, screen-optimized PDFs, and Excel spreadsheets.
+   - `screenshot.py`: Manages Playwright browser instances for capturing full-page screenshots.
+   - `batch_splitter.py`: Splits large PDF and Excel export packages into compliant sub-24MB batches.
+6. **`api/` (API Service)**: Exposes RESTful endpoints (`FastAPI`) for remote pipeline execution, domain ingestion, status monitoring, and report downloads.
+
+### Data Flow
+1. Domain candidates are discovered (Stage 0/1) or imported via CSV/API into MongoDB collection `domain_Listed` (`processed: false`).
+2. Stage 2 worker pool fetches domains, evaluates heuristics/AI, and captures screenshot proof if categorized as `gambling`.
+3. Results are saved to MongoDB collection `checked_domains`, and original source domain in `domain_Listed` is updated (`processed: true`).
+4. Stage 3 builds PDF/Excel compliance packages for unexported gambling sites and marks them `exported: true`.
+
+### Technology Justification
+
+| Component | Choice | Reason for Choice |
+|:---|:---|:---|
+| **Language** | Python 3.11+ | Unmatched ecosystem for web crawling, async I/O (`asyncio`), data analysis, and AI integrations. |
+| **HTTP Engine** | `Scrapling` + `curl_cffi` | Provides browser TLS fingerprint impersonation to bypass Cloudflare and WAF protections. |
+| **Local LLM** | Ollama (`qwen2.5:3b`) | Eliminates external API costs and data privacy concerns while offering high-speed local inference. |
+| **Browser Engine** | Playwright (Chromium) | Reliable headless browser automation for JavaScript rendering and full-page visual capture. |
+| **Database** | MongoDB | Flexible schema-less JSON storage ideal for varying HTTP metadata, headers, and classification logs. |
+| **API Framework** | FastAPI + Uvicorn | Asynchronous Python REST framework with automatic OpenAPI documentation and high request throughput. |
+
+---
+
+## 3. ARCHITECTURE DIAGRAM
+
+### Mermaid System Flowchart
+
+```mermaid
+flowchart TD
+    subgraph Discovery ["1. Discovery Layer"]
+        S0["searxng_search.py<br/>(Live Web Search via Docker)"]
+        S1["find_gambling.py<br/>(Common Crawl Parquet Index)"]
+        CSV["CSV / Excel Manual Import"]
+    end
+
+    subgraph Storage ["2. Database Layer"]
+        M1[("MongoDB: domain_Listed<br/>{domain, active, processed, source}")]
+        M2[("MongoDB: checked_domains<br/>{status, reason, screenshot_taken, exported}")]
+    end
+
+    subgraph Verification ["3. Stage 2: URL Checker (checking_url)"]
+        RUN["runner.py (Orchestrator)"]
+        FET["fetcher.py (TLS Impersonator)"]
+        CLA["classifier.py (988 Keywords & Heuristics)"]
+        AI["ai_classifier.py (Ollama qwen2.5:3b LLM)"]
+        PWB["screenshot.py (Playwright BrowserPool)"]
+    end
+
+    subgraph Reporting ["4. Stage 3: Compliance Exporter (export_domains)"]
+        EXP["exporter.py (Word/PDF/Excel Builder)"]
+        SPL["batch_splitter.py (PyMuPDF Batch Splitter)"]
+    end
+
+    S0 & S1 & CSV -->|Insert candidates| M1
+    M1 -->|Fetch unprocessed active domains| RUN
+    RUN --> FET
+    FET -- "HTTP HTML Body" --> CLA
+    FET -- "Network Failure (403/404/Refused)" --> RUN
+
+    CLA -- "Score >= 5.0" --> PWB
+    CLA -- "Score < 2.5" --> RUN
+    CLA -- "Score 2.5 - 5.0" --> AI
+    AI -- "Confirmed Gambling" --> PWB
+    AI -- "Regular / Offline" --> RUN
+
+    PWB -- "Screenshot Captured (.jpg)" --> RUN
+    RUN -->|Save final status & reason| M2
+    RUN -->|Mark processed=True| M1
+
+    M2 -->|Query unexported gambling domains| EXP
+    EXP --> SPL
+    SPL -->|Output Audit Bundles| OUT["output/Batches/<br/>(PDF & Excel Reports)"]
+```
+
+### ASCII Fallback Diagram
+
+```
++-----------------------------------------------------------------------------+
+|                               DISCOVERY LAYER                               |
+|   SearXNG Docker Search   |   Common Crawl Mining   |   CSV / API Import   |
++--------------------------------───┬─────────────────────────────────────────+
+                                    │
+                                    v
++-----------------------------------------------------------------------------+
+|                              MONGODB DATASTORE                              |
+|   domain_Listed (Source Queue)       <--->       checked_domains (Results)  |
++--------------------------------───┬─────────────────────────────────────────+
+                                    │
+                                    v
++-----------------------------------------------------------------------------+
+|                        STAGE 2: VERIFICATION ENGINE                         |
+|   [fetcher.py] ──> [classifier.py] ──> [ai_classifier.py] ──> [Playwright]  |
+|   (Scrapling TLS)   (988 Keywords)     (Ollama LLM)          (Screenshots)  |
++--------------------------------───┬─────────────────────────────────────────+
+                                    │
+                                    v
++-----------------------------------------------------------------------------+
+|                        STAGE 3: COMPLIANCE EXPORTER                         |
+|   [exporter.py] (Docx/PDF/Excel)   ───>   [batch_splitter.py] (PyMuPDF)     |
++--------------------------------───┬─────────────────────────────────────────+
+                                    │
+                                    v
+                        output/Batches/ (Audit Reports)
 ```
 
 ---
 
-## Prerequisites
+## 4. STEP-BY-STEP "HOW IT WORKS"
 
-- Python 3.11+
-- MongoDB running locally on port 27017
-- Docker Desktop (for Stage 0 — SearXNG)
+### End-to-End Processing Lifecycle
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Admin as Operator / CLI / API
+    participant DB as MongoDB
+    participant Runner as runner.py
+    participant Fetcher as fetcher.py
+    participant Heuristic as classifier.py
+    participant LLM as ai_classifier.py (Ollama)
+    participant Browser as screenshot.py (Playwright)
+    participant Exporter as exporter.py
+
+    Admin->>DB: Seed candidate domains (Stage 0/1/Import)
+    Admin->>Runner: Execute run(concurrency=20, mode='new')
+    Runner->>DB: Query active unprocessed domains
+    DB-->>Runner: Return batch of domain documents
+
+    loop For Each Domain (Concurrently)
+        Runner->>Fetcher: fetch(url, timeout=10s)
+        Fetcher-->>Runner: FetchResult (HTML or failure_type)
+        
+        alt Network Failure (403 / 404 / Refused)
+            Runner->>DB: write_result(status='blocked'/'dead', screenshot_taken=False)
+        else HTTP 200 OK
+            Runner->>Heuristic: classify(html, keywords)
+            Heuristic-->>Runner: Score & Matched Keywords
+
+            alt Score >= 5.0 (Instant Gambling)
+                Runner->>Browser: capture_url(url)
+                Browser-->>Runner: screenshot.jpg
+                Runner->>DB: write_result(status='gambling', screenshot_taken=True)
+            else Score < 2.5 (Instant Regular)
+                Runner->>DB: write_result(status='regular', screenshot_taken=False)
+            else Score 2.5 - 5.0 (Needs AI)
+                Runner->>LLM: classify_with_challenge(html, keywords)
+                LLM-->>Runner: Verdict (gambling/regular/unconfirmed)
+                
+                alt AI Verdict = Gambling
+                    Runner->>Browser: capture_url(url)
+                    Browser-->>Runner: screenshot.jpg
+                    Runner->>DB: write_result(status='gambling', screenshot_taken=True)
+                else AI Verdict = Regular
+                    Runner->>DB: write_result(status='regular', screenshot_taken=False)
+                else AI Timeout / Offline
+                    Runner->>DB: write_result(status='unconfirmed', screenshot_taken=False)
+                end
+            end
+        end
+    end
+
+    Admin->>Exporter: Trigger Stage 3 Export
+    Exporter->>DB: Query gambling domains (exported=False, screenshot_taken=True)
+    Exporter-->>Admin: Generate report.pdf, report.xlsx, and sub-24MB batches
+```
+
+#### Step 1: Ingestion & Seeding
+- **Action**: Discovery engines (`searxng_search.py`, `find_gambling.py`) or manual CSV uploaders push domain strings into MongoDB collection `domain_Listed`.
+- **Handling Component**: `db/mongo_client.py` (`seed_discovered_domains` / `seed_from_csv`).
+- **Domain Normalization**: Strips protocol schemes and uses `str.removeprefix("www.")` to prevent domain corruption (e.g., `win88casino.com` is preserved correctly).
+- **Failure Risk**: Malformed inputs or network drops to MongoDB; mitigated by retry logic and `$setOnInsert` operations to preserve historical check state.
+
+#### Step 2: High-Speed Async Fetching
+- **Action**: `runner.py` pulls active unprocessed domains and dispatches them across an asynchronous worker pool restricted by a semaphore (`MAX_CONCURRENT_FETCHES`).
+- **Handling Component**: `checking_url/fetcher.py` (`fetch`).
+- **TLS Impersonation**: Uses `Scrapling` with `curl_cffi` to mimic Chrome browser TLS signatures.
+- **Failure Risk**: HTTP 403 WAF blocks, HTTP 404 dead sites, or connection drops; handled by `_classify_failure` which tags `blocked`, `dead`, or `connection_failed`.
+
+#### Step 3: Heuristic Pre-Screening
+- **Action**: Received HTML is evaluated against a 988-keyword dictionary (`gambling_top_988_keywords.json`).
+- **Handling Component**: `checking_url/classifier.py` (`classify`).
+- **Scoring Logic**:
+  - `STRONG` signals (e.g., *satta matka*, *casino live*, *betting id*) weighted at 2.0.
+  - `WEAK` signals weighted at 1.0.
+  - Hospitality, education, news, and e-commerce archetype filters subtract score weight to prevent false positives.
+- **Decision Outcomes**:
+  - $\text{Score} \ge 5.0 \implies \text{Fast-path gambling}$ (bypasses LLM).
+  - $\text{Score} < 2.5 \implies \text{Instant regular}$ (bypasses LLM).
+  - $2.5 \le \text{Score} < 5.0 \implies \text{Needs AI}$ (escalated to Stage 4).
+
+#### Step 4: Local AI Challenge Round
+- **Action**: Escalated sites are sent to local Ollama LLM (`qwen2.5:3b`).
+- **Handling Component**: `checking_url/ai_classifier.py` (`classify_with_challenge`).
+- **Two-Round Validation**:
+  - *Round 1 (Analyst)*: Evaluates title, meta descriptions, and visible text.
+  - *Round 2 (Validator)*: Challenges positive verdicts to verify presence of actual wagering features vs. news articles or hospitality mentions.
+- **Failure Risk**: Ollama offline or high response latency; mitigated by dynamic exponential moving average (`EMA`) timeout control, falling back safely to `status="unconfirmed"` for later retry.
+
+#### Step 5: Visual Evidence Capture
+- **Action**: Domains classified as `gambling` are passed to headless Playwright browser workers.
+- **Handling Component**: `export_domains/screenshot.py` (`BrowserPool.capture_url`).
+- **Execution**: Full-page render, automated scrolling to trigger lazy-loaded images, network-idle waiting, and save to `output/screenshots/<domain_hash>.jpg`.
+- **Validation**: `is_valid_screenshot()` verifies file existence, size ($>500\text{ bytes}$), and image header integrity.
+
+#### Step 6: MongoDB Result Sync
+- **Action**: Verification results are synced to MongoDB.
+- **Handling Component**: `db/mongo_client.py` (`write_result`).
+- **State Change**: Inserts complete record in `checked_domains` and sets `processed: true` in `domain_Listed`.
+
+#### Step 7: Compliance Report Generation & Batching
+- **Action**: Compiles unexported verified gambling domains into report packages.
+- **Handling Component**: `export_domains/exporter.py` & `export_domains/batch_splitter.py`.
+- **Outputs**:
+  - `report.docx` / `report.pdf`: Visual document containing domain details, classification reasons, timestamp, and embedded screenshot.
+  - `report.xlsx`: Two-sheet Excel workbook (`Captured Domains` + `Failed Domains`) with clickable hyperlinks.
+  - `Batches/`: Automatically split sub-24MB PDF & Excel files for email compliance distribution.
 
 ---
 
-## Installation
+## 5. FOLDER / FILE STRUCTURE
 
-### 1. Clone the repository
+```
+gamblingwebfind/
+├── api/                        # FastAPI REST Server
+│   ├── routers/
+│   │   └── pipeline.py         # REST Endpoints for ingestion, pipeline control & exports
+│   └── main.py                 # FastAPI Application Initialization
+├── checking_url/               # Stage 2: URL Verification Engine
+│   ├── __init__.py
+│   ├── ai_classifier.py        # Ollama LLM Dual-Round Challenge Classifier
+│   ├── classifier.py           # 988-Keyword Heuristic Pre-Classifier & Archetype Filters
+│   ├── fetcher.py              # TLS-Impersonating HTTP Engine & Failure Classifier
+│   └── runner.py               # Async Pipeline Conductor & Worker Pool Manager
+├── db/                         # Data Access Layer
+│   ├── __init__.py
+│   └── mongo_client.py         # MongoDB Client, Schema Normalization & Atomic Updates
+├── export_domains/             # Stage 3: Compliance Exporter & Reporting Engine
+│   ├── __init__.py
+│   ├── batch_splitter.py       # PyMuPDF Size-Bounded PDF/Excel Batch Splitter
+│   ├── exporter.py             # Word, PDF & Excel Report Generator
+│   └── screenshot.py           # Playwright Async BrowserPool Screenshot Manager
+├── logs/                       # Test & Runtime Logs
+│   └── test_run.log            # Automated Pytest Run Audit Log
+├── output/                     # Generated Artifacts & Screenshots (Ignored by Git)
+│   ├── Batches/                # Split PDF/Excel Compliance Bundles
+│   └── screenshots/            # Verified Gambling Site Screenshots (.jpg)
+├── project_sup/                # Supporting Scripts & Helpers
+│   └── searxng_search.py       # Stage 0: SearXNG Search Query Generator & Crawler
+├── tests/                      # Automated Pytest Suite (100% Pass Rate)
+│   ├── conftest.py             # Pytest Fixtures, Mocking & Automated Teardown
+│   ├── test_api.py             # FastAPI Endpoint Integration Tests
+│   ├── test_end_to_end.py      # End-to-End Pipeline Execution Tests
+│   ├── test_helpers_and_import.py # Utility & Helper Unit Tests
+│   ├── test_stage0_keywordssearch.py # SearXNG & Query Builder Tests
+│   ├── test_stage1_domain_fetch.py   # Common Crawl Parquet Parser Tests
+│   ├── test_stage2_checking_url.py   # Heuristic, AI & Fetcher Tests
+│   └── test_stage3_export_domains.py # Exporter & Batch Splitter Tests
+├── .env.example                # Configuration Environment Variable Template
+├── .gitignore                  # Git Ignore Rules
+├── find_gambling.py            # Stage 1: Common Crawl Discovery Script
+├── gambling_top_944_keywords.json # Master 988-Keyword JSON Dictionary
+├── main.py                     # Interactive CLI Terminal Menu
+├── Modelfile                   # Ollama Analyst Model System Prompt & Parameters
+├── Modelfile.validator         # Ollama Validator Model System Prompt & Parameters
+├── pytest.ini                  # Pytest Configuration
+├── README.md                   # Project Documentation
+└── requirements.txt            # Python Package Dependencies
+```
 
+---
+
+## 6. SETUP & INSTALLATION
+
+### Prerequisites
+- **Operating System**: Windows 10/11, macOS, or Linux (Ubuntu 20.04+).
+- **Python**: Version `3.11` or `3.12`.
+- **MongoDB**: Version `6.0` or `8.0` running locally on port `27017` (or remote MongoDB Atlas instance).
+- **Ollama**: Local AI runner (Required for Stage 2 AI evaluation). Download from [ollama.ai](https://ollama.ai/).
+- **Docker Desktop**: Required only for Stage 0 SearXNG search execution.
+
+---
+
+### Step-by-Step Installation
+
+#### 1. Clone the Repository
 ```bash
 git clone https://github.com/nhiteshbohra/gamblingwebfind.git
 cd gamblingwebfind
 ```
 
-### 2. Install Python dependencies
-
+#### 2. Create and Activate a Virtual Environment
 ```bash
+# Windows (PowerShell)
+python -m venv venv
+.\venv\Scripts\Activate.ps1
+
+# Linux / macOS
+python3 -m venv venv
+source venv/bin/activate
+```
+
+#### 3. Install Python Dependencies
+```bash
+pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-### 3. Install Playwright browser
-
+#### 4. Install Playwright Browsers
 ```bash
 playwright install chromium
 ```
 
-> **Only if you enable `STEALTH_FALLBACK=true` in `.env`** (Cloudflare bypass):
-> ```bash
-> scrapling install
-> ```
-
-### 4. Set up `.env` configuration
-
-Copy the example file and edit as needed:
-
+#### 5. Configure Environment Variables
+Copy `.env.example` to `.env`:
 ```bash
+# Windows
 copy .env.example .env
+
+# Linux / macOS
+cp .env.example .env
 ```
 
-Minimum required `.env` (defaults work for local MongoDB):
-
+Review `.env` settings:
 ```env
 MONGO_URI=mongodb://localhost:27017/
 MONGO_DB_NAME=gamblingsites
-MONGO_COLLECTION=domain_Listed
-CHECKED_COLLECTION=checked_domains
+MAX_CONCURRENT_FETCHES=20
+FETCH_TIMEOUT=10
+OLLAMA_HOST=http://localhost:11434
+OLLAMA_MODEL=qwen2.5:3b
 ```
 
-All other values have sensible defaults — see `.env.example` for the full list.
-
-### 5. Install Docker Desktop *(for Stage 0 only)*
-
-Download from: https://www.docker.com/products/docker-desktop
-
-> Stage 0 will auto-start Docker containers when you select Option 0 from the menu. You do NOT need to run `docker-compose` manually.
+#### 6. Initialize Ollama Models
+Ensure Ollama is running, then pull and create custom model instances:
+```bash
+ollama pull qwen2.5:3b
+ollama create qwen2.5:3b -f Modelfile
+ollama create qwen2.5:3b-validator -f Modelfile.validator
+```
 
 ---
 
-## Running the Project
+### Running the Application
 
+#### Option A: Interactive CLI Menu
+Launch the CLI interface to run any pipeline stage interactively:
 ```bash
 python main.py
 ```
-
-You will see the interactive menu:
-
 ```
-=======================================================
-           GAMBLINGWEBFIND PROCESS MENU
-=======================================================
-0. SearXNG Keyword Search (Stage 0) — Docker
-1. Keywords Search in Domain Fetch (Stage 1) — Common Crawl
-2. Checking URL (Stage 2)
-3. Capture URL (Stage 3)
-4. Both Checking & Capture URL (Stage 2 + Stage 3)
-5. Exit
-=======================================================
-Select an option (0-5):
+============================================================
+              GAMBLING WEB FIND - CONTROL MENU             
+============================================================
+  0. Stage 0: Search Web via SearXNG (Live Web)
+  1. Stage 1: Find Domains via Common Crawl (Historical)
+  2. Stage 2: Check URLs & Capture Screenshots
+  3. Stage 3: Export Domain Reports & Split Batches
+  4. Run Full Pipeline (Stages 0 -> 1 -> 2 -> 3)
+  5. Seed Database from CSV / Excel File
+  6. Exit
+============================================================
 ```
 
----
-
-## Menu Options — Detailed
-
-### Option 0 — SearXNG Keyword Search *(Stage 0)*
-
-Searches keywords on real search engines (Google, Bing, DuckDuckGo) via SearXNG running in Docker, extracts all result domains, and saves them to MongoDB.
-
-**What happens automatically:**
-1. Checks if SearXNG is already running on port 8080
-2. If not → runs `docker-compose up -d` from `keywordssearch/` folder
-3. Waits up to 30 seconds for containers to be ready
-4. Searches your keywords across multiple pages
-5. Saves new domains to `domain_Listed` with `processed: false`
-
-**Usage:**
-```
-Select an option (0-5): 0
-
-Enter keyword(s) to search (single or comma-separated, e.g. bet, casino, poker):
-> casino, poker, betting, slot, spin
-```
-
-**Output:** New domains added to MongoDB `domain_Listed`
-
----
-
-### Option 1 — Common Crawl Domain Fetch *(Stage 1)*
-
-Searches the Common Crawl web archive (300M+ pages) for domains whose names contain your keywords. Performs DNS + HTTP probe on each domain to check if it's alive.
-
-**Usage:**
-```
-Select an option (0-5): 1
-
-Enter keyword(s) to search (single or comma-separated, e.g. bet, casino, slot, spin):
-> bet, casino, slot, spin, win, play
-```
-
-**Output:** Domains written to `domain_Listed` with:
-- `active: true` — reachable domain
-- `active: false` — DNS failed / dead
-- `active: "blocked"` — WAF / Cloudflare blocked
-- `processed: false` — ready for Stage 2
-
-> **Checkpoint system:** If interrupted, re-running with the same keywords resumes from the last completed batch automatically.
-
----
-
-### Option 2 — Checking URL *(Stage 2)*
-
-Fetches the HTML of every unprocessed active domain and classifies it as a gambling site or not.
-
-**Filter:** Only picks up `domain_Listed` where `active: true` AND `processed != true`
-
-**Classification rules:**
-- **gambling** — 3 or more gambling keywords found in page HTML
-- **regular** — page reachable but fewer than 3 keyword matches
-- **blocked** — HTTP 403/429 or Cloudflare challenge detected
-- **dead** — DNS failed, connection refused, or parked page
-
-**After each domain is checked:**
-- Result written to `checked_domains`
-- Source document stamped `processed: true` — will never be re-checked
-
-**Output:** `output/verify_results.xlsx` with 4 sheets:
-
-| Sheet | Contents |
-|-------|----------|
-| Gambling | Confirmed gambling operators |
-| Blocked | WAF / Cloudflare blocked |
-| Dead | Unreachable / parked |
-| Regular | Reachable but not gambling |
-
----
-
-### Option 3 — Capture URL *(Stage 3)*
-
-Takes full screenshots of every confirmed gambling domain and generates Word + Excel reports.
-
-**Filter:** Only picks up `checked_domains` where `status: "gambling"` AND `screenshot_taken: false`
-
-**Screenshot strategy (3 layers for complete pages):**
-1. Navigate with progressive wait strategy (domcontentloaded → load → commit per retry)
-2. `networkidle` wait — pauses until all XHR/fetch requests finish (catches lazy-loaded content)
-3. Scroll to bottom → back to top — triggers viewport-lazy images
-4. Settle delay — 1.0s → 1.5s → 2.0s per retry for slow sites
-
-**Output:**
-- `output/capture_report_<YYYY-MM-DD_HH-MM-SS>.docx` — Word document, 2 targets per page with clickable URLs and screenshots
-- `output/capture_results_<YYYY-MM-DD_HH-MM-SS>.xlsx` — Excel workbook (Captured / Failed sheets)
-
-> Temporary JPEG files are automatically deleted after being embedded into the Word report.
-
----
-
-## Menu Options — Detailed
-
-### Option 0 — SearXNG Keyword Search *(Stage 0)*
-
-Searches keywords on real search engines (Google, Bing, DuckDuckGo) via SearXNG running in Docker, extracts all result domains, and saves them to MongoDB.
-
-**What happens automatically:**
-1. Checks if SearXNG is already running on port 8080
-2. If not → runs `docker-compose up -d` from `keywordssearch/` folder
-3. Waits up to 30 seconds for containers to be ready
-4. Searches your keywords across multiple pages
-5. Saves new domains to `domain_Listed` with `processed: false`
-
-**Usage:**
-```
-Select an option (0-4): 0
-
-Enter keyword(s) to search (single or comma-separated, e.g. bet, casino, poker):
-> casino, poker, betting, slot, spin
-```
-
-**Output:** New domains added to MongoDB `domain_Listed`
-
----
-
-### Option 1 — Common Crawl Domain Fetch *(Stage 1)*
-
-Searches the Common Crawl web archive for domains whose names contain your keywords. Performs DNS + HTTP probe on each domain to check if it's alive.
-
-**Usage:**
-```
-Select an option (0-4): 1
-
-Enter keyword(s) to search (single or comma-separated, e.g. bet, casino, slot, spin):
-> bet, casino, slot, spin, win, play
-```
-
-**Output:** Domains written to `domain_Listed` with:
-- `active: true` — reachable domain
-- `active: false` — DNS failed / dead
-- `active: "blocked"` — WAF / Cloudflare blocked
-- `processed: false` — ready for Stage 2
-
-> **Checkpoint system:** If interrupted, re-running with the same keywords resumes from the last completed batch automatically.
-
----
-
-### Option 2 — Checking URL *(Stage 2)*
-
-Fetches the HTML of every unprocessed active domain and classifies it as a gambling site or not.
-
-**Filter:** Only picks up `domain_Listed` where `active: true` AND `processed != true`
-
-**Classification rules:**
-- **gambling** — 3 or more gambling keywords found in page HTML
-- **regular** — page reachable but fewer than 3 keyword matches
-- **blocked** — HTTP 403/429 or Cloudflare challenge detected
-- **dead** — DNS failed, connection refused, or parked lander
-
-**Deep Crawl Link Extraction:**
-When a page is classified as `gambling` and contains 3+ outbound links, `checking_url/deep_crawl.py` extracts external domain links (filtering out social media, ad networks, and same-domain links) and seeds them back into `domain_Listed` with `source: "deep_crawl"` for future checking.
-
-**After each domain is checked:**
-- Result written to `checked_domains`
-- Source document stamped `processed: true` — will never be re-checked
-
-**Output:** `output/verify_results.xlsx` with 4 sheets (Gambling, Blocked, Dead, Regular) featuring clickable `https://` hyperlinks.
-
----
-
-### Option 3 — Capture URL *(Stage 3)*
-
-Takes full screenshots of confirmed gambling domains with live double-layer verification, and generates Word (.docx), PDF (.pdf), and Excel (.xlsx) reports.
-
-**Filter:** Only picks up `checked_domains` where `status: "gambling"` AND `screenshot_taken: false`
-
-**Double-Layer Verification Strategy:**
-1. **Layer 1 (Status & 403 WAF Check)**: Evaluates response codes (403, 429, 404, 500+) and text markers.
-2. **Layer 2 (Live Keyword Re-check)**: Classifies rendered HTML in browser memory (reclassifies non-gambling as `regular`).
-3. **Layer 3 (Screenshot & Clean Save)**: Saves screenshots only for confirmed sites, deletes temporary files automatically.
-
-**Export Format Options:**
-When running Option 3, you can choose:
-1. **Single Combined Files** *(default)*: 1 Master Word document, 1 Master PDF, and 1 Master Excel workbook.
-2. **Batched Deliverables**: Splits domains into batch folders (e.g. `batch_001`, `batch_002` of 20, 40, or 50 items each).
-
-
-
----
-
-### Option 4 — Both Checking & Capture
-
-Runs Stage 2 then Stage 3 back-to-back automatically.
-
----
-
-## Project File Structure
-
-```
-gamblingwebfind/
-│
-├── .env                              ← Your config (not committed to git)
-├── .env.example                      ← Template with all variables
-├── main.py                           ← Entry point — interactive menu
-├── gambling_top_500_keywords.json    ← 500 gambling signal keywords
-├── requirements.txt                  ← Python dependencies
-│
-├── keywordssearch/                   ← Stage 0 — SearXNG web search
-│   ├── searxng_search.py             ← Docker auto-start + search + save to MongoDB
-│   ├── docker-compose.yml            ← Redis + SearXNG container definitions
-│   └── searxng/
-│       └── settings.yml              ← SearXNG config (JSON API, web engines only)
-│
-├── keywordsindomainfetch/            ← Stage 1 — Common Crawl domain extraction
-│   ├── find_domains.py               ← DuckDB query → DNS probe → MongoDB upsert
-│   └── manifests/                    ← Cached CC crawl manifest files
-│
-├── db/                               ← Shared MongoDB layer
-│   └── mongo_client.py               ← All DB access: connections, queries, write_result(), seed_discovered_domains()
-│
-├── checking_url/                     ← Stage 2 — URL fetching & classification
-│   ├── runner.py                     ← Orchestrator (async fetch + classification + deep crawl hook)
-│   ├── fetcher.py                    ← Two-tier HTTP fetcher (Fast AsyncFetcher + StealthyFetcher)
-│   ├── classifier.py                 ← Keyword matcher & parked lander detector
-│   └── deep_crawl.py                 ← Aggregator outbound link extractor
-│
-├── capture_url/                      ← Stage 3 — Screenshot capture & reporting
-│   ├── runner.py                     ← Orchestrator (Playwright BrowserPool)
-│   ├── screenshot.py                 ← Page capture with full-load strategy
-│   ├── excel_exporter.py             ← MongoDB → Excel workbooks (clickable links)
-│   └── docx_report_generator.py      ← MongoDB → Word/PDF reports (2 per page, clickable links)
-│
-└── project_sup/                      ← Project support & helper scripts
-    └── helping_code/
-        ├── audit_db.py               ← Database health check & interactive/automated cleanup
-        ├── cleanup_db.py             ← Wrapper delegating to audit_db.py --fix
-        ├── compare_dbs.py            ← Interactive tool to compare & sync domains between two DBs
-        ├── compare_processed_domains.py.py ← Syncs processed=True flag for domains in checked_domains
-        ├── batch_splitter.py         ← Splits CSV and PDF reports into batch subfolders
-        ├── import_output_excel.py    ← Bulk import existing Excel data into MongoDB
-        ├── merge_pdfs.py             ← PDF merger tool
-        └── arrange_docx_report.py    ← Re-arrange existing Word report (2 per page, batched)
-```
-
----
-
-## MongoDB Collections & Schema Design
-
-### `domain_Listed` — Source of domains for Stage 2
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `_id` | string | Domain name — primary key |
-| `domain` | string | e.g. `"bet365.com"` |
-| `active` | bool/string | `true` / `false` / `"blocked"` |
-| `processed` | bool | `false` on insert → `true` after Stage 2 checks it |
-| `added_date` | string | First import date `YYYY-MM-DD` — set once via `$setOnInsert` |
-| `source` | string | Origin e.g. `"searxng_search"`, `"common_crawl"`, `"deep_crawl"` |
-| `discovered_from` | string | Aggregator domain that contained the link (optional) |
-
-### `checked_domains` — Minimal classification results
-
-| Field | Type | Present On | Description |
-|-------|------|------------|-------------|
-| `_id` | string | All docs | Domain name — primary key |
-| `domain` | string | All docs | Same as `_id` |
-| `url` | string | All docs | Full URL e.g. `"https://bet365.com"` |
-| `status` | string | All docs | `"gambling"` / `"regular"` / `"blocked"` / `"dead"` |
-| `reason` | array | All docs | Matched keyword signals |
-| `added_date` | string | All docs | First import date `YYYY-MM-DD` |
-| `screenshot_taken` | bool | `gambling` only | `true` after successful screenshot |
-| `screenshot_failed_reason` | string | `gambling` only | Error reason if capture failed, else `null` |
-| `exported` | bool | Exported docs only | `true` once included in an exported report |
-| `exported_at` | string | Exported docs only | Export date `YYYY-MM-DD` |
-
----
-
-## Utility & Support Scripts
-
-These standalone tools are located in `project_sup/helping_code/` and run directly.
-
-### Database Health Check & Schema Cleanup
-
-Audits MongoDB collections for bloat or schema violations and interactively offers to repair them:
-
+#### Option B: REST API Server
+Start the FastAPI server:
 ```bash
-python project_sup/helping_code/audit_db.py
+uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
 ```
+Access interactive API documentation at: [http://localhost:8000/docs](http://localhost:8000/docs)
 
-To run non-interactively in automated pipelines:
+---
 
+### Running Automated Tests
+Run the complete Pytest suite (54 tests):
 ```bash
-python project_sup/helping_code/audit_db.py --fix
-# OR
-python project_sup/helping_code/cleanup_db.py
+python -m pytest
+```
+> **Note**: Automated test execution automatically snapshots the filesystem, drops temporary test databases in MongoDB (`gamblingsites_test`), wipes test artifacts from `output/`, and writes execution summaries to `logs/test_run.log`.
+
+---
+
+## 7. API / MODULE REFERENCE
+
+### Key API Endpoints (`FastAPI`)
+
+#### 1. Pipeline Execution
+`POST /api/v1/pipeline/run`
+- **Description**: Triggers asynchronous pipeline stage execution.
+- **Request Body**:
+  ```json
+  {
+    "stage": 2,
+    "concurrency": 20,
+    "limit": 100,
+    "mode": "new"
+  }
+  ```
+- **Response**:
+  ```json
+  {
+    "status": "success",
+    "message": "Stage 2 execution completed.",
+    "stats": {
+      "gambling": 14,
+      "regular": 78,
+      "blocked": 3,
+      "dead": 5,
+      "screenshots_taken": 14
+    }
+  }
+  ```
+
+#### 2. Domain Seeding
+`POST /api/v1/pipeline/seed`
+- **Description**: Ingests candidate domains into `domain_Listed`.
+- **Request Body**:
+  ```json
+  {
+    "domains": ["win88casino.com", "bet365.com", "example-news.com"],
+    "source": "manual_api"
+  }
+  ```
+- **Response**:
+  ```json
+  {
+    "status": "success",
+    "inserted": 3,
+    "reset": 0
+  }
+  ```
+
+#### 3. Trigger Export
+`POST /api/v1/pipeline/export`
+- **Description**: Compiles unexported gambling domains into report packages and batch splits them.
+- **Response**:
+  ```json
+  {
+    "status": "success",
+    "exported_count": 14,
+    "batches_created": 1,
+    "output_dir": "output/Batches/20260819_040000"
+  }
+  ```
+
+---
+
+### Key Python Module Functions
+
+#### `checking_url.classifier.classify(html: str, url: str, keywords: set) -> tuple[str, list[str]]`
+- **Inputs**: HTML document body string, URL string, set of gambling keywords.
+- **Outputs**: Tuple of `(decision, matched_keywords)` where decision is `"gambling"`, `"regular"`, or `"needs_ai"`.
+
+#### `checking_url.ai_classifier.classify_with_challenge(html: str, url: str, matched_keywords: list, fast_mode: bool) -> dict`
+- **Inputs**: HTML text, domain URL, pre-matched keyword list, fast-mode flag.
+- **Outputs**: Verdict dictionary `{"verdict": "gambling"|"regular"|"unconfirmed", "reason": "...", "confidence": 0.95}`.
+
+#### `export_domains.batch_splitter.create_batches(pdf_path: str, excel_path: str, output_dir: str) -> list[str]`
+- **Inputs**: Absolute paths to compiled PDF and Excel reports, destination batch folder.
+- **Outputs**: List of created batch file paths bounded by $\le 24\text{ MB}$ or $1,000$ links per file.
+
+---
+
+## 8. DATA MODEL
+
+### Entity Relationship Diagram (`MongoDB`)
+
+```mermaid
+erDiagram
+    domain_Listed ||--o| checked_domains : "evaluated to"
+    
+    domain_Listed {
+        string _id "Primary Key (Domain Name)"
+        string domain "Normalized Domain"
+        boolean active "Candidate Active Flag"
+        boolean processed "Processing Complete Status"
+        string source "Discovery Source (searxng / common_crawl / manual)"
+        string block_reason "Reason if deactivated"
+        string added_date "ISO Date String"
+    }
+
+    checked_domains {
+        string _id "Primary Key (Domain Name)"
+        string domain "Normalized Domain"
+        string url "Full Target URL (https://...)"
+        string status "gambling | regular | blocked | dead | unconfirmed"
+        string reason "Detailed Classification Reason"
+        boolean screenshot_taken "True if visual proof captured"
+        string screenshot_failed_reason "Error detail if screenshot failed"
+        boolean exported "True if included in exported report"
+        string exported_at "Export Timestamp"
+        string checked_at "Verification Timestamp"
+    }
+```
+
+### Collection Specifications
+
+#### 1. `domain_Listed` (Source Queue Collection)
+Stores raw discovered candidate domains pending evaluation.
+```json
+{
+  "_id": "win88casino.com",
+  "domain": "win88casino.com",
+  "active": true,
+  "processed": false,
+  "source": "searxng_search",
+  "added_date": "2026-08-19"
+}
+```
+
+#### 2. `checked_domains` (Results & Audit Collection)
+Stores final verified classification details, AI evaluation notes, and screenshot export state.
+```json
+{
+  "_id": "win88casino.com",
+  "domain": "win88casino.com",
+  "url": "https://win88casino.com",
+  "status": "gambling",
+  "reason": "14 keywords matched; AI Analyst & Validator confirmed live wagering portal",
+  "screenshot_taken": true,
+  "screenshot_failed_reason": null,
+  "exported": true,
+  "exported_at": "2026-08-19T04:00:00+05:30",
+  "checked_at": "2026-08-19T03:55:12+05:30"
+}
 ```
 
 ---
 
-### Compare Databases & Sync Missing Domains
+## 9. LICENSE & CONTRIBUTING
 
-Interactively compares two MongoDB databases (e.g. `gamblingsitetry` vs `gamblingsites`) and asks whether to copy missing domains in either direction:
+### Contributing
+Contributions are welcome! Please follow these guidelines:
+1. Fork the repository and create a feature branch (`git checkout -b feature/amazing-feature`).
+2. Run the full test suite (`python -m pytest`) to ensure all 54 tests pass cleanly.
+3. Commit your changes with clear, descriptive commit messages.
+4. Open a Pull Request.
 
-```bash
-python project_sup/helping_code/compare_dbs.py
-```
-
----
-
-### Sync Processed Flags for Existing Results
-
-Scans `domain_Listed` against `checked_domains` and updates `processed: true` for any domains that were already classified:
-
-```bash
-python project_sup/helping_code/compare_processed_domains.py.py
-```
-
----
-
-### Batch Splitter (CSV + PDF Reports)
-
-Splits a combined CSV report and matching PDF report into smaller standalone batch folders (e.g., 20 items per batch):
-
-```bash
-python project_sup/helping_code/batch_splitter.py --csv report.csv --pdf report.pdf --size 20
-```
-
----
-
-### Import Existing Excel Data into MongoDB
-
-Imports existing classified Excel workbooks into MongoDB (`domain_Listed` with `processed: true` and `checked_domains`):
-
-```bash
-python project_sup/helping_code/import_output_excel.py
-```
-
----
-
-### Re-arrange Word Reports
-
-Re-formats existing Word reports to 2 items per page with clickable hyperlinks:
-
-```bash
-python project_sup/helping_code/arrange_docx_report.py --csv domains.csv --docx report.docx --output-dir ./output
-```
-
----
-
-## `.env` — Configuration Variables
-
-```env
-# ── Stage 0 — SearXNG ──────────────────────────────────────────────────────────
-SEARXNG_BASE_URL=http://127.0.0.1:8080
-SEARXNG_MAX_PAGES=4
-SEARXNG_PAGE_DELAY=1.0
-SEARXNG_TIMEOUT=10.0
-
-# ── MongoDB ────────────────────────────────────────────────────────────────────
-MONGO_URI=mongodb://localhost:27017/
-MONGO_DB_NAME=gamblingsites
-MONGO_DB2_NAME=gamblingsitetry
-MONGO_COLLECTION=domain_Listed
-CHECKED_COLLECTION=checked_domains
-
-# ── Stage 1 — Common Crawl ────────────────────────────────────────────────────
-MAX_WORKERS=200
-TIMEOUT=5.0
-MONGO_BATCH_SIZE=1000
-PARQUET_BATCH_SIZE=20
-EXPORT_TO_MONGO=true
-
-# ── Stage 2 — URL Checking ────────────────────────────────────────────────────
-FETCH_TIMEOUT=10
-PER_DOMAIN_DELAY=2.0
-MAX_CONCURRENT_FETCHES=20
-
-STEALTH_FALLBACK=false
-STEALTH_TIMEOUT=60
-STEALTH_CONCURRENCY=3
-
-# ── Deep Crawl Link Extraction ────────────────────────────────────────────────
-DEEP_CRAWL_MIN_LINKS=3
-DEEP_CRAWL_STRICT=false
-
-# ── Stage 3 — Screenshots ─────────────────────────────────────────────────────
-SCREENSHOT_CONCURRENCY=15
-```
-
----
-
-## Key Design Principles
-
-| Principle | Why |
-|-----------|-----|
-| `_id` = domain name | Primary key is domain string — no redundant indexes |
-| `processed` flag on source docs | Prevents Stage 2 from re-checking domains across runs |
-| Deep Crawl aggregator extraction | Outbound links on gambling pages are captured and queued |
-| Active `https://` hyperlinks | All URLs in Excel, Word, and PDF reports are directly clickable |
-| Minimal Schema Design | Eliminates database bloat (`checked_at`, `last_updated_at` removed) |
-| Unified `.env` Config | Single `.env` file drives all pipeline stages and helper scripts |
-
+### License
+Distributed under the MIT License. See `LICENSE` for more information.
