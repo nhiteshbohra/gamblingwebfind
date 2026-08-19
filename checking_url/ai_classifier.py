@@ -219,8 +219,22 @@ def is_gambling_domain(url_or_domain: str) -> tuple[bool, str]:
     if "calculator" in clean or "calculators" in clean:
         return False, ""
 
-    # Check domain name tokens
+    # Extract domain body (first label, e.g. "fxstake" from "fxstake.io")
     domain_body = clean.split(".")[0]
+
+    # ponytail: Never anchor domains whose name clearly signals trading/financial services.
+    # e.g. fxstake.io, tradingstake.com, leveragefx.net — 'stake' in the token fires a
+    # gambling anchor even though these are Forex domains. One Forex-native word in the
+    # domain body voids the anchor check.
+    _TRADING_DOMAIN_WORDS = {
+        "forex", "trade", "trading", "invest", "investing", "investment",
+        "leverage", "broker", "brokerage", "market", "stock", "fund", "funds",
+        "capital", "finance", "financial", "fx", "wealth", "asset", "assets",
+    }
+    if any(tw in domain_body for tw in _TRADING_DOMAIN_WORDS):
+        return False, ""
+
+    # Check domain name tokens
     tokens = re.findall(r"[a-z0-9]+", domain_body)
     for token in tokens:
         for kw in GAMBLING_DOMAIN_KEYWORDS:
@@ -233,11 +247,17 @@ def is_gambling_domain(url_or_domain: str) -> tuple[bool, str]:
 
 
 def detect_igaming_providers(html: str) -> list[str]:
-    """Detect if live HTML contains scripts, iframes, or assets from known casino game providers."""
+    """Detect if HTML *loads assets from* known casino game provider CDNs (script src, iframe src, img src).
+
+    Only matches inside src="..." or data-src="..." attribute values — not free text —
+    to avoid false positives where an ad network or analytics tag on a portal page happens
+    to contain a provider name as a substring in unrelated text or comment.
+    """
     if not html:
         return []
-    html_lower = html.lower()
-    return [p for p in IGAMING_PROVIDERS if p in html_lower]
+    # Extract all src / data-src values: <... src="VALUE" ...> or <... data-src="VALUE" ...>
+    src_values = " ".join(re.findall(r"""(?:data-)?src\s*=\s*["']([^"']{5,300})["']""", html, re.IGNORECASE)).lower()
+    return [p for p in IGAMING_PROVIDERS if p in src_values]
 
 
 
@@ -269,7 +289,19 @@ NON_GAMBLING_EVIDENCE_MAP = {
     "ecommerce": ["add to cart", "shopping cart", "shipping policy", "product review", "return policy", "order tracking"],
     "news": ["breaking news", "journalism", "editorial board", "reuters", "associated press", "published on"],
     "saas_enterprise_tech": ["customer service", "help desk", "sdk", "api integration", "pricing plans", "book a demo", "free trial", "enterprise", "saas", "software", "cloud platform", "developer documentation", "support ticket", "customer support"],
-    "fintech_investing_wealth": ["mutual funds", "portfolio management", "wealth management", "stock market", "brokerage", "etf", "asset management", "invest online", "trading account", "demat account", "financial advisor", "sebi registered", "mas regulated", "sec registered", "robo advisor", "sip", "investment"],
+    "fintech_investing_wealth": [
+        "mutual funds", "portfolio management", "wealth management", "stock market",
+        "brokerage", "etf", "asset management", "invest online", "trading account",
+        "demat account", "financial advisor", "sebi registered", "mas regulated",
+        "sec registered", "robo advisor", "sip", "investment",
+        # Forex / CFD broker specific — these CANNOT appear on gambling sites
+        "forex", "foreign exchange", "cfds", "cfd trading", "pip", "spread betting",
+        "lot size", "leverage", "margin call", "stop loss", "take profit",
+        "mt4", "mt5", "metatrader", "fca regulated", "asic regulated", "cysec",
+        "regulated broker", "technical analysis", "fundamental analysis",
+        "candlestick", "risk management", "demo account", "live account",
+        "open an account", "trading platform", "equity trading", "share market",
+    ],
     "entertainment_media_cinema": ["movie review", "box office", "celebrity gossip", "cinema news", "film review", "trailer", "ott release", "streaming guide", "entertainment news", "bollywood", "hollywood", "actor", "actress", "tv shows", "cinema"],
     "sports_scores_stats": ["live cricket score", "ball by ball commentary", "ipl score", "match schedule", "point table", "player stats", "match scorecard", "fixtures", "team standings", "scorecard", "live score"],
 }
@@ -531,6 +563,43 @@ async def start_ollama_if_needed() -> bool:
     return False
 
 
+async def stop_ollama_if_running() -> bool:
+    """
+    Safely release Ollama RAM/VRAM resources when task finishes.
+    Sends keep_alive: 0 to Ollama API to unload models from RAM/VRAM immediately.
+    """
+    global _session
+    try:
+        session = await get_session()
+        for model in (OLLAMA_MODEL, OLLAMA_VALIDATOR_MODEL):
+            try:
+                async with session.post(
+                    f"{OLLAMA_BASE_URL}/api/generate",
+                    json={"model": model, "keep_alive": 0},
+                    timeout=aiohttp.ClientTimeout(total=3.0)
+                ):
+                    pass
+            except Exception:
+                pass
+        logger.info("[+] Ollama AI models unloaded from RAM/VRAM. Memory released.")
+    except Exception as e:
+        logger.warning(f"Error unloading Ollama models: {e}")
+    finally:
+        if _session and not _session.closed:
+            await _session.close()
+            _session = None
+    return True
+
+
+async def close_ai_session():
+    """Close HTTP session and unload Ollama AI models to free system memory."""
+    global _session
+    if _session and not _session.closed:
+        await stop_ollama_if_running()
+        await _session.close()
+        _session = None
+
+
 async def classify_with_ai(
     html: str,
     url: str = "",
@@ -777,6 +846,25 @@ Respond ONLY in valid JSON:
         has_funnels = bool(detect_gambling_funnels(html))
 
         if is_g_domain and matched_keywords:
+            # ponytail: Guard — a parked lander or 403 page on a .casino/.bet domain must NOT be
+            # forced to gambling. The AI said "regular" because the page IS regular (parking/error).
+            # Domain anchors only override for LIVE gambling pages, not parked/blocked ones.
+            _is_parked = any(m in body_text.lower() for m in [
+                "is for sale", "domain for sale", "buy this domain", "parked by",
+                "sedo.com", "dan.com", "godaddy.com", "hugedomains", "parkingcrew",
+                "domain parking", "parked domain", "domain is for sale",
+            ])
+            _is_blocked_page = any(m in (title + " " + body_text).lower() for m in [
+                "403 forbidden", "access denied", "you have been blocked",
+                "error 403", "cloudflare", "just a moment",
+            ])
+            if _is_parked:
+                return {"verdict": "dead", "confidence": 0.95, "category": "parked_domain",
+                        "key_triggers": [], "reason": "Parked/For-Sale lander on gambling-TLD domain", "challenge_override": False}
+            if _is_blocked_page:
+                return {"verdict": "blocked", "confidence": 0.95, "category": "access_denied",
+                        "key_triggers": [], "reason": "403/Cloudflare block page on gambling-TLD domain", "challenge_override": False}
+
             if not is_hosp or has_providers or has_funnels:
                 # If domain anchor is corroborated and not a pure hotel page, route to validator
                 analyst_verdict = {

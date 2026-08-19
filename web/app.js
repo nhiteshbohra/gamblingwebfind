@@ -293,11 +293,15 @@ async function loadOverview() {
     document.getElementById("st-unconfirmed").textContent = fmtNum(u);
     document.getElementById("st-rate").textContent = `${chk.gambling_rate || 0}%`;
 
-    // Row C: Compliance & Screenshots
-    document.getElementById("st-ss-taken").textContent = fmtNum(chk.screenshot_taken);
-    document.getElementById("st-ss-pending").textContent = fmtNum(chk.screenshot_pending);
-    document.getElementById("st-exp-done").textContent = fmtNum(chk.exported);
-    document.getElementById("st-exp-pending").textContent = fmtNum(chk.pending_export);
+    // Row C: Compliance & Export
+    const setVal = (id, val) => {
+      const el = document.getElementById(id);
+      if (el) el.textContent = fmtNum(val);
+    };
+    setVal("st-ss-taken", chk.screenshot_taken);
+    setVal("st-ss-pending", chk.screenshot_pending);
+    setVal("st-exp-done", chk.exported);
+    setVal("st-exp-pending", chk.pending_export);
 
     // Filter Chips Counts (on Domains tab)
     const setChip = (id, count) => {
@@ -315,35 +319,24 @@ async function loadOverview() {
     setChip("chip-cnt-exported", chk.exported);
     setChip("chip-cnt-not-exported", Math.max(0, totalChk - (chk.exported || 0)));
 
-    // Deep Metrics — Throughput & AI
-    document.getElementById("m-src-processed").textContent = fmtNum(src.processed);
-    document.getElementById("m-src-today").textContent = fmtNum(src.added_today);
-    document.getElementById("m-src-week").textContent = fmtNum(src.added_this_week);
+    // Deep Metrics — Throughput
+    setVal("m-src-processed", src.processed);
+    setVal("m-src-today", src.added_today);
+    setVal("m-src-week", src.added_this_week);
 
-    document.getElementById("m-rate-text").textContent = `${chk.gambling_rate || 0}%`;
+    setVal("m-rate-text", `${chk.gambling_rate || 0}%`);
     const rateBar = document.getElementById("m-rate-bar");
     if (rateBar) rateBar.style.width = `${Math.min(100, (chk.gambling_rate || 0) * 4)}%`;
-    document.getElementById("m-ai-count").textContent = fmtNum(chk.ai_classified);
-    document.getElementById("m-kw-count").textContent = fmtNum(chk.keyword_classified);
+    setVal("m-ai-count", chk.ai_classified);
+    setVal("m-kw-count", chk.keyword_classified);
 
     // Deep Metrics — Reports
-    document.getElementById("m-rep-runs").textContent = fmtNum(rep.runs);
-    document.getElementById("m-rep-pdf").textContent = `${fmtNum(rep.pdf_files)} PDF`;
-    document.getElementById("m-rep-xlsx").textContent = `${fmtNum(rep.xlsx_files)} Excel`;
-    document.getElementById("m-rep-docx").textContent = `${fmtNum(rep.docx_files)} Word`;
-    document.getElementById("m-rep-last").textContent = rep.last_export_timestamp || "Never";
+    setVal("m-rep-runs", rep.runs);
+    setVal("m-rep-pdf", `${fmtNum(rep.pdf_files)} PDF`);
+    setVal("m-rep-xlsx", `${fmtNum(rep.xlsx_files)} Excel`);
+    setVal("m-rep-docx", `${fmtNum(rep.docx_files)} Word`);
+    setVal("m-rep-last", rep.last_export_timestamp || "Never");
 
-    // Recent 10 Activity Feed
-    const recentRes = await fetch(`${API}/api/domains?per_page=10`);
-    if (recentRes.ok) {
-      const recData = await recentRes.json();
-      const tbody = document.getElementById("recent-body");
-      if (recData.results && recData.results.length > 0) {
-        tbody.innerHTML = recData.results.map(renderDomainRow).join("");
-      } else {
-        tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;padding:24px" class="muted">No recent domains recorded in database.</td></tr>`;
-      }
-    }
   } catch (err) {
     console.error("Overview error:", err);
     if (errBanner) {
@@ -351,6 +344,27 @@ async function loadOverview() {
       errBanner.classList.remove("hidden");
     }
     toast(`[!] Connection error: ${err.message}`);
+  }
+}
+
+async function triggerDatabaseBackup() {
+  const ok = await showConfirm(
+    "💾 Backup Databases",
+    "Create a timestamped JSON dump of both 'domain_Listed' (source) and 'checked_domains' (classified results) MongoDB collections now?"
+  );
+  if (!ok) return;
+
+  try {
+    toast("📦 Creating MongoDB database backup...");
+    const res = await fetch(`${API}/api/backup`, { method: "POST" });
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.detail || "Backup failed");
+    }
+    const data = await res.json();
+    toast(`✅ Backup Complete! Saved ${fmtNum(data.source_count)} source & ${fmtNum(data.checked_count)} checked records to ${data.backup_dir}`);
+  } catch (err) {
+    toast(`[!] Backup error: ${err.message}`);
   }
 }
 
@@ -419,13 +433,8 @@ async function loadDomains(page = 1) {
 }
 
 function renderDomainRow(d) {
-  const shotImg = d.has_screenshot_file
-    ? `<img src="${API}/api/domains/${encodeURIComponent(d.domain)}/screenshot" class="thumb-preview" alt="Preview" onclick="event.stopPropagation();openDetail('${d.domain}')">`
-    : `<div class="thumb-placeholder">—</div>`;
-
   return `
-    <tr class="clickable-row" onclick="openDetail('${d.domain}')">
-      <td>${shotImg}</td>
+    <tr>
       <td><span style="font-weight:700;color:#fff">${d.domain}</span></td>
       <td><span class="badge badge-${d.status || 'dead'}">${d.status || 'unknown'}</span></td>
       <td class="muted" style="max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${d.reason || '—'}</td>
@@ -435,20 +444,17 @@ function renderDomainRow(d) {
 }
 
 function renderDomainFullRow(d) {
-  const shotImg = d.has_screenshot_file
-    ? `<img src="${API}/api/domains/${encodeURIComponent(d.domain)}/screenshot" class="thumb-preview" alt="Preview" onclick="event.stopPropagation();openDetail('${d.domain}')">`
-    : `<div class="thumb-placeholder">—</div>`;
-
   const expBadge = d.exported
     ? `<span class="badge" style="background:var(--success-bg);color:#6ee7b7">Exported</span>`
     : `<span class="badge badge-idle">No</span>`;
 
+  const targetUrl = d.url || `https://${d.domain}`;
+
   return `
-    <tr class="clickable-row" onclick="openDetail('${d.domain}')">
-      <td>${shotImg}</td>
+    <tr>
       <td>
         <span style="font-weight:700;color:#fff">${d.domain}</span>
-        <a href="${d.url || 'https://' + d.domain}" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()" style="margin-left:6px;color:var(--accent-light);font-size:11px">↗</a>
+        <a href="${targetUrl}" target="_blank" rel="noopener noreferrer" style="margin-left:6px;color:var(--accent-light);font-size:11px" title="Visit website in new tab">↗</a>
       </td>
       <td><span class="badge badge-${d.status || 'dead'}">${d.status || 'unknown'}</span></td>
       <td class="muted" style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${d.reason || '—'}</td>
@@ -456,60 +462,6 @@ function renderDomainFullRow(d) {
       <td>${expBadge}</td>
     </tr>
   `;
-}
-
-// ── 3. Detail Drawer ─────────────────────────────────────────────────────────
-async function openDetail(domain) {
-  const overlay = document.getElementById("detail-overlay");
-  const title = document.getElementById("detail-domain-title");
-  const badgeArea = document.getElementById("detail-badge-area");
-  const jsonPre = document.getElementById("detail-json");
-  const imgArea = document.getElementById("detail-screenshot-area");
-  const img = document.getElementById("detail-img");
-  const link = document.getElementById("detail-visit-link");
-
-  if (!overlay) return;
-
-  title.textContent = domain;
-  jsonPre.textContent = "Loading full record from MongoDB...";
-  badgeArea.innerHTML = "";
-  imgArea.classList.add("hidden");
-  overlay.classList.remove("hidden");
-
-  try {
-    const res = await fetch(`${API}/api/domains/${encodeURIComponent(domain)}`);
-    if (!res.ok) throw new Error("Domain record not found");
-    const data = await res.json();
-    _currentDomainData = data;
-
-    badgeArea.innerHTML = `
-      <span class="badge badge-${data.status || 'dead'}" style="font-size:12px;padding:4px 12px">${data.status || 'unknown'}</span>
-      ${data.exported ? `<span class="badge" style="background:var(--success-bg);color:#6ee7b7;font-size:12px;padding:4px 12px">Exported</span>` : ''}
-      ${data.screenshot_taken ? `<span class="badge" style="background:var(--cyan-glow);color:var(--cyan);font-size:12px;padding:4px 12px">📸 Screenshot Captured</span>` : ''}
-    `;
-
-    jsonPre.textContent = JSON.stringify(data, null, 2);
-    link.href = data.url || `https://${domain}`;
-
-    // Screenshot image check
-    const testImg = new Image();
-    testImg.onload = () => {
-      img.src = `${API}/api/domains/${encodeURIComponent(domain)}/screenshot`;
-      imgArea.classList.remove("hidden");
-    };
-    testImg.onerror = () => {
-      imgArea.classList.add("hidden");
-    };
-    testImg.src = `${API}/api/domains/${encodeURIComponent(domain)}/screenshot`;
-
-  } catch (err) {
-    jsonPre.textContent = `Error loading record: ${err.message}`;
-  }
-}
-
-function closeDetail() {
-  const overlay = document.getElementById("detail-overlay");
-  if (overlay) overlay.classList.add("hidden");
 }
 
 function copyDomainJson() {
@@ -732,16 +684,6 @@ function streamLogs(job_id, stage, logEl, startBtn, stopBtn, badge) {
     es.close();
     resetStageButtons(stage, stoppedByUser ? "stopped" : "failed");
   };
-}
-
-function runScreenshotStage() {
-  const mode = document.getElementById("ss-mode").value;
-  const rawDomains = document.getElementById("ss-domains").value;
-  const domainsList = mode === "file"
-    ? rawDomains.split("\n").map(s => s.trim()).filter(Boolean)
-    : [];
-
-  runStage("screenshot", { mode, domains: domainsList });
 }
 
 // ── Initial Boot ─────────────────────────────────────────────────────────────

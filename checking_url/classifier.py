@@ -29,7 +29,7 @@ FAST_PATH_GAMBLING_SIGNALS = {
     # Blackjack / Card games
     "blackjack", "21count", "card counting", "pontoon", "hi-lo",
     # Deposit / Bonus triggers
-    "no-deposit", "deposit bonus", "forex bonus", "trading bonus", "no deposit bonus",
+    "no-deposit", "no deposit bonus",
     "free bonus", "cashback on losses", "prize pool", "rebate",
     # Indian Satta extensions
     "fix satta", "fix matka", "jodi chart", "panel chart", "half sangam",
@@ -72,6 +72,7 @@ WEAK_GAMBLING_SIGNALS = {
     "free spins",
     "free bonus",
     "bonus",
+    "deposit bonus",   # heavy on Forex broker signup offers — not unambiguous gambling
     "lottery",
     "jackpot",
     "odds",
@@ -198,6 +199,20 @@ NEGATIVE_ARCHETYPES = {
         "scientific calculator", "financial calculator", "salary calculator", "sip calculator",
         "interest calculator", "fd calculator", "rd calculator", "retirement calculator",
         "calculate online", "math calculator", "conversion tool"
+    ],
+    # ponytail: Trading/Forex/stock brokers share surface-level terms (bonus, deposit, win rate,
+    # odds, stake) with gambling — but are regulated financial instruments, not gambling.
+    # Require 3+ of these domain-specific signals with 0 strong gambling signals to auto-reject.
+    "trading_fintech": [
+        "forex", "foreign exchange", "cfds", "cfd trading", "spread betting",
+        "pip", "lot size", "leverage", "margin call", "stop loss", "take profit",
+        "mt4", "mt5", "metatrader", "trading platform", "trading account",
+        "stock market", "equity trading", "share market", "nifty", "sensex",
+        "mutual fund", "sip", "demat account", "brokerage", "sebi registered",
+        "sec regulated", "fca regulated", "asic regulated", "cysec", "regulated broker",
+        "technical analysis", "fundamental analysis", "candlestick", "chart pattern",
+        "risk management", "portfolio", "asset management", "wealth management",
+        "trade now", "open an account", "demo account", "live account",
     ],
 }
 

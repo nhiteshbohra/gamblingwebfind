@@ -245,9 +245,25 @@ def interactive_menu():
             run_export_domains()
         elif choice == "0" or choice.lower() in ("exit", "q", "quit"):
             print("Exiting.")
+            shutdown_background_services()
             break
         else:
             print("[!] Invalid option. Please enter 1-3 or 0 to exit.")
+
+
+def shutdown_background_services():
+    """Safely stop SearXNG Docker container and unload Ollama AI models on exit."""
+    print("\n[+] Safely shutting down background services and releasing system RAM...")
+    try:
+        from keywordssearch.searxng_search import stop_searxng_docker
+        stop_searxng_docker()
+    except Exception:
+        pass
+    try:
+        from checking_url.ai_classifier import stop_ollama_if_running
+        asyncio.run(stop_ollama_if_running())
+    except Exception:
+        pass
 
 
 def main():
@@ -279,7 +295,10 @@ def main():
     if not args.no_ui:
         start_web_dashboard(host=args.host, port=args.port)
 
-    interactive_menu()
+    try:
+        interactive_menu()
+    finally:
+        shutdown_background_services()
 
 
 if __name__ == "__main__":

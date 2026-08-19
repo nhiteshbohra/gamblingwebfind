@@ -87,7 +87,7 @@ class TestStage3ScreenshotValidation:
 class TestStage3ExcelBuilder:
     """Test 2-sheet Excel workbook generation."""
 
-    def test_build_workbook_two_sheets(self, tmp_path):
+    def test_build_workbook_captured_sheet(self, tmp_path):
         out_xlsx = str(tmp_path / "report.xlsx")
         entries = [
             {"domain": "betwin1.com", "url": "https://betwin1.com", "screenshot_path": "dummy.jpg"},
@@ -102,13 +102,10 @@ class TestStage3ExcelBuilder:
 
         wb = openpyxl.load_workbook(result_path)
         assert "Captured Domains" in wb.sheetnames
-        assert "Failed Domains" in wb.sheetnames
+        assert "Failed Domains" not in wb.sheetnames
 
         ws_cap = wb["Captured Domains"]
         assert ws_cap.max_row == 3  # Header + 2 rows
-
-        ws_fail = wb["Failed Domains"]
-        assert ws_fail.max_row == 2  # Header + 1 row
 
 
 class TestStage3DocxBuilder:

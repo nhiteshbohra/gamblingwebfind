@@ -565,3 +565,41 @@ def seed_discovered_domains(domains: set, discovered_from: str) -> tuple[int, in
     return inserted, skipped
 
 
+def backup_databases(backup_dir: str = None) -> dict:
+    """Dump source (domain_Listed) and destination (checked_domains) MongoDB collections to JSON backups."""
+    import json
+    get_db()
+
+    ts = datetime.now(IST).strftime("%Y%m%d_%H%M%S")
+    if not backup_dir:
+        backup_dir = os.path.join("output", "backups", f"backup_{ts}")
+    os.makedirs(backup_dir, exist_ok=True)
+
+    # 1. Backup domain_Listed
+    source_file = os.path.join(backup_dir, "domain_Listed.json")
+    source_docs = list(source_domains().find({}))
+    for d in source_docs:
+        d["_id"] = str(d["_id"])
+    with open(source_file, "w", encoding="utf-8") as f:
+        json.dump(source_docs, f, indent=2, default=str)
+
+    # 2. Backup checked_domains
+    checked_file = os.path.join(backup_dir, "checked_domains.json")
+    checked_docs = list(checked_domains().find({}))
+    for d in checked_docs:
+        d["_id"] = str(d["_id"])
+    with open(checked_file, "w", encoding="utf-8") as f:
+        json.dump(checked_docs, f, indent=2, default=str)
+
+    return {
+        "status": "success",
+        "timestamp": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S"),
+        "backup_dir": os.path.abspath(backup_dir),
+        "source_count": len(source_docs),
+        "checked_count": len(checked_docs),
+        "source_file": os.path.abspath(source_file),
+        "checked_file": os.path.abspath(checked_file),
+    }
+
+
+

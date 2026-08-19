@@ -6,7 +6,7 @@ import asyncio, json, os, sys
 from pathlib import Path
 from api.jobs import (
     new_job, get_job, all_jobs, finish_job, is_stage_running,
-    capture_prints, set_job_future, stop_stage, stop_job, stop_all
+    set_job_process, stop_stage, stop_job, stop_all
 )
 
 router = APIRouter(prefix="/api")
@@ -21,116 +21,89 @@ class ExportBody(BaseModel):
 class ImportBody(BaseModel):
     domains: list = []
 
-def _get_loop():
-    try:
-        return asyncio.get_event_loop()
-    except RuntimeError:
-        return asyncio.new_event_loop()
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
-def _run_keywords(job_id, loop):
-    try:
-        from keywordssearch.searxng_search import run_search
-        root_dir = Path(__file__).resolve().parent.parent.parent
-        cands = list(root_dir.glob("gambling_top_*_keywords.json")) + list(root_dir.glob("*keyword*.json"))
-        kw_path = cands[0] if cands else (root_dir / "gambling_top_944_keywords.json")
-        with open(kw_path, encoding="utf-8") as f:
-            keywords = [str(k).strip().lower() for k in json.load(f) if str(k).strip()]
-        with capture_prints(job_id, loop):
-            fut = asyncio.run_coroutine_threadsafe(run_search(keywords), loop)
-            set_job_future(job_id, fut)
-            fut.result(timeout=3600)
-        finish_job(job_id, "done")
-    except asyncio.CancelledError:
-        finish_job(job_id, "stopped")
-    except Exception as e:
-        job = get_job(job_id)
-        if job and job.get("status") == "stopped":
-            finish_job(job_id, "stopped")
-        else:
-            finish_job(job_id, "failed")
-            if job:
-                job["queue"].put_nowait(f"ERROR: {e}")
 
-def _run_check(job_id, mode, loop):
-    try:
-        from checking_url.runner import run as check_run
-        import os
-        conc = int(os.getenv("CHECK_CONCURRENCY", 20))
-        with capture_prints(job_id, loop):
-            fut = asyncio.run_coroutine_threadsafe(
-                check_run(concurrency=conc, limit=0, mode=mode), loop
-            )
-            set_job_future(job_id, fut)
-            fut.result(timeout=7200)
-        finish_job(job_id, "done")
-    except asyncio.CancelledError:
-        finish_job(job_id, "stopped")
-    except Exception as e:
-        job = get_job(job_id)
-        if job and job.get("status") == "stopped":
-            finish_job(job_id, "stopped")
-        else:
-            finish_job(job_id, "failed")
-            if job:
-                job["queue"].put_nowait(f"ERROR: {e}")
+def _run_subprocess_worker(job_id: str, cmd: list[str], loop: asyncio.AbstractEventLoop):
+    job = get_job(job_id)
+    if not job:
+        return
+    q = job["queue"]
 
-def _run_export(job_id, fmt, batch_size, loop):
     try:
-        from export_domains.exporter import run as export_run
-        with capture_prints(job_id, loop):
-            fut = asyncio.run_coroutine_threadsafe(
-                export_run(limit=0), loop
-            )
-            set_job_future(job_id, fut)
-            fut.result(timeout=7200)
-        finish_job(job_id, "done")
-    except asyncio.CancelledError:
-        finish_job(job_id, "stopped")
+        env = os.environ.copy()
+        env["PYTHONUNBUFFERED"] = "1"
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            cwd=str(PROJECT_ROOT),
+            env=env,
+            text=True,
+            bufsize=1,
+            universal_newlines=True,
+        )
+        set_job_process(job_id, proc)
+
+        for line in iter(proc.stdout.readline, ''):
+            if line:
+                clean_line = line.rstrip("\r\n")
+                loop.call_soon_threadsafe(q.put_nowait, clean_line)
+
+        proc.stdout.close()
+        proc.wait()
+        if job["status"] == "running":
+            loop.call_soon_threadsafe(finish_job, job_id, "done" if proc.returncode == 0 else "failed")
     except Exception as e:
-        job = get_job(job_id)
-        if job and job.get("status") == "stopped":
-            finish_job(job_id, "stopped")
-        else:
-            finish_job(job_id, "failed")
-            if job:
-                job["queue"].put_nowait(f"ERROR: {e}")
+        if job["status"] == "running":
+            loop.call_soon_threadsafe(q.put_nowait, f"[!] Pipeline process error: {e}")
+            loop.call_soon_threadsafe(finish_job, job_id, "failed")
+
 
 @router.post("/run/keywords")
-def run_keywords(bg: BackgroundTasks):
+async def run_keywords(bg: BackgroundTasks):
     if is_stage_running("keywords"):
         raise HTTPException(409, "keywords stage already running")
     job_id = new_job("keywords")
-    loop = _get_loop()
-    bg.add_task(_run_keywords, job_id, loop)
+    cmd = [sys.executable, "-u", str(PROJECT_ROOT / "keywordssearch" / "searxng_search.py")]
+    loop = asyncio.get_running_loop()
+    bg.add_task(_run_subprocess_worker, job_id, cmd, loop)
     return {"job_id": job_id}
 
+
 @router.post("/run/check")
-def run_check(body: CheckBody, bg: BackgroundTasks):
+async def run_check(body: CheckBody, bg: BackgroundTasks):
     if is_stage_running("check"):
         raise HTTPException(409, "check stage already running")
     job_id = new_job("check")
-    loop = _get_loop()
-    bg.add_task(_run_check, job_id, body.mode, loop)
+    cmd = [sys.executable, "-u", str(PROJECT_ROOT / "checking_url" / "runner.py"), "--mode", body.mode]
+    loop = asyncio.get_running_loop()
+    bg.add_task(_run_subprocess_worker, job_id, cmd, loop)
     return {"job_id": job_id}
 
+
 @router.post("/run/export")
-def run_export(body: ExportBody, bg: BackgroundTasks):
+async def run_export(body: ExportBody, bg: BackgroundTasks):
     if is_stage_running("export"):
         raise HTTPException(409, "export stage already running")
     job_id = new_job("export")
-    loop = _get_loop()
-    bg.add_task(_run_export, job_id, body.format, body.batch_size, loop)
+    cmd = [sys.executable, "-u", str(PROJECT_ROOT / "export_domains" / "exporter.py")]
+    loop = asyncio.get_running_loop()
+    bg.add_task(_run_subprocess_worker, job_id, cmd, loop)
     return {"job_id": job_id}
+
 
 @router.post("/stop/{stage}")
 def stop_stage_endpoint(stage: str):
     stopped = stop_stage(stage)
     return {"stage": stage, "stopped": stopped}
 
+
 @router.post("/stop")
 def stop_all_endpoint():
     count = stop_all()
     return {"stopped_count": count}
+
 
 @router.post("/jobs/{job_id}/stop")
 def stop_job_endpoint(job_id: str):
@@ -138,6 +111,7 @@ def stop_job_endpoint(job_id: str):
     if not stopped:
         raise HTTPException(404, "job not found or already completed")
     return {"job_id": job_id, "status": "stopped"}
+
 
 @router.post("/run/import")
 def run_import(body: ImportBody):

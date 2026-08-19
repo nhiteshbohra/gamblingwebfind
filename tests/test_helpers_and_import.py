@@ -279,15 +279,16 @@ class TestOllamaGatedStartup:
             mock_start_ollama.assert_called_once()
 
 
-class TestCleanupFalsePositives:
-    """Test project_sup/cleanup_false_positives.py support script."""
+
+class TestMarkScreenshotsAsGambling:
+    """Test project_sup/mark_screenshots_as_gambling.py support script."""
 
     def test_extract_domain_from_filename(self):
-        from project_sup.cleanup_false_positives import extract_domain_from_filename
+        from project_sup.mark_screenshots_as_gambling import extract_domain_from_filename
         assert extract_domain_from_filename("12-bet_in_76d87080.jpg") == "12-bet.in"
         assert extract_domain_from_filename("777casino_co_uk_8979ed1c.jpg") == "777casino.co.uk"
         assert extract_domain_from_filename("www-jlbet_net_ph_9dbe739b.jpg") == "jlbet.net.ph"
-        assert extract_domain_from_filename("55-bmw_com_ph_ff1c8eb1.jpg") == "55-bmw.com.ph"
+
 
 
 

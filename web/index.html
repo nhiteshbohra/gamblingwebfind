@@ -139,30 +139,14 @@
         </div>
       </div>
 
-      <!-- Stage 3 Compliance & Screenshots Section -->
-      <div class="stage-section-header">
-        <span class="stage-section-tag" style="color:var(--purple)">Stage 3 Verification</span>
-        <span class="stage-section-title">Screenshot Captures & Report Compliance</span>
-        <span class="stage-section-desc">Full-page visual evidence & PDF/Excel compliance bundles</span>
+      <!-- Stage 3: Report & Export Compliance -->
+      <div class="section-title-wrap mb16">
+        <span class="badge badge-purple" style="font-size:11px">STAGE 3 VERIFICATION</span>
+        <span class="stage-section-title">Report & Export Compliance</span>
+        <span class="stage-section-desc">PDF/Excel compliance bundles & batch exports</span>
       </div>
 
-      <div class="grid4 mb20">
-        <div class="stat-card regular" onclick="jumpToDomains({status: 'gambling', screenshot: 'taken'})">
-          <div>
-            <div class="val" id="st-ss-taken">…</div>
-            <div class="lbl">📸 Screenshots Captured</div>
-          </div>
-          <div class="sub">Valid evidence on disk &nbsp;→</div>
-        </div>
-
-        <div class="stat-card gambling" onclick="jumpToDomains({status: 'gambling', screenshot: 'pending'})">
-          <div>
-            <div class="val" id="st-ss-pending">…</div>
-            <div class="lbl">⚠️ Screenshot Pending / Failed</div>
-          </div>
-          <div class="sub">Queued for capture &nbsp;→</div>
-        </div>
-
+      <div class="grid2 mb20">
         <div class="stat-card cyan" onclick="jumpToDomains({exported: 'true'})">
           <div>
             <div class="val" id="st-exp-done">…</div>
@@ -176,70 +160,26 @@
             <div class="val" id="st-exp-pending">…</div>
             <div class="lbl">⏳ Pending Export Batch</div>
           </div>
-          <div class="sub">Captured, ready for report &nbsp;→</div>
+          <div class="sub">Gambling sites with screenshots ready for export &nbsp;→</div>
         </div>
       </div>
 
-      <!-- Deep Metrics Grid -->
-      <div class="grid3 mb20">
-        <!-- Card 1: Pipeline Throughput -->
-        <div class="card">
-          <div class="card-header">
-            <div class="section-title">⚡ Ingestion Throughput</div>
-          </div>
-          <div class="metric-row">
-            <span class="metric-label">Processed through Stage 2</span>
-            <span class="metric-value" id="m-src-processed" style="color:var(--success)">…</span>
-          </div>
-          <div class="metric-row">
-            <span class="metric-label">New Domains Added Today</span>
-            <span class="metric-value" id="m-src-today" style="color:var(--cyan)">…</span>
-          </div>
-          <div class="metric-row">
-            <span class="metric-label">New Domains Added This Week</span>
-            <span class="metric-value" id="m-src-week">…</span>
-          </div>
+      <!-- Ingestion Throughput Card -->
+      <div class="card mb20">
+        <div class="card-header">
+          <div class="section-title">⚡ Ingestion Throughput</div>
         </div>
-
-        <!-- Card 2: AI Intelligence & Classification -->
-        <div class="card">
-          <div class="card-header">
-            <div class="section-title">🤖 AI Classifier Breakdown</div>
-          </div>
-          <div class="metric-row">
-            <span class="metric-label">Gambling Confirmation Rate</span>
-            <span class="metric-value" id="m-rate-text">…%</span>
-          </div>
-          <div class="progress-bar-bg">
-            <div class="progress-bar-fill" id="m-rate-bar" style="width:0%"></div>
-          </div>
-          <div class="metric-row mt12">
-            <span class="metric-label">Re-classified via AI Validator</span>
-            <span class="metric-value" id="m-ai-count" style="color:var(--purple)">…</span>
-          </div>
-          <div class="metric-row">
-            <span class="metric-label">Fast-Path Keyword Matches</span>
-            <span class="metric-value" id="m-kw-count">…</span>
-          </div>
+        <div class="metric-row">
+          <span class="metric-label">Processed through Stage 2</span>
+          <span class="metric-value" id="m-src-processed" style="color:var(--success)">…</span>
         </div>
-
-        <!-- Card 3: Export Deliverables -->
-        <div class="card">
-          <div class="card-header">
-            <div class="section-title">📦 Compliance Output Runs</div>
-          </div>
-          <div class="metric-row">
-            <span class="metric-label">Total Export Runs</span>
-            <span class="metric-value" id="m-rep-runs">…</span>
-          </div>
-          <div class="metric-row">
-            <span class="metric-label">Exported Documents</span>
-            <span class="metric-value"><span id="m-rep-pdf" style="color:#fb7185">… PDF</span> / <span id="m-rep-xlsx" style="color:#6ee7b7">… Excel</span> / <span id="m-rep-docx" style="color:#93c5fd">… Word</span></span>
-          </div>
-          <div class="metric-row">
-            <span class="metric-label">Last Export Timestamp</span>
-            <span class="metric-value mono" id="m-rep-last" style="font-size:11px">…</span>
-          </div>
+        <div class="metric-row">
+          <span class="metric-label">New Domains Added Today</span>
+          <span class="metric-value" id="m-src-today" style="color:var(--cyan)">…</span>
+        </div>
+        <div class="metric-row">
+          <span class="metric-label">New Domains Added This Week</span>
+          <span class="metric-value" id="m-src-week">…</span>
         </div>
       </div>
 
@@ -247,40 +187,12 @@
       <div class="card mb20" style="background:rgba(99, 102, 241, 0.04); border-color: rgba(99, 102, 241, 0.25);">
         <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px">
           <div>
-            <div style="font-weight:700;color:#fff;font-size:14px">⚡ Pipeline Quick Launch</div>
-            <div class="muted" style="font-size:12px">Launch stages or jump straight to execution control</div>
+            <div style="font-weight:700;color:#fff;font-size:14px">💾 Database Backup</div>
+            <div class="muted" style="font-size:12px">Create instant JSON dump of MongoDB collections</div>
           </div>
           <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
-            <button class="btn btn-ghost btn-sm" onclick="showTab('pipeline'); focusStage('check')">▶ Stage 2 Check</button>
-            <button class="btn btn-ghost btn-sm" onclick="showTab('pipeline'); focusStage('export')">📋 Export Reports</button>
-            <button class="btn btn-ghost btn-sm" onclick="showTab('pipeline'); focusStage('screenshot')">📸 Capture Shots</button>
-            <button class="btn btn-primary btn-sm" onclick="showTab('domains')">🌐 Browse Domains</button>
-            <button class="btn btn-ghost btn-sm" onclick="loadOverview()">↻ Refresh Stats</button>
+            <button class="btn btn-success btn-sm" onclick="triggerDatabaseBackup()">💾 Backup DB</button>
           </div>
-        </div>
-      </div>
-
-      <!-- Recent Activity Table -->
-      <div class="card">
-        <div class="card-header">
-          <div class="section-title">🕒 Recent Classified Domains <span class="muted" style="font-weight:400">(Latest 10)</span></div>
-          <button class="btn btn-ghost btn-sm" onclick="showTab('domains')">View All Domains →</button>
-        </div>
-        <div class="tbl-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th style="width:70px">Preview</th>
-                <th>Domain</th>
-                <th>Status</th>
-                <th>Reason / Triggers</th>
-                <th>Added Date</th>
-              </tr>
-            </thead>
-            <tbody id="recent-body">
-              <tr><td colspan="5" style="text-align:center;padding:24px" class="muted">Loading recent domains…</td></tr>
-            </tbody>
-          </table>
         </div>
       </div>
     </div>
@@ -353,60 +265,16 @@
               <span style="font-size:22px">📋</span>
               <div>
                 <div class="section-title" style="margin:0">Stage 3 — Compliance Report Exporter</div>
-                <div class="muted" style="font-size:12px">Generates PDF, Excel, and Word compliance reports</div>
+                <div class="muted" style="font-size:12px">Generates PDF, Excel, and Word compliance reports from MongoDB</div>
               </div>
             </div>
             <span id="badge-export" class="badge badge-idle">Idle</span>
           </div>
-          <div class="grid2" style="gap:12px">
-            <div class="form-row">
-              <label>Export Format</label>
-              <select id="export-fmt">
-                <option value="3" selected>Batched by PDF Size (≤24MB, PDF + Excel)</option>
-                <option value="1">Single Combined File (PDF + Excel + Word)</option>
-                <option value="2">Batched by N items</option>
-              </select>
-            </div>
-            <div class="form-row">
-              <label>Batch Size (if format 2)</label>
-              <input type="number" id="export-batch" value="40" min="1" max="1000">
-            </div>
-          </div>
           <div style="display:flex;gap:10px;align-items:center">
-            <button id="btn-export" class="btn btn-primary" onclick="runStage('export', {format: parseInt(document.getElementById('export-fmt').value), batch_size: parseInt(document.getElementById('export-batch').value)})">▶ Generate & Export</button>
+            <button id="btn-export" class="btn btn-primary" onclick="runStage('export')">▶ Generate & Export</button>
             <button id="btn-stop-export" class="btn btn-danger hidden" onclick="stopStage('export')">⏹ Stop Export</button>
           </div>
           <div class="log-panel mt16" id="log-export"><p class="dim">// Logs will stream here when started...</p></div>
-        </div>
-
-        <!-- Stage 4: Missing Screenshot Capture -->
-        <div class="card" id="card-stage-screenshot">
-          <div class="card-header">
-            <div style="display:flex;align-items:center;gap:10px">
-              <span style="font-size:22px">📸</span>
-              <div>
-                <div class="section-title" style="margin:0">Stage 4 — Screenshot Capture Only</div>
-                <div class="muted" style="font-size:12px">Captures missing full-page screenshots without re-classification</div>
-              </div>
-            </div>
-            <span id="badge-screenshot" class="badge badge-idle">Idle</span>
-          </div>
-          <div class="form-row">
-            <label>Target Mode</label>
-            <select id="ss-mode" onchange="document.getElementById('ss-domains-row').classList.toggle('hidden', this.value!=='file')">
-              <option value="db">All Pending in DB (status=gambling, screenshot_taken=false)</option>
-              <option value="file">Paste Specific Domains List</option>
-            </select>
-          </div>
-          <div class="form-row hidden" id="ss-domains-row">
-            <label>Domain / URL List (one per line)</label>
-            <textarea id="ss-domains" rows="3" placeholder="bet365.com&#10;1xbet.com"></textarea>
-          </div>
-          <div style="display:flex;gap:10px;align-items:center">
-            <button id="btn-screenshot" class="btn btn-primary" onclick="runScreenshotStage()">▶ Capture Screenshots</button>
-            <button id="btn-stop-screenshot" class="btn btn-danger hidden" onclick="stopStage('screenshot')">⏹ Stop Capture</button>
-          </div>
-          <div class="log-panel mt16" id="log-screenshot"><p class="dim">// Logs will stream here when started...</p></div>
         </div>
       </div>
 
@@ -521,12 +389,6 @@
         <span class="chip-btn" data-filter="unconfirmed" onclick="setFilterChip('unconfirmed')">
           ⏳ Unconfirmed <span class="chip-count" id="chip-cnt-unconfirmed">…</span>
         </span>
-        <span class="chip-btn" data-filter="ss_pending" onclick="setFilterChip('ss_pending')">
-          ⚠️ Shot Pending <span class="chip-count" id="chip-cnt-ss-pending">…</span>
-        </span>
-        <span class="chip-btn" data-filter="ss_taken" onclick="setFilterChip('ss_taken')">
-          📸 Shot Taken <span class="chip-count" id="chip-cnt-ss-taken">…</span>
-        </span>
         <span class="chip-btn" data-filter="exported" onclick="setFilterChip('exported')">
           📦 Exported <span class="chip-count" id="chip-cnt-exported">…</span>
         </span>
@@ -550,7 +412,6 @@
         <table>
           <thead>
             <tr>
-              <th style="width:70px">Screenshot</th>
               <th>Domain</th>
               <th>Status</th>
               <th>Reason / Triggers</th>
@@ -559,7 +420,7 @@
             </tr>
           </thead>
           <tbody id="domains-body">
-            <tr><td colspan="6" style="text-align:center;padding:24px" class="muted">Loading domains…</td></tr>
+            <tr><td colspan="5" style="text-align:center;padding:24px" class="muted">Loading domains…</td></tr>
           </tbody>
         </table>
       </div>
@@ -574,33 +435,6 @@
       </div>
     </div>
   </main>
-</div>
-
-<!-- Domain Detail Drawer Overlay -->
-<div class="detail-overlay hidden" id="detail-overlay" onclick="if(event.target===this)closeDetail()">
-  <div class="detail-drawer" id="detail-panel">
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px">
-      <h3 id="detail-domain-title" style="font-size:18px;font-weight:700;color:#fff;word-break:break-all"></h3>
-      <button class="btn btn-ghost btn-sm" onclick="closeDetail()">✕ Close</button>
-    </div>
-
-    <div style="margin-bottom:16px" id="detail-badge-area"></div>
-
-    <div id="detail-screenshot-area" class="mb16 hidden">
-      <label>Full-Page Capture Preview</label>
-      <img id="detail-img" class="detail-screenshot-img" src="" alt="Screenshot">
-    </div>
-
-    <div class="mb16">
-      <label>Classification & Metadata</label>
-      <pre id="detail-json"></pre>
-    </div>
-
-    <div style="margin-top:auto;display:flex;gap:10px">
-      <a id="detail-visit-link" href="#" target="_blank" rel="noopener noreferrer" class="btn btn-ghost btn-sm" style="flex:1">↗ Visit Website</a>
-      <button class="btn btn-primary btn-sm" onclick="copyDomainJson()" style="flex:1">📋 Copy Record</button>
-    </div>
-  </div>
 </div>
 
 <!-- Generic Confirmation Modal -->

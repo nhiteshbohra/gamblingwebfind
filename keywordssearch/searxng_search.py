@@ -716,6 +716,30 @@ def start_searxng_docker() -> bool:
     return False
 
 
+def stop_searxng_docker() -> bool:
+    """Safely stop SearXNG Docker container to free system RAM and CPU."""
+    if not _COMPOSE_FILE.exists():
+        return False
+
+    print("[docker] Safely stopping SearXNG Docker containers to free system memory...")
+    try:
+        _ensure_docker_in_path()
+        result = subprocess.run(
+            ["docker", "compose", "down"],
+            cwd=str(_COMPOSE_DIR), capture_output=True, text=True, timeout=15
+        )
+        if result.returncode != 0:
+            subprocess.run(
+                ["docker-compose", "down"],
+                cwd=str(_COMPOSE_DIR), capture_output=True, text=True, timeout=15
+            )
+        print("[docker] SearXNG containers stopped successfully. Memory released.")
+        return True
+    except Exception as e:
+        print(f"[docker] Error stopping SearXNG containers: {e}")
+        return False
+
+
 async def searxng_crawl_keyword(
     keyword: str,
     session: aiohttp.ClientSession,
@@ -1301,6 +1325,8 @@ async def run_search(
         print(f"[searxng_search] Unexpected error in run_search: {e}")
         final_active = final_inactive = final_skipped = 0
     finally:
+        if searxng_available and USE_SEARXNG:
+            stop_searxng_docker()
         mongo_client.close()
 
     final_inserted = final_active + final_inactive  # total newly upserted
@@ -1312,3 +1338,14 @@ async def run_search(
         "unique_domains": len(all_domains),
         "new_inserted": final_inserted,
     }
+
+
+if __name__ == "__main__":
+    from pathlib import Path
+    import json
+    root_dir = Path(__file__).resolve().parent.parent
+    cands = list(root_dir.glob("gambling_top_*_keywords.json")) + list(root_dir.glob("*keyword*.json"))
+    kw_path = cands[0] if cands else (root_dir / "gambling_top_944_keywords.json")
+    with open(kw_path, encoding="utf-8") as f:
+        keywords = [str(k).strip().lower() for k in json.load(f) if str(k).strip()]
+    asyncio.run(run_search(keywords))

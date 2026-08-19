@@ -17,10 +17,15 @@ New Architecture:
 5. MongoDB sync: updates checked_domains and domain_Listed.
 """
 import asyncio
-import logging
 import os
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+# Ensure project root is in sys.path
+_ROOT = str(Path(__file__).resolve().parent.parent)
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
 
 from dotenv import load_dotenv
 from tqdm import tqdm
@@ -307,3 +312,20 @@ async def run(concurrency: int = None, limit: int = 0, mode: str = "new"):
     print("=" * 65 + "\n")
 
     return run_stats
+
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="checking_url runner")
+    parser.add_argument("--mode", default="new", choices=["new", "blocked", "unconfirmed", "regular", "dead"], help="Target queue")
+    parser.add_argument("--concurrency", type=int, default=int(os.getenv("CHECK_CONCURRENCY", os.getenv("MAX_CONCURRENT_FETCHES", 20))))
+    parser.add_argument("--limit", type=int, default=int(os.getenv("CHECK_LIMIT", 0)))
+    args = parser.parse_args()
+
+    from checking_url.ai_classifier import start_ollama_if_needed
+    try:
+        asyncio.run(start_ollama_if_needed())
+    except Exception as e:
+        print(f"[!] Local AI status check error: {e}")
+
+    asyncio.run(run(concurrency=args.concurrency, limit=args.limit, mode=args.mode))

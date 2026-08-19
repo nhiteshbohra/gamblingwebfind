@@ -94,3 +94,14 @@ def get_screenshot(domain: str):
         if os.path.exists(p) and is_valid_screenshot(p):
             return FileResponse(p, media_type="image/jpeg")
     raise HTTPException(404, "screenshot not found")
+
+
+@router.post("/backup")
+def trigger_backup():
+    try:
+        from db.mongo_client import backup_databases
+        res = backup_databases()
+        return res
+    except Exception as e:
+        raise HTTPException(500, f"Database backup failed: {e}")
+

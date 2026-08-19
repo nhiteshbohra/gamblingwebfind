@@ -1,42 +1,15 @@
-import asyncio, sys, io, uuid, contextvars
+import asyncio
+import os
+import sys
+import uuid
+import subprocess
 from datetime import datetime, timezone, timedelta
-from contextlib import contextmanager
 
 IST = timezone(timedelta(hours=5, minutes=30))
 _jobs = {}
-_current_job = contextvars.ContextVar("current_job", default=None)
 
 
-class _ContextAwareStdout(io.TextIOBase):
-    def __init__(self, original):
-        self.original = original
-
-    def write(self, s):
-        raw = s
-        stripped = s.strip()
-        job_ctx = _current_job.get()
-        if job_ctx and stripped:
-            job_id, loop = job_ctx
-            try:
-                if loop.is_running():
-                    asyncio.run_coroutine_threadsafe(log(job_id, stripped), loop)
-                else:
-                    loop.run_until_complete(log(job_id, stripped))
-            except Exception:
-                pass
-        try:
-            return self.original.write(raw)
-        except Exception:
-            return len(raw)
-
-    def flush(self):
-        try:
-            self.original.flush()
-        except Exception:
-            pass
-
-
-def new_job(stage):
+def new_job(stage: str) -> str:
     job_id = uuid.uuid4().hex[:10]
     _jobs[job_id] = {
         "job_id": job_id,
@@ -44,27 +17,26 @@ def new_job(stage):
         "status": "running",
         "started_at": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S"),
         "queue": asyncio.Queue(),
-        "future": None,
-        "stop_requested": False,
+        "process": None,
     }
     return job_id
 
 
-def set_job_future(job_id, fut):
+def set_job_process(job_id: str, proc):
     job = _jobs.get(job_id)
     if job:
-        job["future"] = fut
+        job["process"] = proc
 
 
-def get_job(job_id):
+def get_job(job_id: str):
     return _jobs.get(job_id)
 
 
 def all_jobs():
-    return [{k: v for k, v in j.items() if k not in ("queue", "future")} for j in _jobs.values()]
+    return [{k: v for k, v in j.items() if k not in ("queue", "process")} for j in _jobs.values()]
 
 
-def finish_job(job_id, status="done"):
+def finish_job(job_id: str, status: str = "done"):
     job = _jobs.get(job_id)
     if job:
         if job["status"] == "running":
@@ -72,18 +44,23 @@ def finish_job(job_id, status="done"):
         job["queue"].put_nowait(None)
 
 
-def stop_job(job_id):
+def stop_job(job_id: str) -> bool:
     job = _jobs.get(job_id)
     if not job:
         return False
     if job["status"] == "running":
         job["status"] = "stopped"
-        job["stop_requested"] = True
-        if job.get("future"):
+        proc = job.get("process")
+        if proc:
             try:
-                job["future"].cancel()
+                proc.terminate()
             except Exception:
                 pass
+            if sys.platform == "win32" and proc.pid:
+                try:
+                    subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True)
+                except Exception:
+                    pass
         try:
             job["queue"].put_nowait("[!] Pipeline stage stopped by user.")
             job["queue"].put_nowait(None)
@@ -93,7 +70,7 @@ def stop_job(job_id):
     return False
 
 
-def stop_stage(stage):
+def stop_stage(stage: str) -> bool:
     stopped_any = False
     for job_id, job in list(_jobs.items()):
         if job.get("stage") == stage and job.get("status") == "running":
@@ -102,7 +79,7 @@ def stop_stage(stage):
     return stopped_any
 
 
-def stop_all():
+def stop_all() -> int:
     stopped_count = 0
     for job_id, job in list(_jobs.items()):
         if job.get("status") == "running":
@@ -111,26 +88,11 @@ def stop_all():
     return stopped_count
 
 
-def is_stage_running(stage):
+def is_stage_running(stage: str) -> bool:
     return any(j.get("stage") == stage and j.get("status") == "running" for j in _jobs.values())
 
 
-async def log(job_id, msg):
+async def log(job_id: str, msg: str):
     job = _jobs.get(job_id)
     if job:
         await job["queue"].put(msg)
-
-
-def _ensure_wrapped():
-    if not isinstance(sys.stdout, _ContextAwareStdout):
-        sys.stdout = _ContextAwareStdout(sys.stdout)
-
-
-@contextmanager
-def capture_prints(job_id, loop):
-    _ensure_wrapped()
-    token = _current_job.set((job_id, loop))
-    try:
-        yield
-    finally:
-        _current_job.reset(token)

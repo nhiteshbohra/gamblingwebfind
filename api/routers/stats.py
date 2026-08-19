@@ -77,7 +77,7 @@ def get_stats():
         exported = chk.count_documents({"exported": True})
         pending_export = chk.count_documents({
             "status": "gambling",
-            "screenshot_taken": True,
+            "screenshot_taken": {"$in": [True, "true", "True"]},
             "exported": {"$ne": True}
         })
 

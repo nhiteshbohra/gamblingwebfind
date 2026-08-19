@@ -15,28 +15,24 @@ Pipeline flow:
   7. Delete original source screenshots from SCREENSHOT_DIR.
 """
 import os
+import sys
 import shutil
 import asyncio
 import urllib.parse
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from xml.sax.saxutils import escape as xml_escape
 
-import docx
-from docx.shared import Inches, Pt, RGBColor
-from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_TAB_ALIGNMENT
-from docx.opc.constants import RELATIONSHIP_TYPE
-from docx.oxml import parse_xml
-from docx.oxml.ns import nsdecls
-import pandas as pd
-import openpyxl
-from openpyxl.styles import Font
+# Ensure project root is in sys.path
+_ROOT = str(Path(__file__).resolve().parent.parent)
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+
 from dotenv import load_dotenv
 
 load_dotenv(dotenv_path=Path(__file__).resolve().parent.parent / ".env")
 
 from export_domains.screenshot import _url_to_filename, is_valid_screenshot, all_filename_candidates
-from db.mongo_client import checked_domains
+from db.mongo_client import checked_domains, source_domains
 
 IST = timezone(timedelta(hours=5, minutes=30))
 HYPERLINK_FONT = Font(color="0000FF", underline="single")
@@ -235,26 +231,16 @@ def _apply_excel_hyperlinks(ws):
 
 
 def build_workbook(entries: list[dict], failed_docs: list[dict], output_path: str) -> str:
-    """Build report.xlsx with two sheets: 'Captured Domains' and 'Failed Domains'."""
+    """Build report.xlsx with 'Captured Domains' sheet (failed domains omitted per user spec)."""
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
 
     captured_rows = [
         {"S.No.": i, "Domain": e.get("domain", ""), "URL": e.get("url", "")}
         for i, e in enumerate(entries, 1)
     ]
-    failed_rows = [
-        {
-            "S.No.": i,
-            "Domain": d.get("domain") or d.get("_id", ""),
-            "URL": d.get("url", ""),
-            "Failure Reason": d.get("screenshot_failed_reason", "Screenshot file missing"),
-        }
-        for i, d in enumerate(failed_docs, 1)
-    ]
 
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
         pd.DataFrame(captured_rows).to_excel(writer, sheet_name="Captured Domains", index=False)
-        pd.DataFrame(failed_rows).to_excel(writer, sheet_name="Failed Domains", index=False)
 
     wb = openpyxl.load_workbook(output_path)
     for sheet_name in wb.sheetnames:
@@ -322,10 +308,20 @@ def run_export(domain_ids: list = None, limit: int = 0) -> dict:
             failed_docs.append(doc)
 
     if missing_ids:
-        print(f"  [export] {len(missing_ids)} domain(s) had screenshot_taken=True but file missing — correcting DB flag.")
+        print(f"  [export] {len(missing_ids)} domain(s) had screenshot missing — marking status as 'unconfirmed'.")
         checked_domains().update_many(
             {"_id": {"$in": missing_ids}},
-            {"$set": {"screenshot_taken": False, "screenshot_failed_reason": "Screenshot file missing at export time"}},
+            {"$set": {
+                "status": "unconfirmed",
+                "screenshot_taken": False,
+                "reason": "Unconfirmed: Screenshot file missing at export time",
+                "screenshot_failed_reason": "Screenshot file missing at export time",
+                "ai_evaluated": False,
+            }},
+        )
+        source_domains().update_many(
+            {"_id": {"$in": missing_ids}},
+            {"$set": {"processed": False, "active": True}},
         )
 
     print(f"[export] Run ID: {run_id} | Verified: {len(entries)} | Failed: {len(failed_docs)}")
@@ -365,18 +361,7 @@ def run_export(domain_ids: list = None, limit: int = 0) -> dict:
         {"$set": {"exported": True, "exported_at": now_ist}},
     )
 
-    # 6. Delete originals from SCREENSHOT_DIR
-    cleaned = 0
-    for entry in entries:
-        src = entry.get("_src")
-        if src and os.path.exists(src):
-            try:
-                os.remove(src)
-                cleaned += 1
-            except Exception:
-                pass
-    if cleaned:
-        print(f"[export] Pruned {cleaned} original screenshots from {src_dir}")
+    # ponytail: Do NOT delete original screenshots from SCREENSHOT_DIR. Preserve all files on disk.
 
     print(f"\n[export] Done — output/{run_id}/")
     print(f"           report.pdf  : {pdf_path or 'N/A (conversion failed)'}")
@@ -395,3 +380,11 @@ def run_export(domain_ids: list = None, limit: int = 0) -> dict:
 async def run(concurrency: int = None, limit: int = 0) -> dict:
     """Async entry point — offloads blocking COM PDF export to thread."""
     return await asyncio.to_thread(run_export, None, limit)
+
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="export_domains exporter")
+    parser.add_argument("--limit", type=int, default=int(os.getenv("CAPTURE_LIMIT", 0)))
+    args = parser.parse_args()
+    asyncio.run(run(limit=args.limit))
