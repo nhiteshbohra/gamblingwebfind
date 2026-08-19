@@ -328,13 +328,6 @@ async def get_session() -> aiohttp.ClientSession:
     return _session
 
 
-async def close_ai_session():
-    """Close the persistent HTTP session."""
-    global _session
-    if _session and not _session.closed:
-        await _session.close()
-        _session = None
-
 
 def clean_page_text(html: str, max_chars: int = 2500) -> tuple[str, str, list[str], str]:
     """
@@ -594,10 +587,10 @@ async def stop_ollama_if_running() -> bool:
 async def close_ai_session():
     """Close HTTP session and unload Ollama AI models to free system memory."""
     global _session
-    if _session and not _session.closed:
-        await stop_ollama_if_running()
+    await stop_ollama_if_running()
+    if _session is not None and not _session.closed:
         await _session.close()
-        _session = None
+    _session = None
 
 
 async def classify_with_ai(

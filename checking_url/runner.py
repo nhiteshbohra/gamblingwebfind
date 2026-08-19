@@ -20,6 +20,7 @@ import asyncio
 import logging
 import os
 import sys
+import urllib.parse
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -120,13 +121,17 @@ async def run(concurrency: int = None, limit: int = 0, mode: str = "new"):
 
     async def process(doc):
         try:
-            domain = doc.get("domain", "")
-            if not domain:
-                pbar.update(1)
-                pbar.set_postfix({"Left": total_pending - pbar.n})
+            raw_domain = doc.get("domain") or doc.get("_id") or ""
+            if not raw_domain:
                 return
 
-            url = f"https://{domain}"
+            if str(raw_domain).startswith(("http://", "https://")):
+                parsed = urllib.parse.urlparse(str(raw_domain))
+                domain = parsed.netloc or str(raw_domain).split("/")[0]
+                url = str(raw_domain).rstrip("/")
+            else:
+                domain = str(raw_domain).strip().rstrip("/")
+                url = f"https://{domain}"
 
             # 1. Fetch HTML
             async with fetch_sem:
@@ -146,8 +151,6 @@ async def run(concurrency: int = None, limit: int = 0, mode: str = "new"):
                 delete_screenshot(domain, output_screenshot_dir)
                 await async_write_result(domain, url=url, status=final_status, reason=final_reason, screenshot_taken=False)
                 run_stats[final_status] += 1
-                pbar.update(1)
-                pbar.set_postfix({"Left": total_pending - pbar.n})
                 return
 
             # 2. Universal Keyword Threshold:
@@ -266,8 +269,9 @@ async def run(concurrency: int = None, limit: int = 0, mode: str = "new"):
                     run_stats["unconfirmed"] += 1
                 except Exception:
                     pass
+        finally:
             pbar.update(1)
-            pbar.set_postfix({"Left": total_pending - pbar.n})
+            pbar.set_postfix({"Left": max(0, total_pending - pbar.n)})
 
     queue = asyncio.Queue()
     for doc in pending:

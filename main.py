@@ -245,7 +245,6 @@ def interactive_menu():
             run_export_domains()
         elif choice == "0" or choice.lower() in ("exit", "q", "quit"):
             print("Exiting.")
-            shutdown_background_services()
             break
         else:
             print("[!] Invalid option. Please enter 1-3 or 0 to exit.")

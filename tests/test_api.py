@@ -164,6 +164,7 @@ class TestAPIPipelineRunsAndJobs:
     def test_run_subprocess_worker_execution(self):
         import asyncio
         import sys
+        import time
         import threading
         from api.routers.pipeline import _run_subprocess_worker
         loop = asyncio.new_event_loop()
@@ -171,6 +172,10 @@ class TestAPIPipelineRunsAndJobs:
         t.start()
         job_id = jobs.new_job("keywords")
         _run_subprocess_worker(job_id, [sys.executable, "-c", "print('hello_test')"], loop)
+        for _ in range(50):
+            if jobs.get_job(job_id)["status"] == "done":
+                break
+            time.sleep(0.02)
         job = jobs.get_job(job_id)
         assert job["status"] == "done"
         loop.call_soon_threadsafe(loop.stop)
