@@ -325,6 +325,10 @@ def write_result(
     if screenshot_taken is not None:
         set_fields["screenshot_taken"] = bool(screenshot_taken)
         set_fields["screenshot_failed_reason"] = screenshot_failed_reason
+        if screenshot_taken:
+            now_ts = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
+            set_fields["screenshot_date"] = now_ts
+            set_fields["screenshot_taken_at"] = now_ts
 
     update = {
         "$set": set_fields,
@@ -342,10 +346,11 @@ def write_result(
             )
 
             # Sync status in source domain_Listed (strictly boolean active, with block_reason)
+            # ponytail: Unset block_reason on non-blocked transitions so resolved domains leave the blocked queue
             if status == "unconfirmed":
                 source_domains().update_one(
                     {"_id": domain},
-                    {"$set": {"processed": False, "active": True}},
+                    {"$set": {"processed": False, "active": True}, "$unset": {"block_reason": ""}},
                 )
             elif status == "blocked":
                 source_domains().update_one(
@@ -355,12 +360,12 @@ def write_result(
             elif status == "dead":
                 source_domains().update_one(
                     {"_id": domain},
-                    {"$set": {"processed": True, "active": False}},
+                    {"$set": {"processed": True, "active": False}, "$unset": {"block_reason": ""}},
                 )
             else:  # gambling or regular
                 source_domains().update_one(
                     {"_id": domain},
-                    {"$set": {"processed": True, "active": True}},
+                    {"$set": {"processed": True, "active": True}, "$unset": {"block_reason": ""}},
                 )
             return
         except Exception as e:

@@ -44,12 +44,13 @@ except ImportError:
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gambling-analyst")
 OLLAMA_VALIDATOR_MODEL = os.getenv("OLLAMA_VALIDATOR_MODEL", "gambling-validator")
-AI_CONCURRENCY = int(os.getenv("AI_CONCURRENCY", 10))
+# ponytail: Default AI concurrency set to 2 to give 8B model ample VRAM and zero queue starvation
+AI_CONCURRENCY = int(os.getenv("AI_CONCURRENCY", 2))
 
-# Dynamic timeout bounds (seconds) — replaces hardcoded AI_TIMEOUT
-AI_TIMEOUT_MIN = float(os.getenv("AI_TIMEOUT_MIN", 8.0))    # fastest simple pages
-AI_TIMEOUT_MAX = float(os.getenv("AI_TIMEOUT_MAX", 45.0))   # slowest complex pages
-AI_TIMEOUT_BASE = float(os.getenv("AI_TIMEOUT_BASE", 15.0)) # initial seed before data
+# Dynamic timeout bounds (seconds) — scaled for 8B validator model
+AI_TIMEOUT_MIN = float(os.getenv("AI_TIMEOUT_MIN", 10.0))   # fastest simple pages
+AI_TIMEOUT_MAX = float(os.getenv("AI_TIMEOUT_MAX", 60.0))   # slowest complex pages
+AI_TIMEOUT_BASE = float(os.getenv("AI_TIMEOUT_BASE", 20.0)) # initial seed before data
 
 
 class DynamicTimeoutManager:
@@ -306,25 +307,43 @@ NON_GAMBLING_EVIDENCE_MAP = {
     "sports_scores_stats": ["live cricket score", "ball by ball commentary", "ipl score", "match schedule", "point table", "player stats", "match scorecard", "fixtures", "team standings", "scorecard", "live score"],
 }
 
-# Global session and semaphore
+# Global session and semaphore (tracked with active event loop)
 _session: aiohttp.ClientSession | None = None
+_session_loop = None
 _semaphore: asyncio.Semaphore | None = None
+_semaphore_loop = None
 
 
 def get_semaphore() -> asyncio.Semaphore:
-    global _semaphore
-    if _semaphore is None:
+    global _semaphore, _semaphore_loop
+    try:
+        current_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        current_loop = None
+
+    if _semaphore is None or _semaphore_loop != current_loop:
         _semaphore = asyncio.Semaphore(AI_CONCURRENCY)
+        _semaphore_loop = current_loop
     return _semaphore
 
 
 async def get_session() -> aiohttp.ClientSession:
-    global _session
-    if _session is None or _session.closed:
+    global _session, _session_loop
+    try:
+        current_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        current_loop = None
+
+    if _session is None or _session.closed or _session_loop != current_loop:
+        if _session and not _session.closed:
+            try:
+                await _session.close()
+            except Exception:
+                pass
         connector = aiohttp.TCPConnector(limit=50, keepalive_timeout=60)
-        # Use max timeout for the session-level default; per-request timeouts override it
         timeout = aiohttp.ClientTimeout(total=AI_TIMEOUT_MAX)
         _session = aiohttp.ClientSession(connector=connector, timeout=timeout)
+        _session_loop = current_loop
     return _session
 
 
@@ -529,31 +548,37 @@ async def start_ollama_if_needed() -> bool:
     Check if Ollama server is running; if not, attempt to start it via subprocess.
     Returns True if Ollama is running/started, False if unavailable.
     """
-    import subprocess
-    ok, msg = await check_ollama_status()
-    if ok:
-        print(f"[+] Local AI: {msg}")
-        return True
-
-    binary = os.getenv("OLLAMA_AUTOSTART_PATH", "ollama")
-    timeout = float(os.getenv("OLLAMA_AUTOSTART_TIMEOUT", "15.0"))
+    global _session
     try:
-        subprocess.Popen([binary, "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except Exception as e:
-        print(f"[!] Ollama: could not start automatically ({e}) — start it manually")
-        return False
-
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + timeout
-    while loop.time() < deadline:
-        await asyncio.sleep(1.0)
+        import subprocess
         ok, msg = await check_ollama_status()
         if ok:
-            print(f"[+] Ollama: started ({msg})")
+            print(f"[+] Local AI: {msg}")
             return True
 
-    print(f"[!] Ollama: could not start automatically — start it manually")
-    return False
+        binary = os.getenv("OLLAMA_AUTOSTART_PATH", "ollama")
+        timeout = float(os.getenv("OLLAMA_AUTOSTART_TIMEOUT", "15.0"))
+        try:
+            subprocess.Popen([binary, "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception as e:
+            print(f"[!] Ollama: could not start automatically ({e}) — start it manually")
+            return False
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while loop.time() < deadline:
+            await asyncio.sleep(1.0)
+            ok, msg = await check_ollama_status()
+            if ok:
+                print(f"[+] Ollama: started ({msg})")
+                return True
+
+        print(f"[!] Ollama: could not start automatically — start it manually")
+        return False
+    finally:
+        if _session and not _session.closed:
+            await _session.close()
+            _session = None
 
 
 async def stop_ollama_if_running() -> bool:
@@ -660,7 +685,7 @@ Respond ONLY in valid JSON:
             async with session.post(
                 f"{OLLAMA_BASE_URL}/api/generate",
                 json=payload,
-                timeout=aiohttp.ClientTimeout(total=_timeout_mgr.compute_timeout(len(validator_prompt))),
+                timeout=aiohttp.ClientTimeout(total=max(35.0, _timeout_mgr.compute_timeout(len(validator_prompt)) * 1.5)),
             ) as resp:
                 if resp.status == 200:
                     result = await resp.json()

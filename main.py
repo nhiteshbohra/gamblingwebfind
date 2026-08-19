@@ -132,10 +132,15 @@ def run_checking_url(mode: str = None):
 
     concurrency = int(os.getenv("CHECK_CONCURRENCY", os.getenv("MAX_CONCURRENT_FETCHES", 20)))
     limit = int(os.getenv("CHECK_LIMIT", 0))
+    min_age_days = int(os.getenv("RECHECK_MIN_AGE_DAYS", 0))
 
-    summary = asyncio.run(check_run(concurrency=concurrency, limit=limit, mode=mode))
-    if summary:
-        print("[+] checking_url complete.")
+    # ponytail: Clean Ctrl+C exit without raw Python traceback
+    try:
+        summary = asyncio.run(check_run(concurrency=concurrency, limit=limit, mode=mode, min_age_days=min_age_days))
+        if summary:
+            print("[+] checking_url complete.")
+    except KeyboardInterrupt:
+        print("\n[+] Stopped by user. Progress saved — you can resume anytime.")
 
 
 def _size_based_split(domain_ids: list, pdf_limit_mb: float = 24.0) -> list[list[str]]:

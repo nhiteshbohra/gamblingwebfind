@@ -32,8 +32,8 @@ if _ROOT not in sys.path:
 from dotenv import load_dotenv
 from tqdm import tqdm
 
-# Silence verbose loggers to keep progress bar clean
-for _logger_name in ("scrapling", "curl_cffi", "urllib3", "asyncio", "playwright", "ai_classifier"):
+# Silence verbose third-party loggers to keep progress bar clean
+for _logger_name in ("scrapling", "curl_cffi", "urllib3", "asyncio", "playwright"):
     _lg = logging.getLogger(_logger_name)
     _lg.setLevel(logging.CRITICAL)
     _lg.handlers.clear()
@@ -62,7 +62,7 @@ async def async_write_result(*args, **kwargs):
     return await asyncio.to_thread(write_result, *args, **kwargs)
 
 
-async def run(concurrency: int = None, limit: int = 0, mode: str = "new"):
+async def run(concurrency: int = None, limit: int = 0, mode: str = "new", min_age_days: int = 0):
     get_db()
     output_screenshot_dir = os.getenv("SCREENSHOT_DIR", OUTPUT_SCREENSHOT_DIR)
     os.makedirs(output_screenshot_dir, exist_ok=True)
@@ -83,10 +83,10 @@ async def run(concurrency: int = None, limit: int = 0, mode: str = "new"):
         pending = list(find_unconfirmed_domains(limit=limit))
         desc_label = "Rechecking Unconfirmed"
     elif mode == "regular":
-        pending = list(find_regular_domains(limit=limit))
+        pending = list(find_regular_domains(limit=limit, min_age_days=min_age_days))
         desc_label = "Rechecking Regular"
     elif mode == "dead":
-        pending = list(find_dead_domains(limit=limit))
+        pending = list(find_dead_domains(limit=limit, min_age_days=min_age_days))
         desc_label = "Rechecking Dead"
     else:
         pending = list(find_active_domains(limit=limit))
@@ -102,7 +102,13 @@ async def run(concurrency: int = None, limit: int = 0, mode: str = "new"):
 
     # Initialize BrowserPool for immediate screenshotting of confirmed gambling sites
     browser_pool = BrowserPool(concurrency=min(concurrency, 10))
-    await browser_pool.start()
+    # ponytail: Guard setup exceptions (e.g. missing Chromium binary) to avoid bare process crash
+    try:
+        await browser_pool.start()
+    except Exception as e:
+        print(f"[check FATAL] Could not start browser pool: {type(e).__name__}: {e}")
+        print("[check FATAL] If Chromium is missing, run: playwright install chromium")
+        return {"error": str(e), "gambling": 0, "regular": 0, "unconfirmed": 0, "blocked": 0, "dead": 0}
 
     fetch_sem = asyncio.Semaphore(concurrency)
     pbar = tqdm(total=total_pending, desc=desc_label, unit="domain", dynamic_ncols=True)
@@ -138,15 +144,12 @@ async def run(concurrency: int = None, limit: int = 0, mode: str = "new"):
                 result = await fetch(url, domain, timeout_seconds=timeout, per_domain_delay=delay)
 
             if result.failure_type:
-                if result.failure_type == "connection_failed":
-                    final_status = "unconfirmed"
-                    final_reason = f"Network error: {result.error or 'connection_failed'}"
-                elif result.failure_type == "blocked":
+                if result.failure_type == "blocked":
                     final_status = "blocked"
                     final_reason = "Blocked: Cloudflare WAF / HTTP 403 Forbidden"
                 else:
                     final_status = "dead"
-                    final_reason = f"Dead: {result.error or 'unreachable'}"
+                    final_reason = f"Dead: {result.error or 'Host unreachable / connection failed'}"
 
                 delete_screenshot(domain, output_screenshot_dir)
                 await async_write_result(domain, url=url, status=final_status, reason=final_reason, screenshot_taken=False)
@@ -173,7 +176,8 @@ async def run(concurrency: int = None, limit: int = 0, mode: str = "new"):
                     result.html or "",
                     url=url,
                     matched_keywords=matched_keywords,
-                    fast_mode=(mode == "unconfirmed"),
+                    # ponytail: Recheck queues use fast_mode (1-round) to halve AI roundtrips and avoid local Ollama congestion
+                    fast_mode=(mode in ("unconfirmed", "regular", "dead", "blocked") or os.getenv("AI_FAST_MODE", "false").lower() == "true"),
                 )
                 ai_verdict = ai_res.get("verdict", "unconfirmed")
 
@@ -188,10 +192,10 @@ async def run(concurrency: int = None, limit: int = 0, mode: str = "new"):
                     final_reason = ai_res.get("reason", "AI rejected: Regular website")
                     delete_screenshot(domain, output_screenshot_dir)
                 else:
-                    # Ollama offline or timeout -> Unconfirmed fallback
+                    # Ollama offline or timeout -> Unconfirmed fallback with explicit reason
                     final_status = "unconfirmed"
                     run_stats["unconfirmed"] += 1
-                    final_reason = ai_res.get("reason", "Unconfirmed: AI timeout/offline")
+                    final_reason = ai_res.get("reason") or "Unconfirmed: AI model was busy/offline, queued to re-run"
                     delete_screenshot(domain, output_screenshot_dir)
 
             else:
@@ -310,7 +314,7 @@ async def run(concurrency: int = None, limit: int = 0, mode: str = "new"):
     print(f"    - Challenge Round Overrides    : {run_stats.get('challenge_overrides', 0):,}")
     print(f"  * Regular Sites (Verified)       : {run_stats['regular']:,}")
     if run_stats["unconfirmed"]:
-        print(f"  * Unconfirmed (Ollama Down)      : {run_stats['unconfirmed']:,} [Queued to re-run]")
+        print(f"  * Unconfirmed (Queued to re-run) : {run_stats['unconfirmed']:,}")
     blocked_label = "Still Blocked (403 / WAF)" if mode == "blocked" else "Blocked (403 / WAF)"
     print(f"  * {blocked_label:<31}: {run_stats['blocked']:,}")
     print(f"  * Dead / Unreachable             : {run_stats['dead']:,}")
@@ -325,6 +329,7 @@ if __name__ == "__main__":
     parser.add_argument("--mode", default="new", choices=["new", "blocked", "unconfirmed", "regular", "dead"], help="Target queue")
     parser.add_argument("--concurrency", type=int, default=int(os.getenv("CHECK_CONCURRENCY", os.getenv("MAX_CONCURRENT_FETCHES", 20))))
     parser.add_argument("--limit", type=int, default=int(os.getenv("CHECK_LIMIT", 0)))
+    parser.add_argument("--min-age-days", type=int, default=int(os.getenv("RECHECK_MIN_AGE_DAYS", 0)), help="Cooldown age threshold in days for regular/dead rechecks")
     args = parser.parse_args()
 
     from checking_url.ai_classifier import start_ollama_if_needed
@@ -333,4 +338,4 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"[!] Local AI status check error: {e}")
 
-    asyncio.run(run(concurrency=args.concurrency, limit=args.limit, mode=args.mode))
+    asyncio.run(run(concurrency=args.concurrency, limit=args.limit, mode=args.mode, min_age_days=args.min_age_days))

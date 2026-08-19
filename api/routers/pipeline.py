@@ -13,6 +13,7 @@ router = APIRouter(prefix="/api")
 
 class CheckBody(BaseModel):
     mode: Literal["new", "blocked", "unconfirmed", "regular", "dead"] = "new"
+    min_age_days: int = 0
 
 class ExportBody(BaseModel):
     format: int = 1
@@ -24,7 +25,7 @@ class ImportBody(BaseModel):
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
-def _run_subprocess_worker(job_id: str, cmd: list[str], loop: asyncio.AbstractEventLoop):
+def _run_subprocess_worker(job_id: str, cmd: list[str], loop: asyncio.AbstractEventLoop, max_runtime_seconds: int = 7200):
     job = get_job(job_id)
     if not job:
         return
@@ -33,6 +34,7 @@ def _run_subprocess_worker(job_id: str, cmd: list[str], loop: asyncio.AbstractEv
     try:
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
+        creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
         proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -42,16 +44,28 @@ def _run_subprocess_worker(job_id: str, cmd: list[str], loop: asyncio.AbstractEv
             text=True,
             bufsize=1,
             universal_newlines=True,
+            creationflags=creationflags,
         )
         set_job_process(job_id, proc)
 
+        import time
+        deadline = time.monotonic() + max_runtime_seconds
         for line in iter(proc.stdout.readline, ''):
             if line:
                 clean_line = line.rstrip("\r\n")
                 loop.call_soon_threadsafe(q.put_nowait, clean_line)
+            if time.monotonic() > deadline:
+                loop.call_soon_threadsafe(q.put_nowait, f"[!] Process exceeded {max_runtime_seconds}s limit. Terminating.")
+                stop_job(job_id)
+                break
 
         proc.stdout.close()
-        proc.wait()
+        # ponytail: Bound proc.wait() so a wedged subprocess cannot block job completion indefinitely
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
         if job["status"] == "running":
             loop.call_soon_threadsafe(finish_job, job_id, "done" if proc.returncode == 0 else "failed")
     except Exception as e:
@@ -77,6 +91,8 @@ async def run_check(body: CheckBody, bg: BackgroundTasks):
         raise HTTPException(409, "check stage already running")
     job_id = new_job("check")
     cmd = [sys.executable, "-u", str(PROJECT_ROOT / "checking_url" / "runner.py"), "--mode", body.mode]
+    if body.mode in ("regular", "dead") and body.min_age_days > 0:
+        cmd += ["--min-age-days", str(body.min_age_days)]
     loop = asyncio.get_running_loop()
     bg.add_task(_run_subprocess_worker, job_id, cmd, loop)
     return {"job_id": job_id}
