@@ -332,9 +332,11 @@
           <div class="form-row">
             <label>Classification Mode</label>
             <select id="check-mode">
-              <option value="new">New Unprocessed Domains (Queue)</option>
-              <option value="unconfirmed">Re-check Unconfirmed (AI Offline Re-run)</option>
-              <option value="blocked">Re-check Blocked (403 / Cloudflare WAF)</option>
+              <option value="new">1. New Unprocessed Domains (Fresh queue from SearXNG search / CSV import)</option>
+              <option value="blocked">2. Re-check Blocked Sites (Retry HTTP 403 / Cloudflare WAF protected sites)</option>
+              <option value="unconfirmed">3. Re-check Unconfirmed Sites (Re-evaluate pending sites with Ollama AI)</option>
+              <option value="regular">4. Re-check Regular Websites (Re-verify non-gambling sites for new gambling content)</option>
+              <option value="dead">5. Re-check Dead Sites (Re-test offline or DNS-failed sites to see if back online)</option>
             </select>
           </div>
           <div style="display:flex;gap:10px;align-items:center">

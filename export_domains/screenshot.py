@@ -19,6 +19,18 @@ def _url_to_filename(url: str) -> str:
     return f"{clean_domain}_{url_hash}.jpg"
 
 
+def all_filename_candidates(url: str, domain: str) -> list[str]:
+    """Every filename a screenshot for this domain could have been saved under."""
+    clean_dom = domain.removeprefix("www.")
+    return list(dict.fromkeys([
+        _url_to_filename(url),
+        _url_to_filename(f"https://{clean_dom}"),
+        _url_to_filename(f"http://{clean_dom}"),
+        _url_to_filename(f"https://www.{clean_dom}"),
+        _url_to_filename(f"http://www.{clean_dom}"),
+    ]))
+
+
 def is_valid_screenshot(filepath: str, min_size_bytes: int = 500) -> bool:
     """Validate that screenshot exists, has content (>500 bytes), and is a readable image."""
     if not filepath or not os.path.exists(filepath):
@@ -44,11 +56,8 @@ def delete_screenshot(url_or_domain: str, output_dir: str = None) -> bool:
         return False
 
     deleted = False
-    clean_dom = url_or_domain.replace("https://", "").replace("http://", "").rstrip("/")
-    candidates = {
-        _url_to_filename(url_or_domain),
-        _url_to_filename(f"https://{clean_dom}"),
-        _url_to_filename(f"http://{clean_dom}"),
+    clean_dom = url_or_domain.replace("https://", "").replace("http://", "").removeprefix("www.").rstrip("/")
+    candidates = set(all_filename_candidates(url_or_domain, clean_dom)) | {
         _url_to_filename(clean_dom),
     }
 
@@ -193,6 +202,40 @@ class BrowserPool:
                     await page.evaluate("""() => {
                         document.querySelectorAll('.translation-overlay, .modal-backdrop, [class*="overlay"]:not([class*="hero"]), #cookie-law-info-again').forEach(el => el.remove());
                     }""")
+                except Exception:
+                    pass
+
+                # Check rendered DOM text for 403 / Cloudflare WAF or Domain Parking landers
+                try:
+                    rendered_title = (await page.title() or "").lower()
+                    rendered_body = (await page.content() or "")[:15000].lower()
+                    rendered_full = f"{rendered_title} {rendered_body}"
+
+                    _BLOCKED_PAGE_MARKERS = [
+                        "403 forbidden", "access denied", "just a moment...", "cf-challenge",
+                        "checking your browser", "enable javascript and cookies",
+                        "attention required! | cloudflare", "access to this page is denied",
+                        "cloudflare ray id", "error 403", "403 error", "403 - forbidden",
+                    ]
+                    _PARKED_MARKERS = [
+                        "is for sale", "domain for sale", "this domain is for sale",
+                        "this domain is available for sale", "buy this domain", "purchase this domain",
+                        "make an offer on this domain", "parked domain", "parked by", "parked free",
+                        "sedo.com", "sedoparking", "dan.com", "afternic.com", "hugedomains.com",
+                        "atom.com", "squadhelp.com", "godaddy.com/domains", "parkingcrew",
+                    ]
+
+                    if any(m in rendered_full for m in _BLOCKED_PAGE_MARKERS):
+                        await context.close()
+                        context = None
+                        delete_screenshot(clean_dom, os.path.dirname(filepath))
+                        return None, "blocked", "Blocked by Cloudflare WAF / 403 Forbidden in Playwright"
+
+                    if any(m in rendered_full for m in _PARKED_MARKERS):
+                        await context.close()
+                        context = None
+                        delete_screenshot(clean_dom, os.path.dirname(filepath))
+                        return None, "dead", "Dead: Parked or For-Sale lander detected in Playwright"
                 except Exception:
                     pass
 

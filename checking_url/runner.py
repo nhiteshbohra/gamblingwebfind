@@ -34,13 +34,25 @@ for _logger_name in ("scrapling", "curl_cffi", "urllib3", "asyncio", "playwright
 
 load_dotenv(dotenv_path=Path(__file__).resolve().parent.parent / ".env")
 
-from db.mongo_client import find_active_domains, find_blocked_domains, find_unconfirmed_domains, write_result, get_db
+from db.mongo_client import (
+    find_active_domains,
+    find_blocked_domains,
+    find_unconfirmed_domains,
+    find_regular_domains,
+    find_dead_domains,
+    write_result,
+    get_db,
+)
 from checking_url.fetcher import fetch
 from checking_url.classifier import load_keywords, classify
 from checking_url.ai_classifier import classify_with_challenge, close_ai_session, _timeout_mgr
 from export_domains.screenshot import BrowserPool, is_valid_screenshot, delete_screenshot
 
 OUTPUT_SCREENSHOT_DIR = os.getenv("SCREENSHOT_DIR", os.path.join("output", "screenshots"))
+
+
+async def async_write_result(*args, **kwargs):
+    return await asyncio.to_thread(write_result, *args, **kwargs)
 
 
 async def run(concurrency: int = None, limit: int = 0, mode: str = "new"):
@@ -63,12 +75,18 @@ async def run(concurrency: int = None, limit: int = 0, mode: str = "new"):
     elif mode == "unconfirmed":
         pending = list(find_unconfirmed_domains(limit=limit))
         desc_label = "Rechecking Unconfirmed"
+    elif mode == "regular":
+        pending = list(find_regular_domains(limit=limit))
+        desc_label = "Rechecking Regular"
+    elif mode == "dead":
+        pending = list(find_dead_domains(limit=limit))
+        desc_label = "Rechecking Dead"
     else:
         pending = list(find_active_domains(limit=limit))
         desc_label = "Checking & Capturing"
 
     if not pending:
-        target_name = mode if mode in ("blocked", "unconfirmed") else "active unprocessed"
+        target_name = mode if mode in ("blocked", "unconfirmed", "regular", "dead") else "active unprocessed"
         print(f"[check] No {target_name} domains to process.")
         return {}
 
@@ -120,7 +138,7 @@ async def run(concurrency: int = None, limit: int = 0, mode: str = "new"):
                     final_reason = f"Dead: {result.error or 'unreachable'}"
 
                 delete_screenshot(domain, output_screenshot_dir)
-                write_result(domain, url=url, status=final_status, reason=final_reason, screenshot_taken=False)
+                await async_write_result(domain, url=url, status=final_status, reason=final_reason, screenshot_taken=False)
                 run_stats[final_status] += 1
                 pbar.update(1)
                 pbar.set_postfix({"Left": total_pending - pbar.n})
@@ -182,7 +200,7 @@ async def run(concurrency: int = None, limit: int = 0, mode: str = "new"):
                 )
                 if ss_path and is_valid_screenshot(ss_path):
                     run_stats["screenshots_taken"] += 1
-                    write_result(
+                    await async_write_result(
                         domain,
                         url=url,
                         status="gambling",
@@ -195,7 +213,7 @@ async def run(concurrency: int = None, limit: int = 0, mode: str = "new"):
                     delete_screenshot(domain, output_screenshot_dir)
                     _DEAD_SS_STATUSES = {"dead", "dns_failed", "connection_refused", "timeout", "ssl_or_reset"}
                     if ss_status == "blocked":
-                        write_result(
+                        await async_write_result(
                             domain,
                             url=url,
                             status="blocked",
@@ -205,7 +223,7 @@ async def run(concurrency: int = None, limit: int = 0, mode: str = "new"):
                         )
                         run_stats["blocked"] += 1
                     elif ss_status in _DEAD_SS_STATUSES:
-                        write_result(
+                        await async_write_result(
                             domain,
                             url=url,
                             status="dead",
@@ -215,7 +233,7 @@ async def run(concurrency: int = None, limit: int = 0, mode: str = "new"):
                         )
                         run_stats["dead"] += 1
                     else:
-                        write_result(
+                        await async_write_result(
                             domain,
                             url=url,
                             status="unconfirmed",
@@ -226,13 +244,13 @@ async def run(concurrency: int = None, limit: int = 0, mode: str = "new"):
                         run_stats["unconfirmed"] += 1
             else:
                 delete_screenshot(domain, output_screenshot_dir)
-                write_result(domain, url=url, status=final_status, reason=final_reason, screenshot_taken=False)
+                await async_write_result(domain, url=url, status=final_status, reason=final_reason, screenshot_taken=False)
 
         except Exception as e:
             domain = doc.get("domain", "")
             if domain:
                 try:
-                    write_result(
+                    await async_write_result(
                         domain,
                         url=f"https://{domain}",
                         status="unconfirmed",

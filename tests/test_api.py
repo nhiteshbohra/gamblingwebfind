@@ -144,6 +144,39 @@ class TestAPIPipelineRunsAndJobs:
             assert resp_stop_all.status_code == 200
             assert resp_stop_all.json()["stopped_count"] == 2
 
+    def test_run_check_modes_and_validation(self, client):
+        jobs._jobs.clear()
+        with patch("api.routers.pipeline._run_check", MagicMock()):
+            # Valid regular mode
+            resp_reg = client.post("/api/run/check", json={"mode": "regular"})
+            assert resp_reg.status_code == 200
+            jobs.finish_job(resp_reg.json()["job_id"], "done")
+
+            # Valid dead mode
+            resp_dead = client.post("/api/run/check", json={"mode": "dead"})
+            assert resp_dead.status_code == 200
+            jobs.finish_job(resp_dead.json()["job_id"], "done")
+
+            # Invalid mode -> 422 Unprocessable Entity
+            resp_inv = client.post("/api/run/check", json={"mode": "invalid_mode_name"})
+            assert resp_inv.status_code == 422
+
+    def test_run_keywords_json_import(self):
+        import asyncio
+        import threading
+        from api.routers.pipeline import _run_keywords
+        loop = asyncio.new_event_loop()
+        t = threading.Thread(target=loop.run_forever, daemon=True)
+        t.start()
+        job_id = jobs.new_job("keywords")
+        with patch("keywordssearch.searxng_search.run_search", AsyncMock(return_value={"total_urls": 0, "unique_domains": 0, "new_inserted": 0})):
+            _run_keywords(job_id, loop)
+        job = jobs.get_job(job_id)
+        assert job["status"] == "done"
+        loop.call_soon_threadsafe(loop.stop)
+        t.join(timeout=2)
+        loop.close()
+
     def test_import_endpoint(self, client, mock_mongo):
         chk_col = mock_mongo["checked_domains"]
 
@@ -178,9 +211,9 @@ class TestAPIReportsAndSettingsAndStats:
         resp_dl = client.get("/api/reports/download/test_report.xlsx")
         assert resp_dl.status_code == 200
 
-        # Path traversal protection / missing file -> 404
+        # Path traversal protection / missing file -> 400 or 404
         resp_traversal = client.get("/api/reports/download/../../invalid.txt")
-        assert resp_traversal.status_code == 404
+        assert resp_traversal.status_code in (400, 404)
 
         # Clean up
         if report_file.exists():
@@ -202,6 +235,8 @@ class TestAPIReportsAndSettingsAndStats:
         src_col.insert_many([
             {"_id": "s1.com", "domain": "s1.com", "active": True, "processed": True, "source": "searxng_search"},
             {"_id": "s2.com", "domain": "s2.com", "active": True, "processed": False, "source": "searxng_search"},
+            {"_id": "s3.com", "domain": "s3.com", "active": False, "block_reason": "blocked", "source": "searxng_search"},
+            {"_id": "s4.com", "domain": "s4.com", "active": False, "source": "searxng_search"},
         ])
         chk_col.insert_many([
             {"_id": "c1.com", "domain": "c1.com", "status": "gambling", "screenshot_taken": True, "exported": False},
@@ -213,6 +248,8 @@ class TestAPIReportsAndSettingsAndStats:
         stats = resp.json()
 
         assert stats["source_domains"]["active"] == 2
+        assert stats["source_domains"]["blocked_source"] == 1
+        assert stats["source_domains"]["dead_source"] == 1
         assert stats["source_domains"]["pending"] == 1
         assert stats["checked_domains"]["gambling"] == 1
         assert stats["checked_domains"]["regular"] == 1

@@ -22,7 +22,8 @@ def get_stats():
         total_listed = src.estimated_document_count()
         active_listed = src.count_documents({"active": True})
         inactive_listed = src.count_documents({"active": False})
-        blocked_source = src.count_documents({"active": "blocked"})
+        blocked_source = src.count_documents({"$or": [{"block_reason": "blocked"}, {"active": "blocked"}]})
+        dead_source = src.count_documents({"active": False, "block_reason": {"$exists": False}})
         processed_listed = src.count_documents({"processed": True})
         pending_listed = src.count_documents({"active": True, "processed": {"$ne": True}})
 
@@ -35,7 +36,7 @@ def get_stats():
         added_today_listed = src.count_documents({"added_date": today_str})
         added_week_listed = src.count_documents({"added_date": {"$gte": week_ago_str}})
     except Exception as e:
-        total_listed = active_listed = inactive_listed = blocked_source = processed_listed = pending_listed = 0
+        total_listed = active_listed = inactive_listed = blocked_source = dead_source = processed_listed = pending_listed = 0
         by_source = {}
         added_today_listed = added_week_listed = 0
 
@@ -140,6 +141,7 @@ def get_stats():
             "active": active_listed,
             "inactive": inactive_listed,
             "blocked_source": blocked_source,
+            "dead_source": dead_source,
             "processed": processed_listed,
             "pending": pending_listed,
             "by_source": by_source,

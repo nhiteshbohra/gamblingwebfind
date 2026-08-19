@@ -233,6 +233,52 @@ def find_unconfirmed_domains(limit: int = 0):
                 return
 
 
+def find_regular_domains(limit: int = 0, min_age_days: int = 0):
+    """Yield domains previously marked as regular in checked_domains."""
+    flt = {"status": "regular"}
+    if min_age_days > 0:
+        cutoff = (datetime.now(IST) - timedelta(days=min_age_days)).strftime("%Y-%m-%d")
+        flt["$or"] = [{"last_checked_at": {"$lt": cutoff}}, {"last_checked_at": {"$exists": False}}]
+    cur = checked_domains().find(flt)
+    if limit:
+        cur = cur.limit(limit)
+    for doc in cur:
+        domain = doc.get("domain") or doc.get("_id")
+        if domain:
+            yield {"domain": domain, "_id": domain, "url": doc.get("url", f"https://{domain}")}
+
+
+def find_dead_domains(limit: int = 0, min_age_days: int = 0):
+    """Yield domains previously marked as dead in checked_domains or source_domains."""
+    seen = set()
+    flt = {"status": "dead"}
+    if min_age_days > 0:
+        cutoff = (datetime.now(IST) - timedelta(days=min_age_days)).strftime("%Y-%m-%d")
+        flt["$or"] = [{"last_checked_at": {"$lt": cutoff}}, {"last_checked_at": {"$exists": False}}]
+    cur_checked = checked_domains().find(flt)
+    if limit:
+        cur_checked = cur_checked.limit(limit)
+    for doc in cur_checked:
+        domain = doc.get("domain") or doc.get("_id")
+        if domain and domain not in seen:
+            seen.add(domain)
+            yield {"domain": domain, "_id": domain, "url": doc.get("url", f"https://{domain}")}
+            if limit and len(seen) >= limit:
+                return
+
+    if not limit or len(seen) < limit:
+        cur_source = source_domains().find({"active": False, "block_reason": {"$exists": False}})
+        if limit:
+            cur_source = cur_source.limit(limit - len(seen))
+        for doc in cur_source:
+            domain = doc.get("domain") or doc.get("_id")
+            if domain and domain not in seen:
+                seen.add(domain)
+                yield {"domain": domain, "_id": domain, "url": doc.get("url", f"https://{domain}")}
+                if limit and len(seen) >= limit:
+                    return
+
+
 # ── Result writer ─────────────────────────────────────────────────────────────
 
 def write_result(
@@ -272,6 +318,7 @@ def write_result(
         "url": url or f"https://{domain}",
         "status": status,
         "reason": formatted_reason,
+        "last_checked_at": today_date,
     }
 
 
@@ -386,30 +433,58 @@ def seed_from_csv(path: str, active: bool = True):
     print(f"[seed] {inserted} upserted into domain_Listed, {skipped} skipped")
 
 
-def ingest_true_positives(path: str) -> tuple[int, int]:
-    """Import confirmed gambling domains from an Excel (.xlsx/.xls), CSV, or .txt file directly into
-    checked_domains as status='gambling', screenshot_taken=False.
+def ingest_true_positives(path_or_domains: str | list[str]) -> tuple[int, int]:
+    """Import confirmed gambling domains from an Excel (.xlsx/.xls), CSV, .txt file, or list of domain strings
+    directly into checked_domains as status='gambling', screenshot_taken=False.
 
-    Skips domains already present in checked_domains.
-    Returns (inserted, skipped).
+    Resets existing domains to status='gambling' for re-capture and re-export.
+    Returns (inserted, reset).
     """
-    inserted = skipped = 0
+    inserted = reset = 0
     today_date = datetime.now(IST).strftime("%Y-%m-%d")
 
-    domains = extract_domains_from_file(path)
+    if isinstance(path_or_domains, (list, tuple, set)):
+        domains = []
+        for raw in path_or_domains:
+            if not raw:
+                continue
+            d = str(raw).strip().replace("https://", "").replace("http://", "").removeprefix("www.").rstrip("/").lower()
+            d = extract_domain(f"https://{d}") or d
+            if d and "." in d and d not in domains:
+                domains.append(d)
+    else:
+        domains = extract_domains_from_file(path_or_domains)
+
     for domain in domains:
         if not domain or "." not in domain:
-            skipped += 1
             continue
 
-        # If already exists, reset for re-capture and re-export
+        # If already exists, reset for re-capture, re-export, and ensure status='gambling'
         existing = checked_domains().find_one({"_id": domain}, {"_id": 1})
         if existing:
             checked_domains().update_one(
                 {"_id": domain},
-                {"$set": {"screenshot_taken": False, "exported": False, "screenshot_failed_reason": None}},
+                {
+                    "$set": {
+                        "status": "gambling",
+                        "reason": "Manual true positive import",
+                        "screenshot_taken": False,
+                        "exported": False,
+                        "screenshot_failed_reason": None,
+                        "last_checked_at": today_date,
+                    }
+                },
             )
-            skipped += 1
+            # Also ensure domain exists and is marked processed in source collection
+            source_domains().update_one(
+                {"_id": domain},
+                {
+                    "$set": {"domain": domain, "active": True, "processed": True},
+                    "$setOnInsert": {"added_date": today_date, "source": "manual_import"},
+                },
+                upsert=True,
+            )
+            reset += 1
             continue
 
         # Insert directly as confirmed gambling true positive
@@ -424,6 +499,7 @@ def ingest_true_positives(path: str) -> tuple[int, int]:
                     "screenshot_taken": False,
                     "screenshot_failed_reason": None,
                     "source": "manual_import",
+                    "last_checked_at": today_date,
                 },
                 "$setOnInsert": {"added_date": today_date},
             },
@@ -440,7 +516,7 @@ def ingest_true_positives(path: str) -> tuple[int, int]:
         )
         inserted += 1
 
-    return inserted, skipped
+    return inserted, reset
 
 
 def seed_discovered_domains(domains: set, discovered_from: str) -> tuple[int, int]:

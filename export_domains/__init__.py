@@ -14,6 +14,7 @@ from export_domains.screenshot import (
     is_valid_screenshot,
     delete_screenshot,
     _url_to_filename,
+    all_filename_candidates,
 )
 from export_domains.batch_splitter import (
     create_batches,
@@ -32,6 +33,7 @@ __all__ = [
     "is_valid_screenshot",
     "delete_screenshot",
     "_url_to_filename",
+    "all_filename_candidates",
     "create_batches",
     "prompt_divide_into_batches",
     "_make_excel_urls_clickable",

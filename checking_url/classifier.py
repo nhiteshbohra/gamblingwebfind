@@ -277,6 +277,11 @@ def classify(html: str, url: str = "", keywords: set = None) -> tuple[str, list[
     text = _extract_text(html)
     kw_set = keywords if keywords is not None else load_keywords()
 
+    # Check domain parking / for-sale markers first
+    is_parked, parked_hits = is_parked_or_for_sale(text, html, url)
+    if is_parked:
+        return "regular", []
+
     # Match gambling keywords in visible text
     matched = [kw for kw in kw_set if kw in text]
     if not matched:

@@ -1,9 +1,40 @@
-import asyncio, sys, io, uuid
+import asyncio, sys, io, uuid, contextvars
 from datetime import datetime, timezone, timedelta
 from contextlib import contextmanager
 
 IST = timezone(timedelta(hours=5, minutes=30))
 _jobs = {}
+_current_job = contextvars.ContextVar("current_job", default=None)
+
+
+class _ContextAwareStdout(io.TextIOBase):
+    def __init__(self, original):
+        self.original = original
+
+    def write(self, s):
+        raw = s
+        stripped = s.strip()
+        job_ctx = _current_job.get()
+        if job_ctx and stripped:
+            job_id, loop = job_ctx
+            try:
+                if loop.is_running():
+                    asyncio.run_coroutine_threadsafe(log(job_id, stripped), loop)
+                else:
+                    loop.run_until_complete(log(job_id, stripped))
+            except Exception:
+                pass
+        try:
+            return self.original.write(raw)
+        except Exception:
+            return len(raw)
+
+    def flush(self):
+        try:
+            self.original.flush()
+        except Exception:
+            pass
+
 
 def new_job(stage):
     job_id = uuid.uuid4().hex[:10]
@@ -18,16 +49,20 @@ def new_job(stage):
     }
     return job_id
 
+
 def set_job_future(job_id, fut):
     job = _jobs.get(job_id)
     if job:
         job["future"] = fut
 
+
 def get_job(job_id):
     return _jobs.get(job_id)
 
+
 def all_jobs():
     return [{k: v for k, v in j.items() if k not in ("queue", "future")} for j in _jobs.values()]
+
 
 def finish_job(job_id, status="done"):
     job = _jobs.get(job_id)
@@ -35,6 +70,7 @@ def finish_job(job_id, status="done"):
         if job["status"] == "running":
             job["status"] = status
         job["queue"].put_nowait(None)
+
 
 def stop_job(job_id):
     job = _jobs.get(job_id)
@@ -56,6 +92,7 @@ def stop_job(job_id):
         return True
     return False
 
+
 def stop_stage(stage):
     stopped_any = False
     for job_id, job in list(_jobs.items()):
@@ -63,6 +100,7 @@ def stop_stage(stage):
             if stop_job(job_id):
                 stopped_any = True
     return stopped_any
+
 
 def stop_all():
     stopped_count = 0
@@ -72,26 +110,27 @@ def stop_all():
                 stopped_count += 1
     return stopped_count
 
+
 def is_stage_running(stage):
     return any(j.get("stage") == stage and j.get("status") == "running" for j in _jobs.values())
+
 
 async def log(job_id, msg):
     job = _jobs.get(job_id)
     if job:
         await job["queue"].put(msg)
 
+
+def _ensure_wrapped():
+    if not isinstance(sys.stdout, _ContextAwareStdout):
+        sys.stdout = _ContextAwareStdout(sys.stdout)
+
+
 @contextmanager
 def capture_prints(job_id, loop):
-    class _W(io.TextIOBase):
-        def write(self, s):
-            s = s.strip()
-            if s:
-                asyncio.run_coroutine_threadsafe(log(job_id, s), loop)
-            return len(s)
-        def flush(self): pass
-    old = sys.stdout
-    sys.stdout = _W()
+    _ensure_wrapped()
+    token = _current_job.set((job_id, loop))
     try:
         yield
     finally:
-        sys.stdout = old
+        _current_job.reset(token)

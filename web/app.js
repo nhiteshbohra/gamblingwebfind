@@ -521,7 +521,7 @@ function copyDomainJson() {
 // ── 4. Pipeline Execution, Stop Control & SSE Log Streaming ───────────────────
 async function onRunCheckClick() {
   const mode = document.getElementById("check-mode").value;
-  if (mode === "unconfirmed" || mode === "blocked") {
+  if (mode === "unconfirmed" || mode === "blocked" || mode === "regular" || mode === "dead") {
     const ok = await showConfirm(
       "⚠️ Re-Check Confirmation",
       `Running Stage 2 in '${mode}' mode will trigger web fetches and AI cross-examinations for all ${mode} domains. This may take several minutes under load. Do you want to proceed?`

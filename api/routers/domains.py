@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 from db.mongo_client import checked_domains as _cd
-from export_domains.screenshot import _url_to_filename, is_valid_screenshot
+from export_domains.screenshot import _url_to_filename, is_valid_screenshot, all_filename_candidates
 import os
 
 router = APIRouter(prefix="/api")
@@ -51,7 +51,7 @@ def list_domains(
         domain = d.get("domain") or d.get("_id")
         url = d.get("url") or f"https://{domain}"
         has_shot = False
-        for cand in [_url_to_filename(url), _url_to_filename(f"https://{domain}"), _url_to_filename(f"http://{domain}")]:
+        for cand in all_filename_candidates(url, domain):
             p = os.path.join(screenshots_dir, cand)
             if os.path.exists(p) and is_valid_screenshot(p):
                 has_shot = True
@@ -89,7 +89,7 @@ def get_screenshot(domain: str):
         raise HTTPException(404, "domain not found")
     url = d.get("url") or f"https://{domain}"
     screenshots_dir = os.getenv("SCREENSHOT_DIR", SCREENSHOTS_DIR)
-    for cand in [_url_to_filename(url), _url_to_filename(f"https://{domain}"), _url_to_filename(f"http://{domain}")]:
+    for cand in all_filename_candidates(url, domain):
         p = os.path.join(screenshots_dir, cand)
         if os.path.exists(p) and is_valid_screenshot(p):
             return FileResponse(p, media_type="image/jpeg")

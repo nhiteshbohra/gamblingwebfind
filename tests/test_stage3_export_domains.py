@@ -12,6 +12,7 @@ from export_domains.screenshot import (
     _url_to_filename,
     is_valid_screenshot,
     delete_screenshot,
+    all_filename_candidates,
 )
 from export_domains.exporter import (
     run_export,
@@ -29,6 +30,19 @@ class TestStage3ScreenshotValidation:
         assert fn.endswith(".jpg")
         assert "casinoking_com" in fn
 
+    def test_all_filename_candidates(self):
+        cands = all_filename_candidates("https://casinoking.com/play", "casinoking.com")
+        assert _url_to_filename("https://casinoking.com/play") in cands
+        assert _url_to_filename("https://casinoking.com") in cands
+        assert _url_to_filename("http://casinoking.com") in cands
+        assert _url_to_filename("https://www.casinoking.com") in cands
+        assert _url_to_filename("http://www.casinoking.com") in cands
+
+        # Domain with www prefix should not produce www.www.
+        cands_www = all_filename_candidates("https://www.casinoking.com", "www.casinoking.com")
+        for c in cands_www:
+            assert "www_www" not in c
+
     def test_is_valid_screenshot(self, valid_screenshot_path, corrupt_screenshot_path, tmp_path):
         assert is_valid_screenshot(valid_screenshot_path) is True
         assert is_valid_screenshot(corrupt_screenshot_path) is False
@@ -45,6 +59,29 @@ class TestStage3ScreenshotValidation:
         deleted = delete_screenshot("https://testdel.com", output_dir=str(shots_dir))
         assert deleted is True
         assert not target_file.exists()
+
+    def test_size_based_split_finds_www_screenshot(self, mock_mongo, tmp_path, valid_screenshot_path, monkeypatch):
+        from main import _size_based_split
+        shots_dir = tmp_path / "screenshots"
+        shots_dir.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setenv("SCREENSHOT_DIR", str(shots_dir))
+
+        # Save screenshot under www fallback name
+        www_filename = _url_to_filename("https://www.fallbacksport.com")
+        shutil.copy2(valid_screenshot_path, shots_dir / www_filename)
+        file_size = os.path.getsize(shots_dir / www_filename)
+
+        mock_mongo["checked_domains"].insert_one({
+            "_id": "fallbacksport.com",
+            "url": "https://fallbacksport.com",
+            "status": "gambling",
+        })
+
+        # When limit is tiny, single entry with screenshot must split if it exceeds limit
+        limit_mb = (file_size + 12000) / (1024 * 1024 * 0.90)
+        batches = _size_based_split(["fallbacksport.com"], pdf_limit_mb=limit_mb)
+        assert len(batches) == 1
+        assert batches[0] == ["fallbacksport.com"]
 
 
 class TestStage3ExcelBuilder:

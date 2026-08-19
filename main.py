@@ -10,8 +10,12 @@ import argparse
 import asyncio
 import json
 import os
+import socket
 import subprocess
 import sys
+import threading
+import time
+import webbrowser
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
@@ -20,9 +24,40 @@ from dotenv import load_dotenv
 load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env")
 
 from db.mongo_client import get_db
-from checking_url.ai_classifier import check_ollama_status
 
 PROJECT_ROOT = Path(__file__).resolve().parent
+
+
+def _is_port_in_use(host: str, port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(0.5)
+        return s.connect_ex((host, port)) == 0
+
+
+def start_web_dashboard(host: str = "127.0.0.1", port: int = 8081):
+    url = f"http://{host}:{port}"
+    if _is_port_in_use(host, port):
+        print(f"[+] Web Dashboard: Already running on {url}")
+        webbrowser.open(url)
+        return
+
+    def _serve():
+        import uvicorn
+        from api.main import app
+        config = uvicorn.Config(app, host=host, port=port, log_level="warning")
+        server = uvicorn.Server(config)
+        server.run()
+
+    thread = threading.Thread(target=_serve, daemon=True)
+    thread.start()
+
+    for _ in range(30):
+        if _is_port_in_use(host, port):
+            break
+        time.sleep(0.1)
+
+    print(f"[+] Web Dashboard: Started at {url}")
+    webbrowser.open(url)
 
 def _get_keywords_file() -> Path:
     candidates = list(PROJECT_ROOT.glob("gambling_top_*_keywords.json")) + list(PROJECT_ROOT.glob("*keyword*.json"))
@@ -58,19 +93,25 @@ def run_searxng_search():
 
 
 def ask_checking_mode() -> str | None:
-    """Prompt user to choose whether to check new unprocessed URLs, re-check blocked URLs, or re-check unconfirmed URLs."""
-    print("\nSelect checking target:")
+    """Prompt user to choose target domain queue for checking/re-checking."""
+    print("\nSelect checking target queue:")
     print("  0. Back to main menu")
-    print("  1. Check new unprocessed URLs (default)")
-    print("  2. Re-check blocked URLs (403 / WAF)")
-    print("  3. Re-check unconfirmed URLs (Ollama AI re-evaluation)")
-    sub_choice = input("Enter choice (0-3) [default: 1]: ").strip()
+    print("  1. Check New Domains           (Fresh queue from SearXNG search or CSV import) [default]")
+    print("  2. Re-check Blocked Sites      (Retry HTTP 403 / Cloudflare WAF protected sites)")
+    print("  3. Re-check Unconfirmed Sites  (Re-evaluate pending sites with Ollama AI)")
+    print("  4. Re-check Regular Websites   (Re-verify non-gambling sites to detect new gambling content)")
+    print("  5. Re-check Dead Sites         (Re-test offline or DNS-failed sites to see if back online)")
+    sub_choice = input("\nEnter choice (0-5) [default: 1]: ").strip()
     if sub_choice in ("0", "b", "back"):
         return None
     if sub_choice == "2":
         return "blocked"
     if sub_choice == "3":
         return "unconfirmed"
+    if sub_choice == "4":
+        return "regular"
+    if sub_choice == "5":
+        return "dead"
     return "new"
 
 
@@ -80,6 +121,12 @@ def run_checking_url(mode: str = None):
         mode = ask_checking_mode()
     if mode is None:
         return  # user chose back
+
+    from checking_url.ai_classifier import start_ollama_if_needed
+    try:
+        asyncio.run(start_ollama_if_needed())
+    except Exception as e:
+        print(f"[!] Local AI status check error: {e}")
 
     from checking_url.runner import run as check_run
 
@@ -97,7 +144,7 @@ def _size_based_split(domain_ids: list, pdf_limit_mb: float = 24.0) -> list[list
     Estimation: JPEG file size on disk + PDF_PAGE_OVERHEAD_BYTES per entry.
     Target ceiling is set slightly below the limit to leave headroom.
     """
-    from export_domains.screenshot import _url_to_filename
+    from export_domains.screenshot import all_filename_candidates
     SCREENSHOTS_DIR = os.getenv("SCREENSHOT_DIR", os.path.join("output", "screenshots"))
     PDF_PAGE_OVERHEAD = 12_000          # ~12KB per page for text/metadata
     PDF_LIMIT_BYTES   = int(pdf_limit_mb * 1024 * 1024 * 0.92)  # 92% of 24MB as safe ceiling
@@ -110,11 +157,7 @@ def _size_based_split(domain_ids: list, pdf_limit_mb: float = 24.0) -> list[list
     for domain in domain_ids:
         doc = _cd().find_one({"_id": domain}, {"url": 1})
         url = (doc or {}).get("url") or f"https://{domain}"
-        candidates = [
-            _url_to_filename(url),
-            _url_to_filename(f"https://{domain}"),
-            _url_to_filename(f"http://{domain}"),
-        ]
+        candidates = all_filename_candidates(url, domain)
         jpeg_size = 0
         for cand in candidates:
             p = os.path.join(SCREENSHOTS_DIR, cand)
@@ -208,6 +251,18 @@ def interactive_menu():
 
 
 def main():
+    parser = argparse.ArgumentParser(description="gamblingwebfind entry point")
+    parser.add_argument("--seed", metavar="CSV", help="Import domains from CSV into domain_Listed and exit")
+    parser.add_argument("--no-ui", action="store_true", help="Do not start or open the web dashboard")
+    parser.add_argument("--port", type=int, default=int(os.getenv("DASHBOARD_PORT") or os.getenv("PORT") or 8081), help="Web dashboard port")
+    parser.add_argument("--host", default=os.getenv("DASHBOARD_HOST") or os.getenv("HOST") or "127.0.0.1", help="Web dashboard host")
+    args = parser.parse_args()
+
+    if args.seed:
+        from db.mongo_client import seed_from_csv
+        seed_from_csv(args.seed)
+        return
+
     from pymongo.errors import ServerSelectionTimeoutError
     db_name = os.getenv("MONGO_DB_NAME", "gamblingsites")
     try:
@@ -221,25 +276,8 @@ def main():
         print(f"[!] MongoDB error: {e}")
         sys.exit(1)
 
-    # Check Ollama AI status
-    try:
-        ollama_ok, ollama_msg = asyncio.run(check_ollama_status())
-        if ollama_ok:
-            print(f"[+] Local AI: {ollama_msg}")
-        else:
-            print(f"[!] Local AI Warning: {ollama_msg}")
-            print("    (If Ollama is offline, 1-2 keyword sites will be marked 'unconfirmed' to re-run later)")
-    except Exception as e:
-        print(f"[!] Local AI status check error: {e}")
-
-    parser = argparse.ArgumentParser(description="gamblingwebfind entry point")
-    parser.add_argument("--seed", metavar="CSV", help="Import domains from CSV into domain_Listed and exit")
-    args = parser.parse_args()
-
-    if args.seed:
-        from db.mongo_client import seed_from_csv
-        seed_from_csv(args.seed)
-        return
+    if not args.no_ui:
+        start_web_dashboard(host=args.host, port=args.port)
 
     interactive_menu()
 

@@ -56,6 +56,12 @@ class TestStage2Fetcher:
         parked_html = "<html><body>This domain is for sale. Buy this domain at GoDaddy.com</body></html>"
         assert _classify_failure(html=parked_html) == "dead_confirmed"
 
+    def test_classify_rejects_domain_for_sale_parked_html(self):
+        from checking_url.classifier import classify
+        parked_html = "<html><head><title>Casino.com is for sale</title></head><body>This domain is for sale. Buy this online casino domain at GoDaddy.com</body></html>"
+        decision, matched = classify(parked_html, "casino.com")
+        assert decision == "regular"
+
     @pytest.mark.asyncio
     async def test_fetch_success_mock(self, sample_html_gambling):
         mock_resp = MagicMock()
@@ -190,3 +196,26 @@ class TestStage2RunnerPipeline:
             doc = chk_col.find_one({"_id": "unblocked.com"})
             assert doc["status"] == "gambling"
             assert doc["screenshot_taken"] is True
+
+    @pytest.mark.asyncio
+    async def test_stage2_runner_recheck_regular_and_dead_modes(self, mock_mongo, valid_screenshot_path, sample_html_gambling):
+        chk_col = mock_mongo["checked_domains"]
+        chk_col.insert_many([
+            {"_id": "wasregular.com", "domain": "wasregular.com", "status": "regular"},
+            {"_id": "wasdead.com", "domain": "wasdead.com", "status": "dead"},
+        ])
+
+        with patch("checking_url.runner.fetch", AsyncMock(return_value=FetchResult("https://example.com", 200, sample_html_gambling))), \
+             patch("checking_url.runner.BrowserPool.start", AsyncMock()), \
+             patch("checking_url.runner.BrowserPool.close", AsyncMock()), \
+             patch("checking_url.runner.BrowserPool.capture_url", AsyncMock(return_value=(valid_screenshot_path, "success", None))):
+
+            # Test regular mode
+            stats_reg = await check_run(concurrency=2, limit=0, mode="regular")
+            assert stats_reg["gambling"] == 1
+            assert chk_col.find_one({"_id": "wasregular.com"})["status"] == "gambling"
+
+            # Test dead mode
+            stats_dead = await check_run(concurrency=2, limit=0, mode="dead")
+            assert stats_dead["gambling"] == 1
+            assert chk_col.find_one({"_id": "wasdead.com"})["status"] == "gambling"

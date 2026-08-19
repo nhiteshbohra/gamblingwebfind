@@ -35,7 +35,7 @@ from dotenv import load_dotenv
 
 load_dotenv(dotenv_path=Path(__file__).resolve().parent.parent / ".env")
 
-from export_domains.screenshot import _url_to_filename, is_valid_screenshot
+from export_domains.screenshot import _url_to_filename, is_valid_screenshot, all_filename_candidates
 from db.mongo_client import checked_domains
 
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -267,13 +267,7 @@ def build_workbook(entries: list[dict], failed_docs: list[dict], output_path: st
 # ── Unified Export Pipeline ───────────────────────────────────────────────────
 
 def _candidates(domain: str, url: str) -> list[str]:
-    return [
-        _url_to_filename(url),
-        _url_to_filename(f"https://{domain}"),
-        _url_to_filename(f"http://{domain}"),
-        _url_to_filename(f"https://www.{domain}"),
-        _url_to_filename(f"http://www.{domain}"),
-    ]
+    return all_filename_candidates(url, domain)
 
 
 def _find_screenshot(domain: str, url: str, src_dir: str) -> str | None:

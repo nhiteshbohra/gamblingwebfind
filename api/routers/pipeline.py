@@ -1,7 +1,8 @@
 from fastapi import APIRouter, BackgroundTasks, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-import asyncio, os, sys
+from typing import Literal
+import asyncio, json, os, sys
 from pathlib import Path
 from api.jobs import (
     new_job, get_job, all_jobs, finish_job, is_stage_running,
@@ -11,7 +12,7 @@ from api.jobs import (
 router = APIRouter(prefix="/api")
 
 class CheckBody(BaseModel):
-    mode: str = "new"
+    mode: Literal["new", "blocked", "unconfirmed", "regular", "dead"] = "new"
 
 class ExportBody(BaseModel):
     format: int = 1
@@ -29,15 +30,13 @@ def _get_loop():
 def _run_keywords(job_id, loop):
     try:
         from keywordssearch.searxng_search import run_search
-        root_dir = Path(__file__).resolve().parent.parent
+        root_dir = Path(__file__).resolve().parent.parent.parent
         cands = list(root_dir.glob("gambling_top_*_keywords.json")) + list(root_dir.glob("*keyword*.json"))
         kw_path = cands[0] if cands else (root_dir / "gambling_top_944_keywords.json")
         with open(kw_path, encoding="utf-8") as f:
             keywords = [str(k).strip().lower() for k in json.load(f) if str(k).strip()]
         with capture_prints(job_id, loop):
-            fut = asyncio.run_coroutine_threadsafe(
-                asyncio.ensure_future(run_search(keywords), loop=loop), loop
-            )
+            fut = asyncio.run_coroutine_threadsafe(run_search(keywords), loop)
             set_job_future(job_id, fut)
             fut.result(timeout=3600)
         finish_job(job_id, "done")
@@ -144,27 +143,8 @@ def stop_job_endpoint(job_id: str):
 def run_import(body: ImportBody):
     if not body.domains:
         raise HTTPException(400, "domains list is empty")
-    from db.mongo_client import checked_domains, extract_domain
-    from datetime import datetime, timezone, timedelta
-    IST = timezone(timedelta(hours=5, minutes=30))
-    today = datetime.now(IST).strftime("%Y-%m-%d")
-    inserted = reset = 0
-    for raw in body.domains:
-        d = raw.strip().replace("https://","").replace("http://","").removeprefix("www.").rstrip("/").lower()
-        d = extract_domain(f"https://{d}") or d
-        if not d or "." not in d:
-            continue
-        existing = checked_domains().find_one({"_id": d}, {"_id": 1})
-        if existing:
-            checked_domains().update_one({"_id": d}, {"$set": {"screenshot_taken": False, "exported": False, "screenshot_failed_reason": None}})
-            reset += 1
-        else:
-            checked_domains().update_one({"_id": d},
-                {"$set": {"domain": d, "url": f"https://{d}", "status": "gambling",
-                    "reason": "Manual true positive import", "screenshot_taken": False,
-                    "screenshot_failed_reason": None, "source": "manual_import"},
-                 "$setOnInsert": {"added_date": today}}, upsert=True)
-            inserted += 1
+    from db.mongo_client import ingest_true_positives
+    inserted, reset = ingest_true_positives(body.domains)
     return {"inserted": inserted, "reset": reset}
 
 @router.get("/status")

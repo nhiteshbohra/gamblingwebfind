@@ -499,6 +499,38 @@ async def check_ollama_status() -> tuple[bool, str]:
         return False, f"Cannot connect to Ollama at {OLLAMA_BASE_URL}: {e}"
 
 
+async def start_ollama_if_needed() -> bool:
+    """
+    Check if Ollama server is running; if not, attempt to start it via subprocess.
+    Returns True if Ollama is running/started, False if unavailable.
+    """
+    import subprocess
+    ok, msg = await check_ollama_status()
+    if ok:
+        print(f"[+] Local AI: {msg}")
+        return True
+
+    binary = os.getenv("OLLAMA_AUTOSTART_PATH", "ollama")
+    timeout = float(os.getenv("OLLAMA_AUTOSTART_TIMEOUT", "15.0"))
+    try:
+        subprocess.Popen([binary, "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception as e:
+        print(f"[!] Ollama: could not start automatically ({e}) — start it manually")
+        return False
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        await asyncio.sleep(1.0)
+        ok, msg = await check_ollama_status()
+        if ok:
+            print(f"[+] Ollama: started ({msg})")
+            return True
+
+    print(f"[!] Ollama: could not start automatically — start it manually")
+    return False
+
+
 async def classify_with_ai(
     html: str,
     url: str = "",

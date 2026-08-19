@@ -29,11 +29,17 @@ def list_reports():
 
 @router.get("/reports/download/{path:path}")
 def download_report(path: str):
-    fpath = os.path.join(OUTPUT_DIR, path)
+    base = os.path.abspath(OUTPUT_DIR)
+    fpath = os.path.abspath(os.path.join(base, path))
+    if not (fpath == base or fpath.startswith(base + os.sep)):
+        raise HTTPException(400, "invalid path")
     if not os.path.exists(fpath) or not os.path.isfile(fpath):
         raise HTTPException(404, "file not found")
     ext = fpath.rsplit(".", 1)[-1].lower()
-    types = {"pdf": "application/pdf", "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-             "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"}
+    types = {
+        "pdf": "application/pdf",
+        "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    }
     return FileResponse(fpath, media_type=types.get(ext, "application/octet-stream"),
                         filename=os.path.basename(fpath))
