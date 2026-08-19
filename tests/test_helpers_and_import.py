@@ -17,7 +17,7 @@ from db.mongo_client import (
     write_result,
 )
 from export_domains.batch_splitter import create_batches, _make_excel_urls_clickable as make_excel_urls_clickable
-from api.jobs import new_job, capture_prints, get_job, finish_job
+from api.jobs import new_job, get_job, finish_job, log
 
 
 class TestTruePositivesImport:
@@ -103,21 +103,15 @@ class TestRecheckFinders:
         assert {d["_id"] for d in dead} == {"dead1.com", "dead2.com"}
 
 
-class TestJobScopedCapturePrints:
-    """Test ContextVar-based capture_prints."""
+class TestJobLoggingQueue:
+    """Test job logging and queue routing."""
 
-    def test_capture_prints_routes_to_job_queue(self):
-        import asyncio
-        loop = asyncio.new_event_loop()
+    @pytest.mark.asyncio
+    async def test_job_log_routes_to_queue(self):
         job_id = new_job("test_stage")
-
-        with capture_prints(job_id, loop):
-            print("Hello from test job")
-
-        # Let pending loop tasks execute
+        await log(job_id, "Hello from test job")
         job = get_job(job_id)
         finish_job(job_id, "done")
-        loop.run_until_complete(asyncio.sleep(0.01))
 
         # Check queue
         items = []
@@ -125,8 +119,7 @@ class TestJobScopedCapturePrints:
             item = job["queue"].get_nowait()
             if item is not None:
                 items.append(item)
-        assert any("Hello from test job" in msg for msg in items)
-        loop.close()
+        assert "Hello from test job" in items
 
 
 class TestHelperBatchSplitter:

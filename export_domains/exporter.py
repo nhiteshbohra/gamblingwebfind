@@ -27,6 +27,17 @@ _ROOT = str(Path(__file__).resolve().parent.parent)
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
+from xml.sax.saxutils import escape as xml_escape
+
+import docx
+from docx.shared import Inches, Pt, RGBColor
+from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_TAB_ALIGNMENT
+from docx.opc.constants import RELATIONSHIP_TYPE
+from docx.oxml import parse_xml
+from docx.oxml.ns import nsdecls
+import pandas as pd
+import openpyxl
+from openpyxl.styles import Font
 from dotenv import load_dotenv
 
 load_dotenv(dotenv_path=Path(__file__).resolve().parent.parent / ".env")

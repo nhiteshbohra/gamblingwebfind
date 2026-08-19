@@ -17,6 +17,7 @@ New Architecture:
 5. MongoDB sync: updates checked_domains and domain_Listed.
 """
 import asyncio
+import logging
 import os
 import sys
 from datetime import datetime, timezone

@@ -2,7 +2,7 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Literal
-import asyncio, json, os, sys
+import asyncio, json, os, sys, subprocess
 from pathlib import Path
 from api.jobs import (
     new_job, get_job, all_jobs, finish_job, is_stage_running,

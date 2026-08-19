@@ -97,7 +97,7 @@ class TestAPIPipelineRunsAndJobs:
         # Reset any running jobs in jobs dictionary
         jobs._jobs.clear()
 
-        with patch("api.routers.pipeline._run_keywords", MagicMock()):
+        with patch("api.routers.pipeline._run_subprocess_worker", MagicMock()):
             # Trigger keywords job
             resp = client.post("/api/run/keywords")
             assert resp.status_code == 200
@@ -119,7 +119,7 @@ class TestAPIPipelineRunsAndJobs:
 
     def test_stop_stage_and_all_endpoints(self, client):
         jobs._jobs.clear()
-        with patch("api.routers.pipeline._run_keywords", MagicMock()):
+        with patch("api.routers.pipeline._run_subprocess_worker", MagicMock()):
             resp = client.post("/api/run/keywords")
             assert resp.status_code == 200
             job_id = resp.json()["job_id"]
@@ -146,7 +146,7 @@ class TestAPIPipelineRunsAndJobs:
 
     def test_run_check_modes_and_validation(self, client):
         jobs._jobs.clear()
-        with patch("api.routers.pipeline._run_check", MagicMock()):
+        with patch("api.routers.pipeline._run_subprocess_worker", MagicMock()):
             # Valid regular mode
             resp_reg = client.post("/api/run/check", json={"mode": "regular"})
             assert resp_reg.status_code == 200
@@ -161,16 +161,16 @@ class TestAPIPipelineRunsAndJobs:
             resp_inv = client.post("/api/run/check", json={"mode": "invalid_mode_name"})
             assert resp_inv.status_code == 422
 
-    def test_run_keywords_json_import(self):
+    def test_run_subprocess_worker_execution(self):
         import asyncio
+        import sys
         import threading
-        from api.routers.pipeline import _run_keywords
+        from api.routers.pipeline import _run_subprocess_worker
         loop = asyncio.new_event_loop()
         t = threading.Thread(target=loop.run_forever, daemon=True)
         t.start()
         job_id = jobs.new_job("keywords")
-        with patch("keywordssearch.searxng_search.run_search", AsyncMock(return_value={"total_urls": 0, "unique_domains": 0, "new_inserted": 0})):
-            _run_keywords(job_id, loop)
+        _run_subprocess_worker(job_id, [sys.executable, "-c", "print('hello_test')"], loop)
         job = jobs.get_job(job_id)
         assert job["status"] == "done"
         loop.call_soon_threadsafe(loop.stop)

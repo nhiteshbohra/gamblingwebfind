@@ -116,6 +116,7 @@ header h1 {
 header h1 span {
   background: linear-gradient(90deg, var(--accent-light), var(--cyan));
   -webkit-background-clip: text;
+  background-clip: text;
   -webkit-text-fill-color: transparent;
 }
 
