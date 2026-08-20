@@ -161,7 +161,7 @@ class TestStage2RunnerPipeline:
 
             doc_r = chk_col.find_one({"_id": "regularsite.com"})
             assert doc_r["status"] == "regular"
-            assert doc_r["screenshot_taken"] is False
+            assert "screenshot_taken" not in doc_r
 
             doc_b = chk_col.find_one({"_id": "blockedsite.com"})
             assert doc_b["status"] == "blocked"

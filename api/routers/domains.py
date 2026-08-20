@@ -67,6 +67,7 @@ def list_domains(
             "screenshot_date": d.get("screenshot_date"),
             "has_screenshot_file": has_shot,
             "added_date": d.get("added_date"),
+            "ip": d.get("ip"),
             "exported": d.get("exported", False),
             "exported_at": d.get("exported_at"),
             "source": d.get("source"),

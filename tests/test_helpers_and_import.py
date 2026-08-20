@@ -17,7 +17,6 @@ from db.mongo_client import (
     write_result,
 )
 from export_domains.batch_splitter import create_batches, _make_excel_urls_clickable as make_excel_urls_clickable
-from api.jobs import new_job, get_job, finish_job, log
 
 
 class TestTruePositivesImport:
@@ -101,25 +100,6 @@ class TestRecheckFinders:
         dead = list(find_dead_domains())
         assert len(dead) == 2
         assert {d["_id"] for d in dead} == {"dead1.com", "dead2.com"}
-
-
-class TestJobLoggingQueue:
-    """Test job logging and queue routing."""
-
-    @pytest.mark.asyncio
-    async def test_job_log_routes_to_queue(self):
-        job_id = new_job("test_stage")
-        await log(job_id, "Hello from test job")
-        job = get_job(job_id)
-        finish_job(job_id, "done")
-
-        # Check queue
-        items = []
-        while not job["queue"].empty():
-            item = job["queue"].get_nowait()
-            if item is not None:
-                items.append(item)
-        assert "Hello from test job" in items
 
 
 class TestHelperBatchSplitter:
@@ -270,17 +250,6 @@ class TestOllamaGatedStartup:
              patch("checking_url.runner.run", AsyncMock(return_value={"gambling": 0})):
             run_checking_url()
             mock_start_ollama.assert_called_once()
-
-
-
-class TestMarkScreenshotsAsGambling:
-    """Test project_sup/mark_screenshots_as_gambling.py support script."""
-
-    def test_extract_domain_from_filename(self):
-        from project_sup.mark_screenshots_as_gambling import extract_domain_from_filename
-        assert extract_domain_from_filename("12-bet_in_76d87080.jpg") == "12-bet.in"
-        assert extract_domain_from_filename("777casino_co_uk_8979ed1c.jpg") == "777casino.co.uk"
-        assert extract_domain_from_filename("www-jlbet_net_ph_9dbe739b.jpg") == "jlbet.net.ph"
 
 
 

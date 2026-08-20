@@ -16,6 +16,7 @@ from pathlib import Path
 IST = timezone(timedelta(hours=5, minutes=30))
 
 from typing import Any
+import socket
 import tldextract
 from dotenv import load_dotenv
 from pymongo import MongoClient
@@ -23,6 +24,40 @@ from pymongo.collection import Collection
 
 # Load root .env
 load_dotenv(dotenv_path=Path(__file__).resolve().parent.parent / ".env")
+
+
+def resolve_ip(domain: str) -> str | list[str] | None:
+    """Fast DNS resolver for a domain name. Returns list if multiple IPs, string if single."""
+    try:
+        clean = domain.removeprefix("https://").removeprefix("http://").split("/")[0].split(":")[0].strip()
+        if not clean:
+            return None
+        # Try dnspython first to capture all A records
+        try:
+            import dns.resolver
+            res = dns.resolver.Resolver()
+            res.nameservers = ["8.8.8.8", "1.1.1.1"]
+            res.timeout = 2.0
+            res.lifetime = 2.5
+            answers = res.resolve(clean, "A")
+            ips = list(dict.fromkeys([str(r.address) for r in answers]))
+            if len(ips) > 1:
+                return ips
+            elif len(ips) == 1:
+                return ips[0]
+        except Exception:
+            pass
+
+        # Fallback to socket getaddrinfo
+        addrinfo = socket.getaddrinfo(clean, None, socket.AF_INET)
+        ips = list(dict.fromkeys([item[4][0] for item in addrinfo if item and item[4]]))
+        if len(ips) > 1:
+            return ips
+        elif len(ips) == 1:
+            return ips[0]
+        return None
+    except Exception:
+        return None
 
 # ── Connection ────────────────────────────────────────────────────────────────
 
@@ -289,6 +324,7 @@ def write_result(
     url: str = None,
     screenshot_taken: bool | None = None,
     screenshot_failed_reason: str | None = None,
+    ip: str | None = None,
 ):
     """Upsert a classification result into checked_domains AND sync active/processed
     in domain_Listed.
@@ -313,6 +349,9 @@ def write_result(
     else:
         formatted_reason = str(reason) if reason else "No reason provided"
 
+    if not ip:
+        ip = resolve_ip(domain)
+
     set_fields = {
         "domain": domain,
         "url": url or f"https://{domain}",
@@ -320,16 +359,15 @@ def write_result(
         "reason": formatted_reason,
     }
 
-
-    if screenshot_taken is not None:
+    # screenshot_taken and screenshot_date are strictly for gambling status only
+    if status == "gambling":
         set_fields["screenshot_taken"] = bool(screenshot_taken)
-        set_fields["screenshot_failed_reason"] = screenshot_failed_reason
         if screenshot_taken:
             set_fields["screenshot_date"] = today_date
 
     update = {
         "$set": set_fields,
-        "$setOnInsert": {"added_date": today_date},
+        "$setOnInsert": {"added_date": today_date, "source": "searxng_search"},
     }
 
     import time
@@ -342,27 +380,33 @@ def write_result(
                 upsert=True,
             )
 
-            # Sync status in source domain_Listed (strictly boolean active, with block_reason)
-            # ponytail: Unset block_reason on non-blocked transitions so resolved domains leave the blocked queue
+            # Sync status in source domain_Listed (strictly: _id, domain, active, processed, added_date, source)
             if status == "unconfirmed":
                 source_domains().update_one(
                     {"_id": domain},
-                    {"$set": {"processed": False, "active": True}, "$unset": {"block_reason": ""}},
+                    {
+                        "$set": {"domain": domain, "processed": False, "active": True},
+                        "$setOnInsert": {"added_date": today_date, "source": "searxng_search"},
+                    },
+                    upsert=True,
                 )
-            elif status == "blocked":
+            elif status in ("blocked", "dead"):
                 source_domains().update_one(
                     {"_id": domain},
-                    {"$set": {"processed": True, "active": False, "block_reason": "blocked"}},
-                )
-            elif status == "dead":
-                source_domains().update_one(
-                    {"_id": domain},
-                    {"$set": {"processed": True, "active": False}, "$unset": {"block_reason": ""}},
+                    {
+                        "$set": {"domain": domain, "processed": True, "active": False},
+                        "$setOnInsert": {"added_date": today_date, "source": "searxng_search"},
+                    },
+                    upsert=True,
                 )
             else:  # gambling or regular
                 source_domains().update_one(
                     {"_id": domain},
-                    {"$set": {"processed": True, "active": True}, "$unset": {"block_reason": ""}},
+                    {
+                        "$set": {"domain": domain, "processed": True, "active": True},
+                        "$setOnInsert": {"added_date": today_date, "source": "searxng_search"},
+                    },
+                    upsert=True,
                 )
             return
         except Exception as e:

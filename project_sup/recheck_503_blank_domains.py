@@ -113,7 +113,9 @@ async def recheck_domains(concurrency: int = 8, limit: int = 0):
                             "reason": "Known gambling — re-verified active",
                             "screenshot_taken": True,
                             "screenshot_date": today_date,
-                            "screenshot_failed_reason": None,
+                        },
+                        "$unset": {
+                            "screenshot_failed_reason": "",
                         }
                     }
                 )
@@ -136,8 +138,14 @@ async def recheck_domains(concurrency: int = 8, limit: int = 0):
                         {
                             "$set": {
                                 "status": "dead",
-                                "screenshot_taken": False,
-                                "screenshot_failed_reason": ss_reason or "Unreachable",
+                                "reason": f"Dead: {ss_reason or 'Unreachable'}",
+                            },
+                            "$unset": {
+                                "screenshot_taken": "",
+                                "screenshot_date": "",
+                                "screenshot_failed_reason": "",
+                                "exported": "",
+                                "exported_at": "",
                             }
                         }
                     )
@@ -151,8 +159,13 @@ async def recheck_domains(concurrency: int = 8, limit: int = 0):
                             "$set": {
                                 "status": "dead",
                                 "reason": "Dead: 503 / Blank unrendered screenshot",
-                                "screenshot_taken": False,
-                                "screenshot_failed_reason": ss_reason or "503 / Blank error page",
+                            },
+                            "$unset": {
+                                "screenshot_taken": "",
+                                "screenshot_date": "",
+                                "screenshot_failed_reason": "",
+                                "exported": "",
+                                "exported_at": "",
                             }
                         }
                     )

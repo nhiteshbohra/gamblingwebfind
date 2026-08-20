@@ -232,21 +232,25 @@ def move_and_clean_screenshots(
                             "$set": {
                                 "status": verdict,
                                 "reason": reason,
-                                "screenshot_taken": False,
-                                "screenshot_failed_reason": reason,
+                            },
+                            "$unset": {
+                                "screenshot_taken": "",
+                                "screenshot_date": "",
+                                "screenshot_failed_reason": "",
+                                "exported": "",
+                                "exported_at": "",
                             }
                         }
                     )
                 )
 
-                s_set = {"active": False, "processed": True}
-                if verdict == "blocked":
-                    s_set["block_reason"] = "blocked"
-
                 source_ops.append(
                     UpdateOne(
                         {"_id": domain_id},
-                        {"$set": s_set}
+                        {
+                            "$set": {"domain": domain_id, "active": False, "processed": True},
+                            "$unset": {"block_reason": ""}
+                        }
                     )
                 )
 

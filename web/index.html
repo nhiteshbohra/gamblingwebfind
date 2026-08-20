@@ -25,7 +25,6 @@
 
     <nav>
       <button data-tab="overview" class="active" onclick="showTab('overview')">📊 Overview</button>
-      <button data-tab="pipeline" onclick="showTab('pipeline')">⚡ Pipeline</button>
       <button data-tab="domains" onclick="showTab('domains')">🌐 Domains</button>
     </nav>
   </header>
@@ -197,107 +196,7 @@
       </div>
     </div>
 
-    <!-- TAB 2: PIPELINE -->
-    <div id="tab-pipeline" class="tab-view hidden">
-      <!-- Pipeline Header with Stop All Button -->
-      <div class="pipeline-header-bar mb20">
-        <div>
-          <h2 style="font-size:18px;font-weight:700;color:#fff">Pipeline Execution & Control</h2>
-          <p class="muted" style="font-size:13px">Launch automated stages or halt running processes on demand</p>
-        </div>
-        <button id="btn-stop-all" class="btn btn-danger btn-sm hidden" onclick="stopAllStages()">⏹ Stop All Running Jobs</button>
-      </div>
-
-      <div class="grid2 mb20">
-        <!-- Stage 1: Keywords Search -->
-        <div class="card" id="card-stage-keywords">
-          <div class="card-header">
-            <div style="display:flex;align-items:center;gap:10px">
-              <span style="font-size:22px">🔍</span>
-              <div>
-                <div class="section-title" style="margin:0">Stage 1 — Keywords Search</div>
-                <div class="muted" style="font-size:12px">SearxNG Multi-Engine query using top 500 keywords</div>
-              </div>
-            </div>
-            <span id="badge-keywords" class="badge badge-idle">Idle</span>
-          </div>
-          <p class="muted" style="font-size:13px;margin-bottom:14px">Searches Google/Bing via SearXNG and seeds newly discovered domains into MongoDB <code>domain_Listed</code>.</p>
-          <div style="display:flex;gap:10px;align-items:center">
-            <button id="btn-keywords" class="btn btn-primary" onclick="runStage('keywords')">▶ Start Search</button>
-            <button id="btn-stop-keywords" class="btn btn-danger hidden" onclick="stopStage('keywords')">⏹ Stop Search</button>
-          </div>
-          <div class="log-panel mt16" id="log-keywords"><p class="dim">// Logs will stream here when started...</p></div>
-        </div>
-
-        <!-- Stage 2: Check & Classify -->
-        <div class="card" id="card-stage-check">
-          <div class="card-header">
-            <div style="display:flex;align-items:center;gap:10px">
-              <span style="font-size:22px">🤖</span>
-              <div>
-                <div class="section-title" style="margin:0">Stage 2 — URL Classifier & AI</div>
-                <div class="muted" style="font-size:12px">Fast HTTP fetch + Anti-False Positive AI Validation</div>
-              </div>
-            </div>
-            <span id="badge-check" class="badge badge-idle">Idle</span>
-          </div>
-          <div class="form-row">
-            <label>Classification Mode</label>
-            <select id="check-mode">
-              <option value="new">1. New Unprocessed Domains (Fresh queue from SearXNG search / CSV import)</option>
-              <option value="blocked">2. Re-check Blocked Sites (Retry HTTP 403 / Cloudflare WAF protected sites)</option>
-              <option value="unconfirmed">3. Re-check Unconfirmed Sites (Re-evaluate pending sites with Ollama AI)</option>
-              <option value="regular">4. Re-check Regular Websites (Re-verify non-gambling sites for new gambling content)</option>
-              <option value="dead">5. Re-check Dead Sites (Re-test offline or DNS-failed sites to see if back online)</option>
-            </select>
-          </div>
-          <div style="display:flex;gap:10px;align-items:center">
-            <button id="btn-check" class="btn btn-primary" onclick="onRunCheckClick()">▶ Run Classification</button>
-            <button id="btn-stop-check" class="btn btn-danger hidden" onclick="stopStage('check')">⏹ Stop Classification</button>
-          </div>
-          <div class="log-panel mt16" id="log-check"><p class="dim">// Logs will stream here when started...</p></div>
-        </div>
-
-        <!-- Stage 3: Export Reports -->
-        <div class="card" id="card-stage-export">
-          <div class="card-header">
-            <div style="display:flex;align-items:center;gap:10px">
-              <span style="font-size:22px">📋</span>
-              <div>
-                <div class="section-title" style="margin:0">Stage 3 — Compliance Report Exporter</div>
-                <div class="muted" style="font-size:12px">Generates PDF, Excel, and Word compliance reports from MongoDB</div>
-              </div>
-            </div>
-            <span id="badge-export" class="badge badge-idle">Idle</span>
-          </div>
-          <div style="display:flex;gap:10px;align-items:center">
-            <button id="btn-export" class="btn btn-primary" onclick="runStage('export')">▶ Generate & Export</button>
-            <button id="btn-stop-export" class="btn btn-danger hidden" onclick="stopStage('export')">⏹ Stop Export</button>
-          </div>
-          <div class="log-panel mt16" id="log-export"><p class="dim">// Logs will stream here when started...</p></div>
-        </div>
-      </div>
-
-      <!-- Import True Positives Section -->
-      <div class="card">
-        <div class="card-header">
-          <div style="display:flex;align-items:center;gap:10px">
-            <span style="font-size:22px">📥</span>
-            <div>
-              <div class="section-title" style="margin:0">Import Confirmed Gambling URLs</div>
-              <div class="muted" style="font-size:12px">Directly seeds confirmed gambling domains into MongoDB and queues for screenshot capture</div>
-            </div>
-          </div>
-        </div>
-        <div class="form-row">
-          <label>Paste Domains or URLs (one per line)</label>
-          <textarea id="import-domains" rows="4" placeholder="007book.biz&#10;https://www.10cric.biz&#10;royal777.com"></textarea>
-        </div>
-        <button id="btn-import" class="btn btn-primary" onclick="onRunImportClick()">📥 Import & Queue</button>
-      </div>
-    </div>
-
-    <!-- TAB 3: DOMAINS TABLE WITH ENHANCED FILTER & SEARCH CONTROLS -->
+    <!-- TAB 2: DOMAINS TABLE WITH ENHANCED FILTER & SEARCH CONTROLS -->
     <div id="tab-domains" class="tab-view hidden">
       <!-- Advanced Search & Filter Toolbar -->
       <div class="card mb16 filter-card">
@@ -413,6 +312,7 @@
           <thead>
             <tr>
               <th>Domain</th>
+              <th>IP Address</th>
               <th>Status</th>
               <th>Reason / Triggers</th>
               <th>Added Date</th>
@@ -420,7 +320,7 @@
             </tr>
           </thead>
           <tbody id="domains-body">
-            <tr><td colspan="5" style="text-align:center;padding:24px" class="muted">Loading domains…</td></tr>
+            <tr><td colspan="6" style="text-align:center;padding:24px" class="muted">Loading domains…</td></tr>
           </tbody>
         </table>
       </div>

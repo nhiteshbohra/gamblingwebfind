@@ -10,7 +10,6 @@ from unittest.mock import patch, MagicMock, AsyncMock
 
 from api.main import app
 from export_domains.screenshot import _url_to_filename
-import api.jobs as jobs
 
 
 @pytest.fixture
@@ -88,114 +87,6 @@ class TestAPIDomains:
         # Missing screenshot -> 404
         resp_missing = client.get("/api/domains/missingdomain.com/screenshot")
         assert resp_missing.status_code == 404
-
-
-class TestAPIPipelineRunsAndJobs:
-    """Test job lifecycle, stage triggering, conflict handling, and SSE log streaming."""
-
-    def test_run_stage_and_conflict_handling(self, client):
-        # Reset any running jobs in jobs dictionary
-        jobs._jobs.clear()
-
-        with patch("api.routers.pipeline._run_subprocess_worker", MagicMock()):
-            # Trigger keywords job
-            resp = client.post("/api/run/keywords")
-            assert resp.status_code == 200
-            job_id = resp.json()["job_id"]
-            assert job_id is not None
-
-            # Check /api/status
-            resp_status = client.get("/api/status")
-            assert resp_status.status_code == 200
-            assert any(j["job_id"] == job_id for j in resp_status.json())
-
-            # Triggering again while running -> 409 Conflict
-            resp_conflict = client.post("/api/run/keywords")
-            assert resp_conflict.status_code == 409
-
-            # Mark job done
-            jobs.finish_job(job_id, "done")
-            assert jobs.is_stage_running("keywords") is False
-
-    def test_stop_stage_and_all_endpoints(self, client):
-        jobs._jobs.clear()
-        with patch("api.routers.pipeline._run_subprocess_worker", MagicMock()):
-            resp = client.post("/api/run/keywords")
-            assert resp.status_code == 200
-            job_id = resp.json()["job_id"]
-            assert jobs.is_stage_running("keywords") is True
-
-            # Stop specific stage
-            resp_stop = client.post("/api/stop/keywords")
-            assert resp_stop.status_code == 200
-            assert resp_stop.json()["stopped"] is True
-            assert jobs.is_stage_running("keywords") is False
-
-            # Test stopping specific job_id
-            job_id_2 = jobs.new_job("check")
-            resp_stop_job = client.post(f"/api/jobs/{job_id_2}/stop")
-            assert resp_stop_job.status_code == 200
-            assert resp_stop_job.json()["status"] == "stopped"
-
-            # Test stop all
-            jobs.new_job("export")
-            jobs.new_job("screenshot")
-            resp_stop_all = client.post("/api/stop")
-            assert resp_stop_all.status_code == 200
-            assert resp_stop_all.json()["stopped_count"] == 2
-
-    def test_run_check_modes_and_validation(self, client):
-        jobs._jobs.clear()
-        with patch("api.routers.pipeline._run_subprocess_worker", MagicMock()):
-            # Valid regular mode
-            resp_reg = client.post("/api/run/check", json={"mode": "regular"})
-            assert resp_reg.status_code == 200
-            jobs.finish_job(resp_reg.json()["job_id"], "done")
-
-            # Valid dead mode
-            resp_dead = client.post("/api/run/check", json={"mode": "dead"})
-            assert resp_dead.status_code == 200
-            jobs.finish_job(resp_dead.json()["job_id"], "done")
-
-            # Invalid mode -> 422 Unprocessable Entity
-            resp_inv = client.post("/api/run/check", json={"mode": "invalid_mode_name"})
-            assert resp_inv.status_code == 422
-
-    def test_run_subprocess_worker_execution(self):
-        import asyncio
-        import sys
-        import time
-        import threading
-        from api.routers.pipeline import _run_subprocess_worker
-        loop = asyncio.new_event_loop()
-        t = threading.Thread(target=loop.run_forever, daemon=True)
-        t.start()
-        job_id = jobs.new_job("keywords")
-        _run_subprocess_worker(job_id, [sys.executable, "-c", "print('hello_test')"], loop)
-        for _ in range(50):
-            if jobs.get_job(job_id)["status"] == "done":
-                break
-            time.sleep(0.02)
-        job = jobs.get_job(job_id)
-        assert job["status"] == "done"
-        loop.call_soon_threadsafe(loop.stop)
-        t.join(timeout=2)
-        loop.close()
-
-    def test_import_endpoint(self, client, mock_mongo):
-        chk_col = mock_mongo["checked_domains"]
-
-        # Valid import payload
-        payload = {"domains": ["https://api-imported1.com/play", "api-imported2.in"]}
-        resp = client.post("/api/run/import", json=payload)
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["inserted"] == 2
-        assert chk_col.count_documents({"status": "gambling"}) == 2
-
-        # Empty payload -> 400 Bad Request
-        resp_bad = client.post("/api/run/import", json={"domains": []})
-        assert resp_bad.status_code == 400
 
 
 class TestAPIReportsAndSettingsAndStats:

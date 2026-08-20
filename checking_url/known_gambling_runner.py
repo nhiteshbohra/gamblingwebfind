@@ -46,6 +46,7 @@ from db.mongo_client import (
     checked_domains,
     source_domains,
     extract_domains_from_file,
+    resolve_ip,
     IST,
 )
 from checking_url.fetcher import fetch
@@ -116,9 +117,12 @@ def _write_gambling_active(
     screenshot_taken: bool,
     import_tag: str,
     screenshot_failed_reason: str | None = None,
+    ip: str = None,
 ):
     today = datetime.now(IST).strftime("%Y-%m-%d")
-    now_ts = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
+    if not ip:
+        ip = resolve_ip(domain)
+
     set_fields = {
         "domain": domain,
         "url": url,
@@ -128,6 +132,8 @@ def _write_gambling_active(
         "screenshot_failed_reason": screenshot_failed_reason,
         "source": import_tag,
     }
+    if ip:
+        set_fields["ip"] = ip
     if screenshot_taken:
         set_fields["screenshot_date"] = today
 
@@ -136,23 +142,25 @@ def _write_gambling_active(
         {"$set": set_fields, "$setOnInsert": {"added_date": today}},
         upsert=True,
     )
-    _upsert_domain_listed(domain, import_tag)
-
-
-def _write_dead(domain: str, url: str, reason: str, import_tag: str):
+def _write_dead(domain: str, url: str, reason: str, import_tag: str, ip: str = None):
     today = datetime.now(IST).strftime("%Y-%m-%d")
+    if not ip:
+        ip = resolve_ip(domain)
+
+    set_fields = {
+        "domain": domain,
+        "url": url,
+        "status": "dead",
+        "reason": f"Dead: {reason}",
+        "source": import_tag,
+    }
+    if ip:
+        set_fields["ip"] = ip
+
     checked_domains().update_one(
         {"_id": domain},
         {
-            "$set": {
-                "domain": domain,
-                "url": url,
-                "status": "dead",
-                "reason": f"Dead: {reason}",
-                "screenshot_taken": False,
-                "screenshot_failed_reason": reason,
-                "source": import_tag,
-            },
+            "$set": set_fields,
             "$setOnInsert": {"added_date": today},
         },
         upsert=True,

@@ -7,10 +7,8 @@ let _activeFilterParams = {};
 let _domainsQ = "";
 let _domainsPerPage = 50;
 let _currentDomainData = null;
-let _jobEventSources = {};
 let _searchDebounceTimer = null;
 let _confirmResolve = null;
-let _runningStages = new Set();
 
 // ── Toast Notifications ──────────────────────────────────────────────────────
 function toast(msg, duration = 3500) {
@@ -33,11 +31,6 @@ function showTab(name) {
 
   if (name === "overview") loadOverview();
   if (name === "domains") loadDomains(_domainsPage);
-}
-
-function focusStage(stageId) {
-  const el = document.getElementById(`card-stage-${stageId}`);
-  if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
 }
 
 // ── Filtering & Jump to Domains ──────────────────────────────────────────────
@@ -449,6 +442,10 @@ function renderDomainFullRow(d) {
     : `<span class="badge badge-idle">No</span>`;
 
   const targetUrl = d.url || `https://${d.domain}`;
+  const ipText = Array.isArray(d.ip) ? d.ip.join(", ") : d.ip;
+  const ipDisplay = ipText
+    ? `<span class="mono" style="font-size:12px;color:var(--text-light)" title="${ipText}">${ipText}</span>`
+    : `<span class="muted mono" style="font-size:12px">—</span>`;
 
   return `
     <tr>
@@ -456,6 +453,7 @@ function renderDomainFullRow(d) {
         <span style="font-weight:700;color:#fff">${d.domain}</span>
         <a href="${targetUrl}" target="_blank" rel="noopener noreferrer" style="margin-left:6px;color:var(--accent-light);font-size:11px" title="Visit website in new tab">↗</a>
       </td>
+      <td>${ipDisplay}</td>
       <td><span class="badge badge-${d.status || 'dead'}">${d.status || 'unknown'}</span></td>
       <td class="muted" style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${d.reason || '—'}</td>
       <td class="mono muted" style="font-size:12px">${d.added_date || '—'}</td>
@@ -468,222 +466,6 @@ function copyDomainJson() {
   if (!_currentDomainData) return;
   navigator.clipboard.writeText(JSON.stringify(_currentDomainData, null, 2));
   toast("Record JSON copied to clipboard!");
-}
-
-// ── 4. Pipeline Execution, Stop Control & SSE Log Streaming ───────────────────
-async function onRunCheckClick() {
-  const mode = document.getElementById("check-mode").value;
-  if (mode === "unconfirmed" || mode === "blocked" || mode === "regular" || mode === "dead") {
-    const ok = await showConfirm(
-      "⚠️ Re-Check Confirmation",
-      `Running Stage 2 in '${mode}' mode will trigger web fetches and AI cross-examinations for all ${mode} domains. This may take several minutes under load. Do you want to proceed?`
-    );
-    if (!ok) return;
-  }
-  runStage("check", { mode });
-}
-
-async function onRunImportClick() {
-  const txt = document.getElementById("import-domains").value;
-  const domains = txt.split("\n").map(s => s.trim()).filter(Boolean);
-  if (domains.length === 0) {
-    toast("[!] Please paste at least one domain or URL");
-    return;
-  }
-
-  const ok = await showConfirm(
-    "📥 Import Confirmation",
-    `Are you sure you want to import and queue ${domains.length} domain(s) directly as confirmed gambling true positives?`
-  );
-  if (!ok) return;
-
-  try {
-    const res = await fetch(`${API}/api/run/import`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ domains }),
-    });
-
-    if (!res.ok) {
-      const err = await res.json();
-      toast(`[!] Error: ${err.detail}`);
-      return;
-    }
-
-    const data = await res.json();
-    toast(`[+] Imported: ${data.inserted} new | Reset for re-capture: ${data.reset}`);
-    document.getElementById("import-domains").value = "";
-    loadOverview();
-  } catch (err) {
-    toast(`[!] Import error: ${err.message}`);
-  }
-}
-
-async function runStage(stage, body = {}) {
-  const startBtn = document.getElementById(`btn-${stage}`);
-  const stopBtn = document.getElementById(`btn-stop-${stage}`);
-  const stopAllBtn = document.getElementById("btn-stop-all");
-  const logEl = document.getElementById(`log-${stage}`);
-  const badge = document.getElementById(`badge-${stage}`);
-
-  if (startBtn) { startBtn.disabled = true; startBtn.classList.add("hidden"); }
-  if (stopBtn) { stopBtn.classList.remove("hidden"); stopBtn.disabled = false; stopBtn.textContent = `⏹ Stop ${formatStageName(stage)}`; }
-  if (stopAllBtn) stopAllBtn.classList.remove("hidden");
-
-  _runningStages.add(stage);
-
-  if (badge) {
-    badge.className = "badge badge-running";
-    badge.textContent = "Running...";
-  }
-  if (logEl) logEl.innerHTML = `<p class="info">// Starting ${stage} stage execution...</p>`;
-
-  try {
-    const res = await fetch(`${API}/api/run/${stage}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-
-    if (!res.ok) {
-      const errData = await res.json().catch(() => ({ detail: "Unknown error" }));
-      toast(`[!] ${errData.detail || 'Stage failed to start'}`);
-      resetStageButtons(stage, "failed");
-      return;
-    }
-
-    const { job_id } = await res.json();
-    streamLogs(job_id, stage, logEl, startBtn, stopBtn, badge);
-  } catch (err) {
-    toast(`[!] Network error: ${err.message}`);
-    resetStageButtons(stage, "failed");
-  }
-}
-
-async function stopStage(stage) {
-  const stopBtn = document.getElementById(`btn-stop-${stage}`);
-  if (stopBtn) {
-    stopBtn.disabled = true;
-    stopBtn.textContent = "Stopping...";
-  }
-
-  toast(`[!] Stopping ${stage} stage...`);
-
-  try {
-    const res = await fetch(`${API}/api/stop/${stage}`, { method: "POST" });
-    const data = await res.json();
-    if (data.stopped) {
-      toast(`[✓] ${stage} stage stop command received.`);
-    }
-  } catch (err) {
-    toast(`[!] Error stopping stage: ${err.message}`);
-  }
-}
-
-async function stopAllStages() {
-  const stopAllBtn = document.getElementById("btn-stop-all");
-  if (stopAllBtn) {
-    stopAllBtn.disabled = true;
-    stopAllBtn.textContent = "Stopping All...";
-  }
-
-  toast("[!] Stopping all running pipeline stages...");
-
-  try {
-    const res = await fetch(`${API}/api/stop`, { method: "POST" });
-    const data = await res.json();
-    toast(`[✓] Stop signal sent to ${data.stopped_count || 0} active job(s).`);
-  } catch (err) {
-    toast(`[!] Error: ${err.message}`);
-  }
-}
-
-function resetStageButtons(stage, finalStatus = "idle") {
-  _runningStages.delete(stage);
-
-  const startBtn = document.getElementById(`btn-${stage}`);
-  const stopBtn = document.getElementById(`btn-stop-${stage}`);
-  const stopAllBtn = document.getElementById("btn-stop-all");
-  const badge = document.getElementById(`badge-${stage}`);
-
-  if (startBtn) {
-    startBtn.disabled = false;
-    startBtn.classList.remove("hidden");
-  }
-  if (stopBtn) {
-    stopBtn.classList.add("hidden");
-    stopBtn.disabled = false;
-    stopBtn.textContent = `⏹ Stop ${formatStageName(stage)}`;
-  }
-
-  if (badge) {
-    if (finalStatus === "done") {
-      badge.className = "badge badge-done";
-      badge.textContent = "Done";
-    } else if (finalStatus === "stopped") {
-      badge.className = "badge badge-failed";
-      badge.textContent = "Stopped";
-    } else if (finalStatus === "failed") {
-      badge.className = "badge badge-failed";
-      badge.textContent = "Failed";
-    } else {
-      badge.className = "badge badge-idle";
-      badge.textContent = "Idle";
-    }
-  }
-
-  if (_runningStages.size === 0 && stopAllBtn) {
-    stopAllBtn.classList.add("hidden");
-    stopAllBtn.disabled = false;
-    stopAllBtn.textContent = "⏹ Stop All Running Jobs";
-  }
-}
-
-function formatStageName(stage) {
-  if (stage === "keywords") return "Search";
-  if (stage === "check") return "Check";
-  if (stage === "export") return "Export";
-  if (stage === "screenshot") return "Capture";
-  return stage;
-}
-
-function streamLogs(job_id, stage, logEl, startBtn, stopBtn, badge) {
-  if (_jobEventSources[job_id]) _jobEventSources[job_id].close();
-
-  const es = new EventSource(`${API}/api/logs/${job_id}`);
-  _jobEventSources[job_id] = es;
-
-  let stoppedByUser = false;
-
-  es.onmessage = (e) => {
-    if (e.data === "__PING__") return;
-    if (e.data.includes("stopped by user")) {
-      stoppedByUser = true;
-    }
-    if (e.data === "__DONE__") {
-      es.close();
-      const finalStatus = stoppedByUser ? "stopped" : "done";
-      resetStageButtons(stage, finalStatus);
-      toast(stoppedByUser ? `Stage '${stage}' stopped by user.` : `Stage '${stage}' finished successfully!`);
-      loadOverview();
-      return;
-    }
-
-    const p = document.createElement("p");
-    p.textContent = e.data;
-    const txtLower = e.data.toLowerCase();
-    if (txtLower.includes("error") || txtLower.includes("failed")) p.className = "err";
-    else if (txtLower.includes("stopped") || txtLower.includes("warning") || txtLower.includes("[!]")) p.className = "warn";
-    else if (txtLower.includes("[+]") || txtLower.includes("success") || txtLower.includes("[✓]")) p.className = "info";
-
-    logEl.appendChild(p);
-    logEl.scrollTop = logEl.scrollHeight;
-  };
-
-  es.onerror = () => {
-    es.close();
-    resetStageButtons(stage, stoppedByUser ? "stopped" : "failed");
-  };
 }
 
 // ── Initial Boot ─────────────────────────────────────────────────────────────
