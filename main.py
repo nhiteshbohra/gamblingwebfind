@@ -229,18 +229,65 @@ def run_export_domains():
 
 
 
+
+
+def run_known_gambling_scan():
+    print("\n--- Known Gambling Domains (Import, Liveness Check & Screenshot) ---")
+    print("    Enter the full path to your domains file (.txt / .csv / .xlsx).")
+    print("    Type 'back' or leave empty to return to the main menu.\n")
+
+    # Keep asking until a valid file is given or user cancels
+    while True:
+        user_path = input("File path: ").strip().strip('"').strip("'")
+        if not user_path or user_path.lower() in ("back", "b", "0"):
+            print("[+] Cancelled.")
+            return
+
+        domains_file = Path(user_path)
+        if domains_file.exists() and domains_file.is_file():
+            break
+        print(f"[!] File not found: {user_path}")
+        print("    Please check the path and try again (or type 'back' to cancel).")
+
+    # Derive a checkpoint name from the file stem so separate files
+    # don't overwrite each other's progress.
+    checkpoint_name = f"known_gambling_progress_{domains_file.stem}.json"
+    checkpoint_path = str(PROJECT_ROOT / "output" / checkpoint_name)
+    print(f"\n[+] File          : {domains_file}")
+    print(f"[+] Checkpoint    : {checkpoint_path}")
+    print("    (Progress is auto-saved every 25 domains — safe to Ctrl+C and resume anytime.)")
+
+    concurrency = int(os.getenv("CHECK_CONCURRENCY", os.getenv("MAX_CONCURRENT_FETCHES", 10)))
+    confirm = input(f"\n[?] Start scan with concurrency={concurrency}? (y/n) [default: y]: ").strip().lower()
+    if confirm in ("n", "no"):
+        print("[+] Aborted.")
+        return
+
+    from checking_url.known_gambling_runner import run as known_run
+    try:
+        asyncio.run(known_run(
+            domains_file=str(domains_file),
+            concurrency=concurrency,
+            checkpoint_path=checkpoint_path,
+        ))
+    except KeyboardInterrupt:
+        print("\n[+] Stopped by user. Progress saved — run again to resume.")
+
+
+
 def interactive_menu():
     while True:
-        print("\n" + "=" * 58)
-        print("             GAMBLINGWEBFIND PROCESS MENU             ")
-        print("=" * 58)
+        print("\n" + "=" * 65)
+        print("              GAMBLINGWEBFIND PROCESS MENU              ")
+        print("=" * 65)
         print("1. keywordssearch        (SearXNG / Multi-Engine Search)")
         print("2. checking_url          (Fetch, AI Classify & Screenshot)")
         print("3. export_domains        (Export Reports & Divide into Batches)")
+        print("4. known gambling scan   (Import list, Screenshot live, Mark dead)")
         print("0. Exit")
-        print("=" * 58)
+        print("=" * 65)
 
-        choice = input("Select an option (1-3, 0 to exit): ").strip()
+        choice = input("Select an option (1-4, 0 to exit): ").strip()
 
         if choice == "1":
             run_searxng_search()
@@ -248,11 +295,13 @@ def interactive_menu():
             run_checking_url()
         elif choice == "3":
             run_export_domains()
+        elif choice == "4":
+            run_known_gambling_scan()
         elif choice == "0" or choice.lower() in ("exit", "q", "quit"):
             print("Exiting.")
             break
         else:
-            print("[!] Invalid option. Please enter 1-3 or 0 to exit.")
+            print("[!] Invalid option. Please enter 1-4 or 0 to exit.")
 
 
 def shutdown_background_services():

@@ -200,8 +200,9 @@ def build_report(entries: list[dict], output_path: str) -> str:
 
         add_clickable_hyperlink(p_hdr, url=url, text=url, font_size_pt=12.0)
 
-        # ponytail: Include screenshot timestamp in report
-        ss_date = str(entry.get("screenshot_date") or entry.get("screenshot_taken_at") or entry.get("last_checked_at") or entry.get("added_date") or datetime.now(IST).strftime("%Y-%m-%d"))
+        # ponytail: Include screenshot timestamp in report (Date only: YYYY-MM-DD)
+        ss_date_raw = str(entry.get("screenshot_date") or entry.get("added_date") or datetime.now(IST).strftime("%Y-%m-%d"))
+        ss_date = ss_date_raw.split(" ")[0].split("T")[0]
         p_meta = doc.add_paragraph()
         p_meta.paragraph_format.space_before = Pt(0)
         p_meta.paragraph_format.space_after = Pt(2)
@@ -259,12 +260,16 @@ def build_workbook(entries: list[dict], failed_docs: list[dict], output_path: st
     """Build report.xlsx with 'Captured Domains' sheet (failed domains omitted per user spec)."""
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
 
+    def _extract_date(e: dict) -> str:
+        raw = str(e.get("screenshot_date") or e.get("added_date") or datetime.now(IST).strftime("%Y-%m-%d"))
+        return raw.split(" ")[0].split("T")[0]
+
     captured_rows = [
         {
             "S.No.": i,
             "Domain": e.get("domain", ""),
             "URL": e.get("url", ""),
-            "Screenshot Date": (e.get("screenshot_date") or e.get("screenshot_taken_at") or e.get("last_checked_at") or e.get("added_date") or datetime.now(IST).strftime("%Y-%m-%d")),
+            "Screenshot Date": _extract_date(e),
         }
         for i, e in enumerate(entries, 1)
     ]
@@ -327,14 +332,16 @@ def run_export(domain_ids: list = None, limit: int = 0) -> dict:
 
         if src:
             dest = os.path.join(dest_screenshots, os.path.basename(src))
-            ss_date = doc.get("screenshot_date") or doc.get("screenshot_taken_at") or doc.get("last_checked_at") or doc.get("added_date")
+            ss_date = doc.get("screenshot_date") or doc.get("added_date")
             entry_item = {"domain": domain, "url": url, "_id": doc["_id"], "_src": src, "screenshot_date": ss_date}
             try:
-                shutil.copy2(src, dest)
+                if os.path.exists(dest) and os.path.abspath(src) != os.path.abspath(dest):
+                    os.remove(dest)
+                shutil.move(src, dest)
                 entry_item["screenshot_path"] = dest
                 entries.append(entry_item)
             except Exception as e:
-                print(f"  [export] Copy failed for {domain}: {e} — using source path")
+                print(f"  [export] Move failed for {domain}: {e} — using source path")
                 entry_item["screenshot_path"] = src
                 entries.append(entry_item)
         else:

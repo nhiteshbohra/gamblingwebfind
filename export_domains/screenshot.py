@@ -32,7 +32,7 @@ def all_filename_candidates(url: str, domain: str) -> list[str]:
 
 
 def is_valid_screenshot(filepath: str, min_size_bytes: int = 500) -> bool:
-    """Validate that screenshot exists, has content (>500 bytes), and is a readable image."""
+    """Validate that screenshot exists, has content (>500 bytes), is readable, and is NOT a blank/solid white page."""
     if not filepath or not os.path.exists(filepath):
         return False
     if os.path.getsize(filepath) < min_size_bytes:
@@ -40,6 +40,11 @@ def is_valid_screenshot(filepath: str, min_size_bytes: int = 500) -> bool:
     try:
         with Image.open(filepath) as img:
             img.verify()
+        # Open again to test variance (detect completely blank white or black screen)
+        with Image.open(filepath) as img:
+            stat = ImageStat.Stat(img.convert('L'))
+            if stat.stddev[0] < 2.5:  # Solid/blank image with almost no visual variation
+                return False
         return True
     except Exception:
         return False
@@ -176,36 +181,84 @@ class BrowserPool:
                     )
                 page = await context.new_page()
 
-                nav_timeout = 25000  # Dynamic: captures fast sites instantly, max 25s ceiling for slow sites
+                nav_timeout = 25000  # Dynamic: max 25s ceiling
                 page.set_default_timeout(nav_timeout)
 
-                # Attempt page navigation (returns immediately as soon as DOM content is ready)
+                # 1. Attempt navigation with full 'load' event (assets, scripts, styles)
+                response = None
                 try:
-                    await page.goto(target_url, timeout=nav_timeout, wait_until='domcontentloaded')
+                    response = await page.goto(target_url, timeout=nav_timeout, wait_until='load')
                 except Exception:
                     try:
-                        await page.goto(target_url, timeout=5000, wait_until='commit')
+                        response = await page.goto(target_url, timeout=nav_timeout, wait_until='domcontentloaded')
                     except Exception:
                         pass
 
-                # Render settle & scroll
+                # 2. Check HTTP status code immediately if available
+                if response:
+                    http_status = response.status
+                    if http_status in (500, 502, 503, 504):
+                        await context.close()
+                        context = None
+                        delete_screenshot(clean_dom, os.path.dirname(filepath))
+                        return None, "dead", f"Dead: HTTP {http_status} Server Error in Playwright"
+                    elif http_status == 403:
+                        await context.close()
+                        context = None
+                        delete_screenshot(clean_dom, os.path.dirname(filepath))
+                        return None, "blocked", "Blocked: HTTP 403 Forbidden in Playwright"
+                    elif http_status in (404, 410):
+                        await context.close()
+                        context = None
+                        delete_screenshot(clean_dom, os.path.dirname(filepath))
+                        return None, "dead", f"Dead: HTTP {http_status} Not Found in Playwright"
+
+                # 3. Wait for network to settle (React/Vue API requests & betting widgets to finish)
                 try:
-                    await asyncio.sleep(0.8)
-                    await page.evaluate("window.scrollTo(0, document.body.scrollHeight / 3)")
-                    await asyncio.sleep(0.4)
-                    await page.evaluate("window.scrollTo(0, 0)")
+                    await page.wait_for_load_state('networkidle', timeout=6000)
                 except Exception:
                     pass
 
-                # Clean any obstructive translation/cookie banners
+                # 4. Wait for real DOM content to render (text or interactive elements)
+                try:
+                    await page.wait_for_function("""() => {
+                        const body = document.body;
+                        if (!body) return false;
+                        const text = body.innerText ? body.innerText.trim() : '';
+                        const elements = document.querySelectorAll('img, canvas, button, a, svg, iframe, video, [class*="game"], [class*="bet"]');
+                        return text.length > 40 || elements.length >= 6;
+                    }""", timeout=6000)
+                except Exception:
+                    pass
+
+                # 5. Dismiss / wait for full-screen loading spinners & overlays
+                try:
+                    await page.wait_for_selector(
+                        '.loading, .loader, .spinner, .preloader, #loading, #spinner, [class*="preloader"], [class*="loading-overlay"]',
+                        state='hidden',
+                        timeout=3000
+                    )
+                except Exception:
+                    pass
+
+                # 6. Progressive scroll to trigger lazy-loaded game banners/images
+                try:
+                    await page.evaluate("window.scrollTo(0, Math.min(document.body.scrollHeight / 3, 600))")
+                    await asyncio.sleep(0.8)
+                    await page.evaluate("window.scrollTo(0, 0)")
+                    await asyncio.sleep(0.5)
+                except Exception:
+                    pass
+
+                # 7. Clean obstructive translation/cookie banners
                 try:
                     await page.evaluate("""() => {
-                        document.querySelectorAll('.translation-overlay, .modal-backdrop, [class*="overlay"]:not([class*="hero"]), #cookie-law-info-again').forEach(el => el.remove());
+                        document.querySelectorAll('.translation-overlay, .modal-backdrop, [class*="overlay"]:not([class*="hero"]), #cookie-law-info-again, .cookies-popup, [class*="cookie-banner"]').forEach(el => el.remove());
                     }""")
                 except Exception:
                     pass
 
-                # Check rendered DOM text for 403 / Cloudflare WAF or Domain Parking landers
+                # 8. Check rendered DOM text for 403 / Cloudflare WAF or Domain Parking landers
                 try:
                     rendered_title = (await page.title() or "").lower()
                     rendered_body = (await page.content() or "")[:15000].lower()
@@ -225,6 +278,18 @@ class BrowserPool:
                         "atom.com", "squadhelp.com", "godaddy.com/domains", "parkingcrew",
                     ]
 
+                    _SERVER_ERROR_MARKERS = [
+                        "502 bad gateway", "503 service unavailable", "504 gateway time-out",
+                        "504 gateway timeout", "502 server error", "503 service temporarily unavailable",
+                        "bad gateway</title>", "502 error", "error 502", "error 504",
+                    ]
+
+                    _NOT_FOUND_MARKERS = [
+                        "404 not found", "http error 404", "404 - not found", "error 404",
+                        "the requested resource is not found", "page not found", "404 page not found",
+                        "404 error", "<title>404</title>", "not found</title>",
+                    ]
+
                     if any(m in rendered_full for m in _BLOCKED_PAGE_MARKERS):
                         await context.close()
                         context = None
@@ -236,23 +301,43 @@ class BrowserPool:
                         context = None
                         delete_screenshot(clean_dom, os.path.dirname(filepath))
                         return None, "dead", "Dead: Parked or For-Sale lander detected in Playwright"
+
+                    if any(m in rendered_full for m in _SERVER_ERROR_MARKERS):
+                        await context.close()
+                        context = None
+                        delete_screenshot(clean_dom, os.path.dirname(filepath))
+                        return None, "dead", "Dead: 502/503/504 Server Error detected in Playwright"
+
+                    if any(m in rendered_full for m in _NOT_FOUND_MARKERS):
+                        await context.close()
+                        context = None
+                        delete_screenshot(clean_dom, os.path.dirname(filepath))
+                        return None, "dead", "Dead: 404 Not Found error page detected in Playwright"
                 except Exception:
                     pass
 
-                # Take screenshot directly
+                # 9. Take screenshot with in-flight retry if still unmounted
                 raw_bytes = await page.screenshot(type='png', full_page=False, timeout=15000)
 
-                # If blank (common on Vue/React SPAs like ballaribook), allow extra 2s for JS bundle to mount
+                # If blank (common on Vue/React SPAs like ballaribook), allow extra 2.5s for JS bundle to mount
                 img_test = Image.open(io.BytesIO(raw_bytes)).convert('L')
-                if ImageStat.Stat(img_test).stddev[0] < 2.0:
+                if ImageStat.Stat(img_test).stddev[0] < 2.5:
                     try:
-                        await asyncio.sleep(2.0)
+                        await asyncio.sleep(2.5)
+                        await page.evaluate("window.scrollTo(0, 300)")
+                        await asyncio.sleep(0.5)
                         raw_bytes = await page.screenshot(type='png', full_page=False, timeout=15000)
+                        img_test = Image.open(io.BytesIO(raw_bytes)).convert('L')
                     except Exception:
                         pass
 
                 await context.close()
                 context = None
+
+                # If still blank white/empty page after retry, reject as dead/unrenderable
+                if ImageStat.Stat(img_test).stddev[0] < 2.5:
+                    delete_screenshot(clean_dom, os.path.dirname(filepath))
+                    return None, "dead", "Dead: Blank white/empty page rendered in Playwright"
 
                 # Convert to optimized JPEG
                 img = Image.open(io.BytesIO(raw_bytes))

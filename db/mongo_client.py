@@ -318,7 +318,6 @@ def write_result(
         "url": url or f"https://{domain}",
         "status": status,
         "reason": formatted_reason,
-        "last_checked_at": today_date,
     }
 
 
@@ -326,9 +325,7 @@ def write_result(
         set_fields["screenshot_taken"] = bool(screenshot_taken)
         set_fields["screenshot_failed_reason"] = screenshot_failed_reason
         if screenshot_taken:
-            now_ts = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
-            set_fields["screenshot_date"] = now_ts
-            set_fields["screenshot_taken_at"] = now_ts
+            set_fields["screenshot_date"] = today_date
 
     update = {
         "$set": set_fields,
@@ -476,7 +473,6 @@ def ingest_true_positives(path_or_domains: str | list[str]) -> tuple[int, int]:
                         "screenshot_taken": False,
                         "exported": False,
                         "screenshot_failed_reason": None,
-                        "last_checked_at": today_date,
                     }
                 },
             )
@@ -504,7 +500,6 @@ def ingest_true_positives(path_or_domains: str | list[str]) -> tuple[int, int]:
                     "screenshot_taken": False,
                     "screenshot_failed_reason": None,
                     "source": "manual_import",
-                    "last_checked_at": today_date,
                 },
                 "$setOnInsert": {"added_date": today_date},
             },
