@@ -59,21 +59,24 @@ def _classify_failure(status_code=None, html=None, error=None):
 
 
 class FetchResult:
-    def __init__(self, url, status_code=None, html=None, latency=0.0, error=None, failure_type=None):
+    def __init__(self, url, status_code=None, html=None, latency=0.0, error=None, failure_type=None, final_url=None):
         self.url = url
+        self.final_url = final_url or url
         self.status_code = status_code
         self.html = html
         self.latency = latency
         self.error = error
         self.failure_type = failure_type  # None = success
+        self.redirected = bool(final_url and final_url.rstrip("/").lower() != url.rstrip("/").lower())
 
 
 def _result_from_response(url: str, resp, latency: float) -> FetchResult:
-    """Turn a scrapling Response into a FetchResult, applying body-marker sniffing."""
+    """Turn a scrapling Response into a FetchResult, applying body-marker sniffing and redirect tracking."""
     if resp is None:
-        return FetchResult(url=url, latency=latency, failure_type='connection_failed')
+        return FetchResult(url=url, latency=latency, failure_type='connection_failed', final_url=url)
     
     status = getattr(resp, "status", 0)
+    final_url = getattr(resp, "url", None) or url
     raw_body = getattr(resp, "body", None)
     if isinstance(raw_body, bytes):
         html = raw_body.decode(getattr(resp, "encoding", "utf-8") or "utf-8", errors="ignore")
@@ -82,17 +85,28 @@ def _result_from_response(url: str, resp, latency: float) -> FetchResult:
     else:
         html = ""
 
+    # Sniff HTML meta-refresh or JS window.location redirect if response is a thin redirect shell
+    if html and len(html) < 2000:
+        import re
+        meta_match = re.search(r'<meta[^>]*http-equiv=["\']?refresh["\']?[^>]*content=["\']?\d+;\s*url=([^"\'>]+)', html, re.IGNORECASE)
+        if meta_match:
+            dest = meta_match.group(1).strip()
+            if dest.startswith(("http://", "https://")):
+                final_url = dest
+        else:
+            js_match = re.search(r'(?:window\.)?location(?:\.href)?\s*=\s*["\'](https?://[^"\']+)["\']', html, re.IGNORECASE)
+            if js_match:
+                final_url = js_match.group(1).strip()
+
     if status >= 400 or not html.strip():
         ft = _classify_failure(status_code=status, html=html)
-        return FetchResult(url=url, status_code=status, latency=latency, failure_type=ft)
+        return FetchResult(url=url, status_code=status, latency=latency, failure_type=ft, final_url=final_url)
 
-    result = FetchResult(url=url, status_code=status, html=html, latency=latency)
+    result = FetchResult(url=url, status_code=status, html=html, latency=latency, final_url=final_url)
     body = html[:5000].lower()
     if any(m in body for m in _BLOCKED_BODY_MARKERS):
-        result.html = None
         result.failure_type = 'blocked'
     elif any(m in body for m in _PARKED_BODY_MARKERS):
-        result.html = None
         result.failure_type = 'dead_confirmed'
     return result
 

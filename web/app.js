@@ -1,14 +1,18 @@
-// app.js — Frontend Controller for GamblingWebFind Dashboard
+// app.js — Frontend Controller for GamblingWebFind Intelligence Dashboard
 const API = "";
 let _activeTab = "overview";
 let _domainsPage = 1;
 let _currentFilter = "all";
 let _activeFilterParams = {};
 let _domainsQ = "";
+let _ipFilter = "";
+let _datePreset = "all";
 let _domainsPerPage = 50;
 let _currentDomainData = null;
 let _searchDebounceTimer = null;
+let _ipDebounceTimer = null;
 let _confirmResolve = null;
+let _lastSandboxResult = null;
 
 // ── Toast Notifications ──────────────────────────────────────────────────────
 function toast(msg, duration = 3500) {
@@ -31,16 +35,119 @@ function showTab(name) {
 
   if (name === "overview") loadOverview();
   if (name === "domains") loadDomains(_domainsPage);
+  if (name === "sandbox") {
+    const input = document.getElementById("sandbox-url-input");
+    if (input && !input.value) input.focus();
+  }
 }
 
-// ── Filtering & Jump to Domains ──────────────────────────────────────────────
+// ── Date Preset Helpers ──────────────────────────────────────────────────────
+function formatDateYMD(d) {
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function setDatePreset(presetKey) {
+  _datePreset = presetKey;
+  const fromEl = document.getElementById("filter-from-date");
+  const toEl = document.getElementById("filter-to-date");
+  if (!fromEl || !toEl) return;
+
+  const now = new Date();
+  let fromStr = "";
+  let toStr = "";
+
+  if (presetKey === "today") {
+    fromStr = toStr = formatDateYMD(now);
+  } else if (presetKey === "yesterday") {
+    const yest = new Date(now);
+    yest.setDate(yest.getDate() - 1);
+    fromStr = toStr = formatDateYMD(yest);
+  } else if (presetKey === "7days") {
+    const past = new Date(now);
+    past.setDate(past.getDate() - 7);
+    fromStr = formatDateYMD(past);
+    toStr = formatDateYMD(now);
+  } else if (presetKey === "30days") {
+    const past = new Date(now);
+    past.setDate(past.getDate() - 30);
+    fromStr = formatDateYMD(past);
+    toStr = formatDateYMD(now);
+  } else if (presetKey === "this_month") {
+    const firstDay = new Date(now.getFullYear(), now.getMonth(), 1);
+    fromStr = formatDateYMD(firstDay);
+    toStr = formatDateYMD(now);
+  } else {
+    // "all"
+    fromStr = "";
+    toStr = "";
+  }
+
+  fromEl.value = fromStr;
+  toEl.value = toStr;
+
+  document.querySelectorAll(".date-chip").forEach(chip => {
+    chip.classList.toggle("active", chip.dataset.preset === presetKey);
+  });
+
+  onDateFilterChange();
+}
+
+function onDateFilterChange() {
+  _domainsPage = 1;
+  const fromVal = document.getElementById("filter-from-date").value;
+  const toVal = document.getElementById("filter-to-date").value;
+
+  if (fromVal) _activeFilterParams.from_date = fromVal;
+  else delete _activeFilterParams.from_date;
+
+  if (toVal) _activeFilterParams.to_date = toVal;
+  else delete _activeFilterParams.to_date;
+
+  updateFilterSummary();
+  loadDomains(1);
+}
+
+// ── IP Filter Handlers ───────────────────────────────────────────────────────
+function onIpFilterInput(val) {
+  _ipFilter = val.trim();
+  const clearBtn = document.getElementById("ip-clear-btn");
+  if (clearBtn) clearBtn.classList.toggle("hidden", !_ipFilter);
+
+  clearTimeout(_ipDebounceTimer);
+  _ipDebounceTimer = setTimeout(() => {
+    updateFilterSummary();
+    loadDomains(1);
+  }, 300);
+}
+
+function clearIpInput() {
+  _ipFilter = "";
+  const ipInput = document.getElementById("filter-ip-input");
+  if (ipInput) ipInput.value = "";
+  const clearBtn = document.getElementById("ip-clear-btn");
+  if (clearBtn) clearBtn.classList.add("hidden");
+
+  updateFilterSummary();
+  loadDomains(1);
+}
+
+// ── Search & Filter Controls ─────────────────────────────────────────────────
 function jumpToDomains(filterObj = {}) {
   _domainsPage = 1;
   _domainsQ = "";
+  _ipFilter = "";
   const sInput = document.getElementById("domain-search");
   if (sInput) sInput.value = "";
   const sClear = document.getElementById("search-clear-btn");
   if (sClear) sClear.classList.add("hidden");
+
+  const ipInput = document.getElementById("filter-ip-input");
+  if (ipInput) ipInput.value = "";
+  const ipClear = document.getElementById("ip-clear-btn");
+  if (ipClear) ipClear.classList.add("hidden");
 
   if (filterObj.screenshot === "pending") {
     setFilterChip("ss_pending");
@@ -63,7 +170,6 @@ function setFilterChip(filterKey) {
   _currentFilter = filterKey;
   _domainsPage = 1;
 
-  // Clear specific dropdown overrides to stay synced
   _activeFilterParams = {};
   if (filterKey === "gambling") {
     _activeFilterParams.status = "gambling";
@@ -87,10 +193,8 @@ function setFilterChip(filterKey) {
     _activeFilterParams.exported = "false";
   }
 
-  // Sync dropdown selectors with chip
   syncDropdownsFromActiveFilter();
 
-  // Update chip active classes
   document.querySelectorAll(".chip-btn").forEach(chip => {
     chip.classList.toggle("active", chip.dataset.filter === filterKey);
   });
@@ -119,24 +223,7 @@ function onDropdownFilterChange(filterType, val) {
     _activeFilterParams[filterType] = val;
   }
 
-  // De-activate chips if dropdowns diverge
   document.querySelectorAll(".chip-btn").forEach(chip => chip.classList.remove("active"));
-
-  updateFilterSummary();
-  loadDomains(1);
-}
-
-function onDateFilterChange() {
-  _domainsPage = 1;
-  const fromVal = document.getElementById("filter-from-date").value;
-  const toVal = document.getElementById("filter-to-date").value;
-
-  if (fromVal) _activeFilterParams.from_date = fromVal;
-  else delete _activeFilterParams.from_date;
-
-  if (toVal) _activeFilterParams.to_date = toVal;
-  else delete _activeFilterParams.to_date;
-
   updateFilterSummary();
   loadDomains(1);
 }
@@ -166,14 +253,20 @@ function clearSearchInput() {
 
 function resetAllFilters() {
   _domainsQ = "";
+  _ipFilter = "";
   _activeFilterParams = {};
   _currentFilter = "all";
   _domainsPage = 1;
 
   const sInput = document.getElementById("domain-search");
   if (sInput) sInput.value = "";
-  const clearBtn = document.getElementById("search-clear-btn");
-  if (clearBtn) clearBtn.classList.add("hidden");
+  const sClear = document.getElementById("search-clear-btn");
+  if (sClear) sClear.classList.add("hidden");
+
+  const ipInput = document.getElementById("filter-ip-input");
+  if (ipInput) ipInput.value = "";
+  const ipClear = document.getElementById("ip-clear-btn");
+  if (ipClear) ipClear.classList.add("hidden");
 
   const statusSel = document.getElementById("filter-status-select");
   const ssSel = document.getElementById("filter-screenshot-select");
@@ -187,13 +280,17 @@ function resetAllFilters() {
   if (fromD) fromD.value = "";
   if (toD) toD.value = "";
 
+  document.querySelectorAll(".date-chip").forEach(chip => {
+    chip.classList.toggle("active", chip.dataset.preset === "all");
+  });
+
   document.querySelectorAll(".chip-btn").forEach(chip => {
     chip.classList.toggle("active", chip.dataset.filter === "all");
   });
 
   updateFilterSummary();
   loadDomains(1);
-  toast("All search filters reset.");
+  toast("All search, IP, and date filters have been reset.");
 }
 
 function updateFilterSummary() {
@@ -202,6 +299,7 @@ function updateFilterSummary() {
 
   const tags = [];
   if (_domainsQ) tags.push(`Query: "${_domainsQ}"`);
+  if (_ipFilter) tags.push(`IP: "${_ipFilter}"`);
   if (_activeFilterParams.status) tags.push(`Status: ${_activeFilterParams.status}`);
   if (_activeFilterParams.screenshot) tags.push(`Screenshot: ${_activeFilterParams.screenshot}`);
   if (_activeFilterParams.exported) tags.push(`Exported: ${_activeFilterParams.exported}`);
@@ -242,6 +340,29 @@ function closeConfirmModal(result) {
   }
 }
 
+// ── Screenshot Lightbox Modal ────────────────────────────────────────────────
+function openScreenshotModal(domain, url) {
+  const modal = document.getElementById("screenshot-modal");
+  const img = document.getElementById("ss-modal-img");
+  const title = document.getElementById("ss-modal-domain");
+  const caption = document.getElementById("ss-modal-caption");
+  const dLink = document.getElementById("ss-modal-download-link");
+
+  const shotUrl = `${API}/api/domains/${domain}/screenshot?t=${Date.now()}`;
+  img.src = shotUrl;
+  title.textContent = `📸 Evidence: ${domain}`;
+  caption.textContent = `Target URL: ${url || 'https://' + domain}`;
+  dLink.href = shotUrl;
+  dLink.download = `${domain}_screenshot.jpg`;
+
+  modal.classList.remove("hidden");
+}
+
+function closeScreenshotModal() {
+  const modal = document.getElementById("screenshot-modal");
+  modal.classList.add("hidden");
+}
+
 // ── 1. Overview & Stats Loader ───────────────────────────────────────────────
 async function loadOverview() {
   const errBanner = document.getElementById("global-error-banner");
@@ -254,9 +375,7 @@ async function loadOverview() {
 
     const src = data.source_domains || {};
     const chk = data.checked_domains || {};
-    const rep = data.reports || {};
 
-    // Header Status Pill
     const mDot = document.getElementById("hdr-mongo-dot");
     const mTxt = document.getElementById("hdr-mongo-text");
     if (mDot && mTxt) {
@@ -264,14 +383,12 @@ async function loadOverview() {
       mTxt.textContent = `Mongo: ${fmtNum(chk.total_checked || src.total_listed)}`;
     }
 
-    // Row A: Source Pipeline Stats
     document.getElementById("st-src-total").textContent = fmtNum(src.total_listed);
     document.getElementById("st-src-pending").textContent = fmtNum(src.pending);
     document.getElementById("st-src-active").textContent = fmtNum(src.active);
     document.getElementById("st-src-inactive").textContent = fmtNum(src.inactive);
     document.getElementById("st-src-blocked").textContent = fmtNum(src.blocked_source);
 
-    // Row B: Classification Status
     const g = chk.gambling || 0;
     const r = chk.regular || 0;
     const b = chk.blocked || 0;
@@ -286,17 +403,13 @@ async function loadOverview() {
     document.getElementById("st-unconfirmed").textContent = fmtNum(u);
     document.getElementById("st-rate").textContent = `${chk.gambling_rate || 0}%`;
 
-    // Row C: Compliance & Export
     const setVal = (id, val) => {
       const el = document.getElementById(id);
       if (el) el.textContent = fmtNum(val);
     };
-    setVal("st-ss-taken", chk.screenshot_taken);
-    setVal("st-ss-pending", chk.screenshot_pending);
     setVal("st-exp-done", chk.exported);
     setVal("st-exp-pending", chk.pending_export);
 
-    // Filter Chips Counts (on Domains tab)
     const setChip = (id, count) => {
       const el = document.getElementById(id);
       if (el) el.textContent = fmtNum(count);
@@ -307,28 +420,12 @@ async function loadOverview() {
     setChip("chip-cnt-blocked", b);
     setChip("chip-cnt-dead", d);
     setChip("chip-cnt-unconfirmed", u);
-    setChip("chip-cnt-ss-pending", chk.screenshot_pending);
-    setChip("chip-cnt-ss-taken", chk.screenshot_taken);
     setChip("chip-cnt-exported", chk.exported);
     setChip("chip-cnt-not-exported", Math.max(0, totalChk - (chk.exported || 0)));
 
-    // Deep Metrics — Throughput
     setVal("m-src-processed", src.processed);
     setVal("m-src-today", src.added_today);
     setVal("m-src-week", src.added_this_week);
-
-    setVal("m-rate-text", `${chk.gambling_rate || 0}%`);
-    const rateBar = document.getElementById("m-rate-bar");
-    if (rateBar) rateBar.style.width = `${Math.min(100, (chk.gambling_rate || 0) * 4)}%`;
-    setVal("m-ai-count", chk.ai_classified);
-    setVal("m-kw-count", chk.keyword_classified);
-
-    // Deep Metrics — Reports
-    setVal("m-rep-runs", rep.runs);
-    setVal("m-rep-pdf", `${fmtNum(rep.pdf_files)} PDF`);
-    setVal("m-rep-xlsx", `${fmtNum(rep.xlsx_files)} Excel`);
-    setVal("m-rep-docx", `${fmtNum(rep.docx_files)} Word`);
-    setVal("m-rep-last", rep.last_export_timestamp || "Never");
 
   } catch (err) {
     console.error("Overview error:", err);
@@ -343,7 +440,7 @@ async function loadOverview() {
 async function triggerDatabaseBackup() {
   const ok = await showConfirm(
     "💾 Backup Databases",
-    "Create a timestamped JSON dump of both 'domain_Listed' (source) and 'checked_domains' (classified results) MongoDB collections now?"
+    "Create a timestamped JSON dump of both 'domain_Listed' and 'checked_domains' MongoDB collections now?"
   );
   if (!ok) return;
 
@@ -355,7 +452,7 @@ async function triggerDatabaseBackup() {
       throw new Error(err.detail || "Backup failed");
     }
     const data = await res.json();
-    toast(`✅ Backup Complete! Saved ${fmtNum(data.source_count)} source & ${fmtNum(data.checked_count)} checked records to ${data.backup_dir}`);
+    toast(`✅ Backup Complete! Saved ${fmtNum(data.source_count)} source & ${fmtNum(data.checked_count)} checked records.`);
   } catch (err) {
     toast(`[!] Backup error: ${err.message}`);
   }
@@ -382,6 +479,7 @@ async function loadDomains(page = 1) {
       if (v) url += `&${encodeURIComponent(k)}=${encodeURIComponent(v)}`;
     }
     if (_domainsQ) url += `&q=${encodeURIComponent(_domainsQ)}`;
+    if (_ipFilter) url += `&ip=${encodeURIComponent(_ipFilter)}`;
 
     const res = await fetch(url);
     if (!res.ok) throw new Error(`HTTP ${res.status} loading domains`);
@@ -391,7 +489,6 @@ async function loadDomains(page = 1) {
     const total = data.total || 0;
     const maxPage = Math.max(1, Math.ceil(total / _domainsPerPage));
 
-    // Update Pagination Info
     const countInfo = document.getElementById("domains-count-info");
     const startItem = (page - 1) * _domainsPerPage + (results.length > 0 ? 1 : 0);
     const endItem = Math.min(total, page * _domainsPerPage);
@@ -406,7 +503,7 @@ async function loadDomains(page = 1) {
           <div class="empty-state">
             <div class="empty-state-icon">🔍</div>
             <div class="empty-state-title">No matching domains found</div>
-            <div class="empty-state-desc">Try modifying search query, adjusting date filters, or selecting a different status.</div>
+            <div class="empty-state-desc">Try modifying search query, IP address, adjusting date filters, or selecting a different status.</div>
             <button class="btn btn-ghost btn-sm" onclick="resetAllFilters()">Reset All Filters</button>
           </div>
         </td></tr>
@@ -425,47 +522,258 @@ async function loadDomains(page = 1) {
   }
 }
 
-function renderDomainRow(d) {
-  return `
-    <tr>
-      <td><span style="font-weight:700;color:#fff">${d.domain}</span></td>
-      <td><span class="badge badge-${d.status || 'dead'}">${d.status || 'unknown'}</span></td>
-      <td class="muted" style="max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${d.reason || '—'}</td>
-      <td class="mono muted" style="font-size:12px">${d.added_date || '—'}</td>
-    </tr>
-  `;
-}
-
 function renderDomainFullRow(d) {
-  const expBadge = d.exported
-    ? `<span class="badge" style="background:var(--success-bg);color:#6ee7b7">Exported</span>`
-    : `<span class="badge badge-idle">No</span>`;
-
   const targetUrl = d.url || `https://${d.domain}`;
   const ipText = Array.isArray(d.ip) ? d.ip.join(", ") : d.ip;
   const ipDisplay = ipText
-    ? `<span class="mono" style="font-size:12px;color:var(--text-light)" title="${ipText}">${ipText}</span>`
+    ? `<span class="mono" style="font-size:12px;color:var(--cyan);font-weight:600" title="${ipText}">${ipText}</span>`
     : `<span class="muted mono" style="font-size:12px">—</span>`;
+
+  let actionButtons = "";
+  if (d.has_screenshot_file || d.screenshot_taken) {
+    actionButtons += `
+      <button class="btn btn-ghost btn-xs" onclick="openScreenshotModal('${d.domain}', '${targetUrl}')" title="View Captured Screenshot">
+        📸 Proof
+      </button>
+    `;
+  }
+  actionButtons += `
+    <button class="btn btn-ghost btn-xs" onclick="inspectInSandbox('${targetUrl}')" title="Test Live in Sandbox">
+      ⚡ Inspect
+    </button>
+  `;
 
   return `
     <tr>
       <td>
         <span style="font-weight:700;color:#fff">${d.domain}</span>
-        <a href="${targetUrl}" target="_blank" rel="noopener noreferrer" style="margin-left:6px;color:var(--accent-light);font-size:11px" title="Visit website in new tab">↗</a>
+        <a href="${targetUrl}" target="_blank" rel="noopener noreferrer" style="margin-left:6px;color:var(--accent-light);font-size:11px" title="Visit website">↗</a>
       </td>
       <td>${ipDisplay}</td>
       <td><span class="badge badge-${d.status || 'dead'}">${d.status || 'unknown'}</span></td>
-      <td class="muted" style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${d.reason || '—'}</td>
+      <td class="muted" style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${d.reason || ''}">${d.reason || '—'}</td>
       <td class="mono muted" style="font-size:12px">${d.added_date || '—'}</td>
-      <td>${expBadge}</td>
+      <td>
+        <div style="display:flex;gap:4px;align-items:center">
+          ${actionButtons}
+        </div>
+      </td>
     </tr>
   `;
 }
 
-function copyDomainJson() {
-  if (!_currentDomainData) return;
-  navigator.clipboard.writeText(JSON.stringify(_currentDomainData, null, 2));
-  toast("Record JSON copied to clipboard!");
+function inspectInSandbox(url) {
+  showTab("sandbox");
+  const input = document.getElementById("sandbox-url-input");
+  if (input) {
+    input.value = url;
+    runUrlTest();
+  }
+}
+
+// ── 3. Interactive Sandbox / Single URL Tester ───────────────────────────────
+function setSandboxSample(url) {
+  const input = document.getElementById("sandbox-url-input");
+  if (input) {
+    input.value = url;
+    runUrlTest();
+  }
+}
+
+async function pasteSandboxUrl() {
+  try {
+    const text = await navigator.clipboard.readText();
+    if (text) {
+      document.getElementById("sandbox-url-input").value = text.trim();
+      toast("URL pasted from clipboard!");
+    }
+  } catch (err) {
+    toast("Please allow clipboard permissions or paste manually.");
+  }
+}
+
+async function runUrlTest() {
+  const input = document.getElementById("sandbox-url-input");
+  const rawUrl = (input ? input.value : "").trim();
+  if (!rawUrl) {
+    toast("Please enter a valid URL or domain.");
+    return;
+  }
+
+  const runAi = document.getElementById("toggle-run-ai").checked;
+  const takeScreenshot = document.getElementById("toggle-take-screenshot").checked;
+
+  const btn = document.getElementById("btn-run-sandbox");
+  const btnText = document.getElementById("btn-run-sandbox-text");
+  const loader = document.getElementById("sandbox-loading-indicator");
+  const resContainer = document.getElementById("sandbox-result-container");
+  const loadTitle = document.getElementById("sandbox-loading-title");
+  const loadSubtitle = document.getElementById("sandbox-loading-subtitle");
+
+  btn.disabled = true;
+  btnText.textContent = "⏳ Analyzing...";
+  loader.classList.remove("hidden");
+  resContainer.classList.add("hidden");
+
+  loadTitle.textContent = `Connecting to ${rawUrl}...`;
+  loadSubtitle.textContent = "Bypassing WAF, analyzing keywords & querying Ollama AI challenge...";
+
+  try {
+    const res = await fetch(`${API}/api/test-url`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        url: rawUrl,
+        run_ai: runAi,
+        take_screenshot: takeScreenshot
+      })
+    });
+
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.detail || `Server returned error HTTP ${res.status}`);
+    }
+
+    const data = await res.json();
+    _lastSandboxResult = data;
+    renderSandboxResult(data);
+    toast(`Diagnostic Complete for ${data.domain}!`);
+  } catch (err) {
+    console.error("Sandbox error:", err);
+    toast(`[!] Sandbox error: ${err.message}`);
+  } finally {
+    btn.disabled = false;
+    btnText.textContent = "🚀 Inspect Live URL";
+    loader.classList.add("hidden");
+  }
+}
+
+function renderSandboxResult(data) {
+  const resContainer = document.getElementById("sandbox-result-container");
+  resContainer.classList.remove("hidden");
+
+  // Top Banner
+  const statusBadge = document.getElementById("res-status-badge");
+  statusBadge.className = `status-badge-lg badge-${data.status}`;
+  if (data.status === "gambling") statusBadge.textContent = "🎰 Confirmed Gambling";
+  else if (data.status === "regular") statusBadge.textContent = "🏢 Regular Website";
+  else if (data.status === "blocked") statusBadge.textContent = "🛡️ Blocked / 403 WAF";
+  else if (data.status === "dead") statusBadge.textContent = "💀 Dead / Unreachable";
+  else statusBadge.textContent = "⏳ Unconfirmed Site";
+
+  document.getElementById("res-domain-text").textContent = data.domain;
+  document.getElementById("res-url-text").textContent = data.url;
+  document.getElementById("res-http-status").textContent = data.http_status ? `${data.http_status} Response` : (data.fetch_error || "Connection Failed");
+  document.getElementById("res-latency").textContent = `${data.latency_sec}s`;
+  document.getElementById("res-score").textContent = data.heuristic ? data.heuristic.score.toFixed(1) : "0.0";
+
+  // Card 1: Network & IP
+  document.getElementById("res-net-domain").textContent = data.domain;
+  const ipText = Array.isArray(data.ip) ? data.ip.join(", ") : (data.ip || "Unresolved (DNS fail)");
+  document.getElementById("res-net-ip").textContent = ipText;
+  document.getElementById("res-net-code").textContent = data.http_status || "—";
+  document.getElementById("res-net-latency").textContent = `${data.latency_sec}s`;
+  document.getElementById("res-net-fetch-status").textContent = data.fetch_error ? `Error: ${data.fetch_error}` : "HTTP 200 Success";
+
+  // Card 2: Heuristics
+  const scoreBadge = document.getElementById("res-heuristic-badge");
+  scoreBadge.textContent = `Score: ${data.heuristic.score.toFixed(1)}`;
+  scoreBadge.className = data.heuristic.score >= 5.0 ? "badge badge-gambling" : (data.heuristic.score >= 2.5 ? "badge badge-unconfirmed" : "badge badge-regular");
+
+  const kwContainer = document.getElementById("res-keywords-container");
+  if (data.heuristic.matched_keywords && data.heuristic.matched_keywords.length > 0) {
+    kwContainer.innerHTML = data.heuristic.matched_keywords.map(kw => `<span class="keyword-pill">${kw}</span>`).join(" ");
+  } else {
+    kwContainer.innerHTML = `<span class="muted" style="font-size:12px">No gambling signals matched</span>`;
+  }
+
+  const negContainer = document.getElementById("res-negatives-container");
+  if (data.heuristic.negative_signals && data.heuristic.negative_signals.length > 0) {
+    negContainer.innerHTML = data.heuristic.negative_signals.map(ns => `<span class="keyword-pill neg">${ns}</span>`).join(" ");
+  } else {
+    negContainer.innerHTML = `<span class="muted" style="font-size:12px">None triggered (Passed gate)</span>`;
+  }
+
+  // Card 3: AI Challenge
+  const ai = data.ai;
+  const aiAnalyst = document.getElementById("res-ai-analyst");
+  const aiConf = document.getElementById("res-ai-confidence");
+  const aiValidator = document.getElementById("res-ai-validator");
+  const aiReasoning = document.getElementById("res-ai-reasoning");
+
+  if (ai && !ai.error) {
+    aiAnalyst.textContent = ai.analyst_verdict || ai.verdict || "Completed";
+    aiConf.textContent = ai.confidence ? `${(ai.confidence * 100).toFixed(0)}%` : "High";
+    aiValidator.textContent = ai.validator_confirmed ? "Confirmed by Judge" : (ai.validator_verdict || "Passed");
+    aiReasoning.textContent = ai.reason || data.reason || "No detailed reasoning text provided.";
+  } else {
+    aiAnalyst.textContent = "AI Bypassed / Offline";
+    aiConf.textContent = "—";
+    aiValidator.textContent = "—";
+    aiReasoning.textContent = ai && ai.error ? ai.error : (data.reason || "Evaluated purely via high-confidence heuristic fast path.");
+  }
+
+  // Card 4: Screenshot Evidence
+  const shotImg = document.getElementById("sandbox-screenshot-img");
+  const shotPlaceholder = document.getElementById("sandbox-screenshot-placeholder");
+  const expandBtn = document.getElementById("btn-expand-screenshot");
+
+  if (data.screenshot_url) {
+    shotImg.src = data.screenshot_url;
+    shotImg.classList.remove("hidden");
+    shotPlaceholder.classList.add("hidden");
+    expandBtn.classList.remove("hidden");
+  } else {
+    shotImg.classList.add("hidden");
+    shotPlaceholder.classList.remove("hidden");
+    expandBtn.classList.add("hidden");
+    shotPlaceholder.textContent = data.screenshot_taken === false ? "Screenshot capture was skipped or timed out." : "No visual proof available.";
+  }
+}
+
+function openScreenshotModalFromSandbox() {
+  if (!_lastSandboxResult || !_lastSandboxResult.screenshot_url) return;
+  openScreenshotModal(_lastSandboxResult.domain, _lastSandboxResult.url);
+}
+
+async function saveTestedDomainFromSandbox() {
+  if (!_lastSandboxResult) return;
+  const saveBtn = document.getElementById("btn-save-sandbox-domain");
+  saveBtn.disabled = true;
+
+  try {
+    toast("Saving domain to MongoDB...");
+    const res = await fetch(`${API}/api/save-domain`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        domain: _lastSandboxResult.domain,
+        url: _lastSandboxResult.url,
+        status: _lastSandboxResult.status,
+        reason: _lastSandboxResult.reason,
+        ip: _lastSandboxResult.ip,
+        screenshot_taken: _lastSandboxResult.screenshot_taken
+      })
+    });
+
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.detail || "Failed saving domain");
+    }
+
+    const respData = await res.json();
+    toast(`✅ ${respData.message}`);
+  } catch (err) {
+    toast(`[!] Save error: ${err.message}`);
+  } finally {
+    saveBtn.disabled = false;
+  }
+}
+
+function copyForensicJson() {
+  if (!_lastSandboxResult) return;
+  navigator.clipboard.writeText(JSON.stringify(_lastSandboxResult, null, 2));
+  toast("Forensic diagnostic JSON copied to clipboard!");
 }
 
 // ── Initial Boot ─────────────────────────────────────────────────────────────

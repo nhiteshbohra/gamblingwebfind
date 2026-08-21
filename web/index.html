@@ -26,6 +26,7 @@
     <nav>
       <button data-tab="overview" class="active" onclick="showTab('overview')">📊 Overview</button>
       <button data-tab="domains" onclick="showTab('domains')">🌐 Domains</button>
+      <button data-tab="sandbox" onclick="showTab('sandbox')">⚡ Quick Sandbox</button>
     </nav>
   </header>
 
@@ -186,10 +187,11 @@
       <div class="card mb20" style="background:rgba(99, 102, 241, 0.04); border-color: rgba(99, 102, 241, 0.25);">
         <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px">
           <div>
-            <div style="font-weight:700;color:#fff;font-size:14px">💾 Database Backup</div>
-            <div class="muted" style="font-size:12px">Create instant JSON dump of MongoDB collections</div>
+            <div style="font-weight:700;color:#fff;font-size:14px">💾 Database Backup & Utilities</div>
+            <div class="muted" style="font-size:12px">Create instant JSON dumps or launch the interactive Sandbox Tester</div>
           </div>
           <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+            <button class="btn btn-primary btn-sm" onclick="showTab('sandbox')">⚡ Test Single URL</button>
             <button class="btn btn-success btn-sm" onclick="triggerDatabaseBackup()">💾 Backup DB</button>
           </div>
         </div>
@@ -207,6 +209,15 @@
             <div class="search-input-wrap">
               <input type="text" id="domain-search" placeholder="🔍 Search domain name, reason, keyword..." oninput="onSearchInput(this.value)">
               <button class="search-clear-btn hidden" id="search-clear-btn" onclick="clearSearchInput()" title="Clear search">✕</button>
+            </div>
+          </div>
+
+          <!-- IP Address Filter Field -->
+          <div class="filter-field">
+            <label>IP Address Filter</label>
+            <div class="search-input-wrap">
+              <input type="text" id="filter-ip-input" placeholder="🌐 Filter by IP (e.g. 104.18.2.1)" oninput="onIpFilterInput(this.value)">
+              <button class="search-clear-btn hidden" id="ip-clear-btn" onclick="clearIpInput()" title="Clear IP">✕</button>
             </div>
           </div>
 
@@ -245,14 +256,27 @@
 
           <!-- Date Range: From Date -->
           <div class="filter-field">
-            <label>Added From</label>
+            <label>📅 Added From</label>
             <input type="date" id="filter-from-date" onchange="onDateFilterChange()">
           </div>
 
           <!-- Date Range: To Date -->
           <div class="filter-field">
-            <label>Added To</label>
+            <label>📅 Added To</label>
             <input type="date" id="filter-to-date" onchange="onDateFilterChange()">
+          </div>
+        </div>
+
+        <!-- Quick Calendar Presets Bar -->
+        <div class="date-presets-row mt12">
+          <span class="preset-label">📅 Quick Date Presets:</span>
+          <div class="preset-chips-wrap">
+            <button type="button" class="date-chip active" data-preset="all" onclick="setDatePreset('all')">All Time</button>
+            <button type="button" class="date-chip" data-preset="today" onclick="setDatePreset('today')">Today</button>
+            <button type="button" class="date-chip" data-preset="yesterday" onclick="setDatePreset('yesterday')">Yesterday</button>
+            <button type="button" class="date-chip" data-preset="7days" onclick="setDatePreset('7days')">Last 7 Days</button>
+            <button type="button" class="date-chip" data-preset="30days" onclick="setDatePreset('30days')">Last 30 Days</button>
+            <button type="button" class="date-chip" data-preset="this_month" onclick="setDatePreset('this_month')">This Month</button>
           </div>
         </div>
 
@@ -316,7 +340,7 @@
               <th>Status</th>
               <th>Reason / Triggers</th>
               <th>Added Date</th>
-              <th>Exported</th>
+              <th>Proof / Actions</th>
             </tr>
           </thead>
           <tbody id="domains-body">
@@ -334,7 +358,217 @@
         </div>
       </div>
     </div>
+
+    <!-- TAB 3: LIVE QUICK SANDBOX & SINGLE URL TESTER -->
+    <div id="tab-sandbox" class="tab-view hidden">
+      <!-- Input Panel -->
+      <div class="card mb20 sandbox-hero-card">
+        <div class="sandbox-header">
+          <div>
+            <div class="section-title" style="font-size:18px">⚡ Live Single URL Sandbox & Deep Inspector</div>
+            <div class="muted" style="font-size:13px;margin-top:4px">
+              Perform an immediate TLS-impersonated fetch, IP resolution, 988-keyword heuristic screen, Ollama AI challenge, and Playwright screenshot.
+            </div>
+          </div>
+          <div class="sandbox-badge">
+            <span class="pulse-dot"></span> Live Real-Time Diagnostic
+          </div>
+        </div>
+
+        <form id="sandbox-form" onsubmit="event.preventDefault(); runUrlTest();" class="mt16">
+          <div class="sandbox-input-row">
+            <div class="sandbox-input-wrapper">
+              <span class="sandbox-input-icon">🌐</span>
+              <input type="text" id="sandbox-url-input" placeholder="Enter full URL or domain (e.g. https://betway.com or 10cric.com)" required>
+              <button type="button" class="btn btn-ghost btn-sm" onclick="pasteSandboxUrl()" title="Paste from clipboard">📋 Paste</button>
+            </div>
+            <button type="submit" id="btn-run-sandbox" class="btn btn-primary btn-lg">
+              <span id="btn-run-sandbox-text">🚀 Inspect Live URL</span>
+            </button>
+          </div>
+
+          <!-- Feature Toggles -->
+          <div class="sandbox-toggles-row mt16">
+            <label class="toggle-control">
+              <input type="checkbox" id="toggle-run-ai" checked>
+              <span class="toggle-switch"></span>
+              <span class="toggle-text">🤖 Run Local Ollama AI Challenge (Analyst & Validator)</span>
+            </label>
+
+            <label class="toggle-control">
+              <input type="checkbox" id="toggle-take-screenshot" checked>
+              <span class="toggle-switch"></span>
+              <span class="toggle-text">📸 Capture Proof Screenshot (Playwright)</span>
+            </label>
+
+            <!-- Sample URL chips -->
+            <div class="sample-chips-wrap">
+              <span class="muted" style="font-size:12px">Quick Samples:</span>
+              <button type="button" class="sample-chip" onclick="setSandboxSample('https://10cric.com')">10cric.com</button>
+              <button type="button" class="sample-chip" onclick="setSandboxSample('https://bet365.com')">bet365.com</button>
+              <button type="button" class="sample-chip" onclick="setSandboxSample('https://wikipedia.org')">wikipedia.org</button>
+              <button type="button" class="sample-chip" onclick="setSandboxSample('https://github.com')">github.com</button>
+            </div>
+          </div>
+        </form>
+      </div>
+
+      <!-- Loading State Indicator -->
+      <div id="sandbox-loading-indicator" class="card mb20 hidden" style="text-align:center;padding:36px">
+        <div class="sandbox-spinner"></div>
+        <div style="font-size:16px;font-weight:700;color:#fff;margin-top:16px" id="sandbox-loading-title">Connecting to Target Host…</div>
+        <div class="muted" style="font-size:13px;margin-top:6px" id="sandbox-loading-subtitle">Bypassing WAF with Scrapling TLS impersonation & evaluating AI challenge</div>
+      </div>
+
+      <!-- Results Container -->
+      <div id="sandbox-result-container" class="hidden">
+        <!-- Top Summary Banner -->
+        <div class="sandbox-result-banner mb20" id="sandbox-result-banner">
+          <div class="banner-left">
+            <div class="status-badge-lg" id="res-status-badge">🎰 Confirmed Gambling</div>
+            <div style="margin-left:16px">
+              <div class="res-domain-title" id="res-domain-text">example.com</div>
+              <div class="res-url-sub" id="res-url-text">https://example.com</div>
+            </div>
+          </div>
+          <div class="banner-right">
+            <div class="metric-pill">
+              <span class="lbl">HTTP Status</span>
+              <span class="val" id="res-http-status">200 OK</span>
+            </div>
+            <div class="metric-pill">
+              <span class="lbl">Latency</span>
+              <span class="val" id="res-latency">0.84s</span>
+            </div>
+            <div class="metric-pill">
+              <span class="lbl">Heuristic Score</span>
+              <span class="val" id="res-score">8.5</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- 4-Card Detailed Forensic Grid -->
+        <div class="grid2 mb20">
+          <!-- Card 1: Network & IP Dossier -->
+          <div class="card">
+            <div class="card-header">
+              <div class="section-title">🌐 Network & IP Dossier</div>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Clean Registered Domain</span>
+              <span class="metric-value" id="res-net-domain">…</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Resolved IPv4 Address(es)</span>
+              <span class="metric-value font-mono" id="res-net-ip" style="color:var(--cyan)">…</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">HTTP Response Code</span>
+              <span class="metric-value" id="res-net-code">…</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Network Latency</span>
+              <span class="metric-value" id="res-net-latency">…</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Fetch Status</span>
+              <span class="metric-value" id="res-net-fetch-status">…</span>
+            </div>
+          </div>
+
+          <!-- Card 2: Heuristic Screening Engine -->
+          <div class="card">
+            <div class="card-header">
+              <div class="section-title">🎯 988-Keyword Heuristics</div>
+              <span class="badge" id="res-heuristic-badge">Score: 0.0</span>
+            </div>
+            <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">Matched Gambling Signals:</div>
+            <div class="keywords-pills-container" id="res-keywords-container">
+              <span class="muted" style="font-size:12px">No keywords detected</span>
+            </div>
+            
+            <div style="font-size:12px;color:var(--text-muted);margin-top:14px;margin-bottom:8px">Negative Archetype Triggers:</div>
+            <div class="keywords-pills-container" id="res-negatives-container">
+              <span class="muted" style="font-size:12px">None triggered (Passed gate)</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Card 3 & 4: AI Reasoning & Screenshot Evidence -->
+        <div class="grid2 mb20">
+          <!-- Card 3: Dual-Round Ollama AI Challenge -->
+          <div class="card">
+            <div class="card-header">
+              <div class="section-title">🤖 Local Ollama AI Challenge (2-Round)</div>
+            </div>
+            <div id="res-ai-container">
+              <div class="metric-row">
+                <span class="metric-label">Analyst Verdict</span>
+                <span class="metric-value" id="res-ai-analyst">…</span>
+              </div>
+              <div class="metric-row">
+                <span class="metric-label">Analyst Confidence</span>
+                <span class="metric-value" id="res-ai-confidence">…</span>
+              </div>
+              <div class="metric-row">
+                <span class="metric-label">Validator Challenge</span>
+                <span class="metric-value" id="res-ai-validator">…</span>
+              </div>
+              <div class="ai-reasoning-box mt12">
+                <div style="font-size:11px;font-weight:700;text-transform:uppercase;color:var(--purple);margin-bottom:4px">Full Semantic Reasoning:</div>
+                <div id="res-ai-reasoning" style="font-size:13px;line-height:1.6;color:var(--text)">…</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Card 4: Visual Proof Screenshot -->
+          <div class="card">
+            <div class="card-header">
+              <div class="section-title">📸 Visual Evidence (Playwright)</div>
+              <button class="btn btn-ghost btn-sm hidden" id="btn-expand-screenshot" onclick="openScreenshotModalFromSandbox()">🔍 Expand</button>
+            </div>
+            <div class="sandbox-screenshot-frame" id="sandbox-screenshot-frame">
+              <div class="muted" id="sandbox-screenshot-placeholder" style="display:flex;align-items:center;justify-content:center;height:100%">
+                No screenshot captured
+              </div>
+              <img id="sandbox-screenshot-img" src="" alt="Screenshot" class="hidden" onclick="openScreenshotModalFromSandbox()" style="cursor:zoom-in">
+            </div>
+          </div>
+        </div>
+
+        <!-- Action Footer -->
+        <div class="card" style="background:rgba(16, 185, 129, 0.05); border-color: rgba(16, 185, 129, 0.25);">
+          <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px">
+            <div>
+              <div style="font-weight:700;color:#fff;font-size:14px">💾 Save Diagnostic to Database</div>
+              <div class="muted" style="font-size:12px">Persist this result into MongoDB <code>checked_domains</code> & sync with <code>domain_Listed</code></div>
+            </div>
+            <div style="display:flex;gap:10px;flex-wrap:wrap">
+              <button class="btn btn-ghost btn-sm" onclick="copyForensicJson()">📋 Copy Forensic JSON</button>
+              <button class="btn btn-success" id="btn-save-sandbox-domain" onclick="saveTestedDomainFromSandbox()">💾 Save to Database</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
   </main>
+</div>
+
+<!-- Screenshot Lightbox Modal -->
+<div class="modal-overlay hidden" id="screenshot-modal" onclick="if(event.target === this) closeScreenshotModal()">
+  <div class="modal-box modal-lg">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+      <div class="modal-title" id="ss-modal-domain">📸 Screenshot Preview</div>
+      <button class="btn btn-ghost btn-sm" onclick="closeScreenshotModal()">✕ Close</button>
+    </div>
+    <div class="modal-screenshot-container">
+      <img id="ss-modal-img" src="" alt="Full Resolution Screenshot">
+    </div>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-top:12px">
+      <span class="muted" style="font-size:12px" id="ss-modal-caption">Full-page render</span>
+      <a id="ss-modal-download-link" href="" target="_blank" download class="btn btn-primary btn-sm">⬇️ Download Image</a>
+    </div>
+  </div>
 </div>
 
 <!-- Generic Confirmation Modal -->

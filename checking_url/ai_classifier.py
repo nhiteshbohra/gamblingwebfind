@@ -26,9 +26,17 @@ load_dotenv(dotenv_path=Path(__file__).resolve().parent.parent / ".env")
 
 logger = logging.getLogger("ai_classifier")
 
-# Import keyword strength tiers and hospitality helpers from classifier
+# Import keyword strength tiers and domain anchor helpers from classifier
 try:
-    from checking_url.classifier import STRONG_GAMBLING_SIGNALS, is_hospitality_site
+    from checking_url.classifier import (
+        STRONG_GAMBLING_SIGNALS,
+        is_hospitality_site,
+        GAMBLING_TLDS,
+        GAMBLING_DOMAIN_KEYWORDS,
+        NON_GAMBLING_BET_WORDS,
+        _TRADING_DOMAIN_WORDS,
+        is_gambling_domain,
+    )
 except ImportError:
     STRONG_GAMBLING_SIGNALS = {
         "online casino", "sports betting", "sportsbook", "betting exchange",
@@ -37,8 +45,20 @@ except ImportError:
         "responsible gambling", "teen patti", "andar bahar", "dragon tiger",
         "crypto casino", "bitcoin casino", "aviator game", "crash game",
     }
+    GAMBLING_TLDS = {".casino", ".bet", ".poker", ".bingo", ".lotto"}
+    GAMBLING_DOMAIN_KEYWORDS = {
+        "bet", "bets", "betting", "casino", "casinos", "cazino", "poker", "slot", "slots",
+        "satta", "matka", "roulette", "blackjack", "baccarat", "teenpatti", "andarbahar",
+        "bookmaker", "sportsbook", "jackpot", "aviator", "rummy", "lottery", "lotto",
+        "wagering", "dafabet", "1xbet", "1win", "mostbet", "melbet", "parimatch", "stake",
+        "777", "888", "999", "bet365", "gambl"
+    }
+    NON_GAMBLING_BET_WORDS = {"between", "better", "bethesda", "alphabet", "diabetes", "alphabetical"}
+    _TRADING_DOMAIN_WORDS = {"forex", "trade", "trading", "invest", "broker", "fund", "fx"}
     def is_hospitality_site(text: str):
         return False, []
+    def is_gambling_domain(url: str):
+        return False, ""
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
@@ -130,16 +150,6 @@ class DynamicTimeoutManager:
 # Global dynamic timeout manager (shared across all calls in a session)
 _timeout_mgr = DynamicTimeoutManager()
 
-# ── High-Conviction Domain Anchors ──────────────────────────────────────────
-GAMBLING_TLDS = {".casino", ".bet", ".poker", ".bingo", ".lotto"}
-
-GAMBLING_DOMAIN_KEYWORDS = {
-    "casino", "poker", "slot", "slots", "satta", "matka", "roulette", "blackjack",
-    "baccarat", "teenpatti", "andarbahar", "bookmaker", "sportsbook", "jackpot",
-    "aviator", "rummy", "lottery", "cazino", "betting", "wagering", "dafabet",
-    "1xbet", "1win", "mostbet", "melbet", "parimatch", "stake", "win777", "bet365"
-}
-
 # Known iGaming game provider CDNs / APIs / iframes
 IGAMING_PROVIDERS = (
     # Top Global Live Casino & Slots
@@ -174,77 +184,18 @@ _FUNNEL_SOCIAL_CONTEXT = (
 
 
 def detect_gambling_funnels(html: str) -> list[str]:
-    """Detect high-conviction WhatsApp/Telegram betting funnels and cashier hooks.
-
-    Strong markers fire standalone. Social links (wa.me, t.me) only fire when
-    gambling context words are also present — prevents false positives on legitimate
-    businesses that use Telegram/WhatsApp as a customer contact channel.
-    """
+    """Detect high-conviction WhatsApp/Telegram betting funnels and cashier hooks."""
     if not html:
         return []
     html_lower = html.lower()
 
     matched = [m for m in GAMBLING_FUNNEL_MARKERS_STRONG if m in html_lower]
 
-    # Social links require gambling context nearby
     has_gambling_context = any(c in html_lower for c in _FUNNEL_SOCIAL_CONTEXT)
     if has_gambling_context:
         matched += [m for m in GAMBLING_FUNNEL_MARKERS_SOCIAL if m in html_lower]
 
     return matched
-
-
-# Common non-gambling false matches on 'bet'
-NON_GAMBLING_BET_WORDS = {"between", "better", "bethesda", "alphabet", "diabetes", "alphabetical"}
-
-
-def is_gambling_domain(url_or_domain: str) -> tuple[bool, str]:
-    """
-    Check if the domain or TLD itself is an unambiguous gambling domain.
-    Returns (is_gambling, matched_signal).
-    """
-    if not url_or_domain:
-        return False, ""
-
-    clean = url_or_domain.lower()
-    clean = re.sub(r"^https?://", "", clean).split("/")[0].split(":")[0]
-
-    # Check TLD
-    for tld in GAMBLING_TLDS:
-        if clean.endswith(tld):
-            return True, f"gambling_tld({tld})"
-
-    # Never anchor government, educational, or calculator utility domains
-    if clean.endswith(".gov") or clean.endswith(".gov.in") or clean.endswith(".edu") or clean.endswith(".ac.in"):
-        return False, ""
-    if "calculator" in clean or "calculators" in clean:
-        return False, ""
-
-    # Extract domain body (first label, e.g. "fxstake" from "fxstake.io")
-    domain_body = clean.split(".")[0]
-
-    # ponytail: Never anchor domains whose name clearly signals trading/financial services.
-    # e.g. fxstake.io, tradingstake.com, leveragefx.net — 'stake' in the token fires a
-    # gambling anchor even though these are Forex domains. One Forex-native word in the
-    # domain body voids the anchor check.
-    _TRADING_DOMAIN_WORDS = {
-        "forex", "trade", "trading", "invest", "investing", "investment",
-        "leverage", "broker", "brokerage", "market", "stock", "fund", "funds",
-        "capital", "finance", "financial", "fx", "wealth", "asset", "assets",
-    }
-    if any(tw in domain_body for tw in _TRADING_DOMAIN_WORDS):
-        return False, ""
-
-    # Check domain name tokens
-    tokens = re.findall(r"[a-z0-9]+", domain_body)
-    for token in tokens:
-        for kw in GAMBLING_DOMAIN_KEYWORDS:
-            if kw in token:
-                if kw == "bet" and any(ng in token for ng in NON_GAMBLING_BET_WORDS):
-                    continue
-                return True, f"domain_keyword({kw})"
-
-    return False, ""
 
 
 def detect_igaming_providers(html: str) -> list[str]:
@@ -305,6 +256,16 @@ NON_GAMBLING_EVIDENCE_MAP = {
     ],
     "entertainment_media_cinema": ["movie review", "box office", "celebrity gossip", "cinema news", "film review", "trailer", "ott release", "streaming guide", "entertainment news", "bollywood", "hollywood", "actor", "actress", "tv shows", "cinema"],
     "sports_scores_stats": ["live cricket score", "ball by ball commentary", "ipl score", "match schedule", "point table", "player stats", "match scorecard", "fixtures", "team standings", "scorecard", "live score"],
+    "commercial_banking": [
+        "personal banking", "agri banking", "nri banking", "business banking",
+        "savings account", "current account", "fixed deposit", "recurring deposit",
+        "net banking", "netbanking", "mobile banking", "debit card", "credit card",
+        "branch locator", "atm locator", "ifsc", "rtgs", "neft", "imps",
+        "rbi regulated", "interest rates", "home loan", "car loan", "personal loan",
+        "deposit interest", "fixed deposits", "bank branch", "internet banking",
+        "karnataka bank", "state bank", "hdfc", "icici", "axis bank", "punjab national",
+        "bank of baroda", "canara bank", "union bank", "indian bank", "commercial bank",
+    ],
 }
 
 # Global session and semaphore (tracked with active event loop)
@@ -432,6 +393,18 @@ def parse_ai_json_response(raw_text: str) -> dict | None:
     return None
 
 
+    async def record_timeout(self):
+        """Track timeouts — bump EMA conservatively so next request gets a bit more headroom without compounding excessively."""
+        async with self._lock:
+            self._total_calls += 1
+            self._total_timeouts += 1
+            # Conservative 5% bump instead of 20% to prevent runaway 60s timeout freezes
+            self._ema_response_time = min(
+                AI_TIMEOUT_MAX / self.SAFETY_MULTIPLIER,
+                self._ema_response_time * 1.05
+            )
+
+
 def _evaluate_regular_evidence(reason: str, evidence: str, body_text: str, html: str) -> tuple[bool, str]:
     """
     Anti-Hallucination Ground-Truth Evaluator:
@@ -443,9 +416,19 @@ def _evaluate_regular_evidence(reason: str, evidence: str, body_text: str, html:
     combined_ai_claim = (reason + " " + evidence).lower()
     page_content = (body_text + " " + (html or "")[:100000]).lower()
 
+    # Check if page has gambling / betting keywords present
+    has_gambling_terms = any(kw in page_content for kw in (
+        "bet", "betting", "casino", "satta", "matka", "poker", "slot", "slots",
+        "odds", "bookmaker", "sportsbook", "wagering", "aviator", "roulette"
+    ))
+
     # Verify each claimed archetype against ACTUAL page content
     verified_archetypes = []
     for archetype, patterns in NON_GAMBLING_EVIDENCE_MAP.items():
+        # Generic news and sports score markers MUST NOT count as proof of regular for gambling affiliate/sportsbook pages
+        if has_gambling_terms and archetype in ("news", "sports_scores_stats"):
+            continue
+
         claimed = any(p in combined_ai_claim for p in patterns)
         if claimed:
             # Verify if the pattern ACTUALLY exists in real page HTML
@@ -637,9 +620,7 @@ async def validate_gambling_verdict(
 
     Sends the analyst's full output + original page content to gambling-validator,
     which is prompted to act as a skeptic and find reasons the verdict is WRONG.
-
-    Returns the reconciled final verdict dict.
-    Only called when analyst says 'gambling' (not for 100%-certain pre-flight detections).
+    If gambling-validator model is missing (HTTP 404), falls back to OLLAMA_MODEL automatically.
     """
     key_triggers = analyst_verdict.get("key_triggers", [])
     analyst_reason = analyst_verdict.get("reason", "")
@@ -656,7 +637,11 @@ Triggers cited: {', '.join(str(t) for t in key_triggers[:5])}
 Reason given: {analyst_reason}
 
 Your task: Validate whether this gambling verdict is CORRECT based on the page content above.
-Is the cited evidence ACTUALLY present in the page text? Is this truly a gambling site?
+Is the cited evidence ACTUALLY present in the page text? Is this truly an online gambling/betting site?
+
+CRITICAL FALSE-POSITIVE CHECKS:
+- If this is a commercial bank, financial institution, hotel/restaurant, educational portal, government site, or physical e-commerce store, you MUST REJECT the gambling verdict and return "verdict": "regular", "validation": "rejected".
+- Do not confirm gambling solely because words like 'deposit', 'bonus', 'rewards', or 'win' appear in a banking, corporate, or retail context.
 
 Respond ONLY in valid JSON:
 {{
@@ -669,67 +654,64 @@ Respond ONLY in valid JSON:
 }}
 """
 
-    # Use a separate payload with the validator model
-    payload = {
-        "model": OLLAMA_VALIDATOR_MODEL,
-        "prompt": validator_prompt,
-        "stream": False,
-        "format": "json",
-        "options": {"temperature": 0.15, "top_p": 0.90, "num_ctx": 4096},
-    }
-
+    models_to_try = [OLLAMA_VALIDATOR_MODEL, OLLAMA_MODEL]
     sem = get_semaphore()
     async with sem:
-        try:
-            session = await get_session()
-            async with session.post(
-                f"{OLLAMA_BASE_URL}/api/generate",
-                json=payload,
-                timeout=aiohttp.ClientTimeout(total=max(35.0, _timeout_mgr.compute_timeout(len(validator_prompt)) * 1.5)),
-            ) as resp:
-                if resp.status == 200:
-                    result = await resp.json()
-                    val_result = parse_ai_json_response(result.get("response", ""))
-                    if val_result is None:
-                        return analyst_verdict  # validator failed → keep analyst verdict
+        for model in models_to_try:
+            payload = {
+                "model": model,
+                "prompt": validator_prompt,
+                "stream": False,
+                "format": "json",
+                "options": {"temperature": 0.15, "top_p": 0.90, "num_ctx": 4096},
+            }
+            try:
+                session = await get_session()
+                async with session.post(
+                    f"{OLLAMA_BASE_URL}/api/generate",
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=max(35.0, _timeout_mgr.compute_timeout(len(validator_prompt)) * 1.5)),
+                ) as resp:
+                    if resp.status == 200:
+                        result = await resp.json()
+                        val_result = parse_ai_json_response(result.get("response", ""))
+                        if val_result is None:
+                            continue
 
-                    val_verdict = val_result.get("verdict", "gambling")
-                    val_validation = val_result.get("validation", "confirmed")
-                    rejection_reason = val_result.get("rejection_reason")
+                        val_verdict = val_result.get("verdict", "gambling")
+                        val_validation = val_result.get("validation", "confirmed")
+                        rejection_reason = val_result.get("rejection_reason")
 
-                    if val_validation == "rejected" and val_verdict != "gambling":
-                        # Validator rejected the gambling verdict — override
-                        logger.info(
-                            f"[validator] REJECTED gambling for {url}: {rejection_reason}"
-                        )
-                        return {
-                            "verdict": val_verdict,
-                            "confidence": val_result.get("confidence", 0.4),
-                            "category": "validator_override",
-                            "key_triggers": key_triggers,
-                            "reason": f"Validator rejected: {rejection_reason or val_result.get('final_reason', '')}",
-                            "challenge_override": True,
-                        }
-                    elif val_validation == "uncertain":
-                        # Both models disagree — safe choice is unconfirmed
-                        return {
-                            "verdict": "unconfirmed",
-                            "confidence": 0.4,
-                            "category": "validator_uncertain",
-                            "key_triggers": key_triggers,
-                            "reason": f"Validator uncertain: {val_result.get('final_reason', '')}",
-                            "challenge_override": False,
-                        }
-                    else:
-                        # Validator confirmed gambling — add validation note to reason
-                        confirmed_result = dict(analyst_verdict)
-                        confirmed_result["reason"] = (
-                            f"{analyst_reason} [Validated: {val_result.get('evidence_check', '')[:100]}]"
-                        )
-                        return confirmed_result
-        except Exception as e:
-            logger.warning(f"[validator] Validation failed for {url}: {e}")
-    # Validator offline/timeout — fall back to analyst verdict unchanged
+                        if val_validation == "rejected" and val_verdict != "gambling":
+                            logger.info(
+                                f"[validator] REJECTED gambling for {url} ({model}): {rejection_reason}"
+                            )
+                            return {
+                                "verdict": val_verdict,
+                                "confidence": val_result.get("confidence", 0.4),
+                                "category": "validator_override",
+                                "key_triggers": key_triggers,
+                                "reason": f"Validator rejected: {rejection_reason or val_result.get('final_reason', '')}",
+                                "challenge_override": True,
+                            }
+                        elif val_validation == "uncertain":
+                            return {
+                                "verdict": "unconfirmed",
+                                "confidence": 0.4,
+                                "category": "validator_uncertain",
+                                "key_triggers": key_triggers,
+                                "reason": f"Validator uncertain: {val_result.get('final_reason', '')}",
+                                "challenge_override": False,
+                            }
+                        else:
+                            confirmed_result = dict(analyst_verdict)
+                            confirmed_result["reason"] = (
+                                f"{analyst_reason} [Validated: {val_result.get('evidence_check', '')[:100]}]"
+                            )
+                            return confirmed_result
+            except Exception as e:
+                logger.warning(f"[validator] Validation with model '{model}' failed for {url}: {e}")
+
     return analyst_verdict
 
 
@@ -772,6 +754,19 @@ async def classify_with_challenge(
             "challenge_override": False,
         }
 
+    # Safe trusted TLDs: .bank.in, .bank, .gov, .gov.in, .nic.in, .edu, .ac.in, .mil
+    clean_host = re.sub(r"^https?://", "", (url or "").lower()).split("/")[0].split(":")[0].removeprefix("www.")
+    if any(clean_host.endswith(tld) for tld in (".gov", ".gov.in", ".nic.in", ".edu", ".ac.in", ".bank.in", ".bank", ".mil")):
+        if not detected_providers and not detected_funnels:
+            return {
+                "verdict": "regular",
+                "confidence": 0.99,
+                "category": "official_trusted_tld",
+                "key_triggers": [],
+                "reason": f"Official verified banking/government/educational TLD ({clean_host})",
+                "challenge_override": False,
+            }
+
     title, meta_desc, cta_buttons, body_text = clean_page_text(html, max_chars=2500)
     cta_str = ", ".join(cta_buttons) if cta_buttons else "None"
 
@@ -788,6 +783,7 @@ Determine if this is an online gambling, sports betting, real-money gaming (poke
 IMPORTANT RULES:
 - Real-money poker platforms, betting exchanges, sportsbooks, slot games, and rummy/card game platforms for cash are GAMBLING.
 - A hotel/resort/dining website that merely mentions a casino, gaming floor, or amenity nearby is REGULAR unless the site itself provides remote/online gambling.
+- Official commercial banks, financial institutions (savings, loans, fixed deposits, net banking, Agri/Personal/NRI banking), government websites, educational institutions, or utility calculators are STRICTLY REGULAR. NEVER classify a legitimate bank or financial institution as gambling.
 - Do NOT hallucinate features. Only evaluate what is present in the text above.
 
 Respond ONLY in valid JSON:
@@ -863,10 +859,7 @@ Respond ONLY in valid JSON:
         has_providers = bool(detect_igaming_providers(html))
         has_funnels = bool(detect_gambling_funnels(html))
 
-        if is_g_domain and matched_keywords:
-            # ponytail: Guard — a parked lander or 403 page on a .casino/.bet domain must NOT be
-            # forced to gambling. The AI said "regular" because the page IS regular (parking/error).
-            # Domain anchors only override for LIVE gambling pages, not parked/blocked ones.
+        if is_g_domain:
             _is_parked = any(m in body_text.lower() for m in [
                 "is for sale", "domain for sale", "buy this domain", "parked by",
                 "sedo.com", "dan.com", "godaddy.com", "hugedomains", "parkingcrew",
@@ -884,20 +877,20 @@ Respond ONLY in valid JSON:
                         "key_triggers": [], "reason": "403/Cloudflare block page on gambling-TLD domain", "challenge_override": False}
 
             if not is_hosp or has_providers or has_funnels:
-                # If domain anchor is corroborated and not a pure hotel page, route to validator
+                # Domain anchor confirmed on live page -> route to skeptic validator
                 analyst_verdict = {
                     "verdict": "gambling",
-                    "confidence": 0.85,
+                    "confidence": 0.88,
                     "category": "domain_anchor_gambling",
                     "key_triggers": [domain_signal] + (matched_keywords or []),
-                    "reason": f"Domain anchor ({domain_signal}) corroborated by matched keywords {matched_keywords[:3]}",
+                    "reason": f"Live gambling domain signal ({domain_signal}) with content: {title[:50]}",
                     "challenge_override": True,
                 }
                 return await validate_gambling_verdict(url, title, body_text, analyst_verdict)
 
         # Low confidence → send to Round 2 evidence challenge instead of an immediate flip
-        # fast_mode=True: skip Round 2 for unconfirmed re-check (halves AI calls)
-        if fast_mode and confidence >= REGULAR_CONVICTION_THRESHOLD:
+        # fast_mode=True: skip Round 2 ONLY for non-anchored regular domains
+        if fast_mode and confidence >= REGULAR_CONVICTION_THRESHOLD and not is_g_domain:
             return {
                 "verdict": "regular",
                 "confidence": confidence,
@@ -917,8 +910,9 @@ You must now cite EXACT VERBATIM text from the page that proves this is NOT a ga
 
 Rules:
 1. What is the EXACT core service/product offered on this page?
-2. Quote exact phrases from the text that prove it is a legitimate non-gambling service.
-3. If this page offers poker, card games, sports odds, or casino bonuses, it MUST be classified as gambling.
+2. Quote exact phrases from the text that prove it is a legitimate non-gambling service (e.g. banking, education, e-commerce, hospitality, news, government).
+3. Legitimate banking institutions (offering savings accounts, fixed deposits, loans, net banking) and government portals are STRICTLY REGULAR.
+4. If this page offers poker, card games, sports odds, or casino bonuses, it MUST be classified as gambling.
 
 Respond ONLY in valid JSON:
 {{

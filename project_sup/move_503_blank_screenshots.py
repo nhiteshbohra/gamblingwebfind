@@ -44,6 +44,12 @@ _PARKED_OR_FOR_SALE_MARKERS = [
     "dan.com", "afternic", "afternic.com", "hugedomains", "atom.com",
     "parkingcrew", "parked domain", "parked free", "domain expired",
     "site under construction", "domain may be for sale", "domain name is for sale",
+    "dynadot", "dynadot.com", "registered at dynadot", "this domain is registered at dynadot",
+    "website is ready", "the content is to be added", "content is to be added",
+    "website is ready. the content is to be added", "website coming soon",
+    "related searches", "related searches:", "welcome to the future home of",
+    "namecheap", "namecheap.com", "bodis", "above.com", "sav.com", "epik.com",
+    "domainnameshop", "default web site page", "under construction",
 ]
 
 _BLOCKED_WAF_MARKERS = [
@@ -104,10 +110,10 @@ def classify_image_text(reader, img_path: Path) -> tuple[str | None, str]:
     Returns (verdict, reason) where verdict is 'dead', 'blocked', or None (valid).
     """
     try:
-        # Crop top 60% of image for 2x faster OCR execution (banners / titles live in top half)
+        # Crop top 80% of image for comprehensive OCR inspection
         with Image.open(img_path) as img:
             w, h = img.size
-            cropped = img.crop((0, 0, w, int(h * 0.65)))
+            cropped = img.crop((0, 0, w, int(h * 0.80)))
             import io
             buf = io.BytesIO()
             cropped.save(buf, format="JPEG")
@@ -117,12 +123,27 @@ def classify_image_text(reader, img_path: Path) -> tuple[str | None, str]:
     except Exception:
         return None, ""
 
+    if not extracted_text.strip():
+        return "dead", "Dead: Blank unrendered page (0 text detected)"
+
+    # 1. Parked & Registrar detection
     if any(m in extracted_text for m in _PARKED_OR_FOR_SALE_MARKERS):
-        return "dead", "Dead: Parked or For-Sale lander (GoDaddy/Sedo/Dan)"
+        return "dead", "Dead: Parked or For-Sale lander (Dynadot/GoDaddy/Sedo/Placeholder)"
+
+    # 2. Server & DNS error pages
     if any(m in extracted_text for m in _SERVER_ERROR_MARKERS):
         return "dead", "Dead: 502/503/504 Server or DNS error"
+
+    # 3. WAF & Security challenge blocks
     if any(m in extracted_text for m in _BLOCKED_WAF_MARKERS):
         return "blocked", "Blocked: Cloudflare WAF / 403 Forbidden"
+
+    # 4. Thin stub detection (resilient to OCR minor typos like 't0 be added' / 'ebsite ready')
+    words = extracted_text.split()
+    if len(words) <= 12:
+        stub_triggers = ("ready", "added", "coming", "soon", "dynadot", "registered", "t0 be added", "content is")
+        if any(w in extracted_text for w in stub_triggers):
+            return "dead", "Dead: Blank placeholder / stub lander"
 
     return None, ""
 

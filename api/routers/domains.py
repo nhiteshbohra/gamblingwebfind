@@ -1,17 +1,37 @@
+import os
+import asyncio
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
-from db.mongo_client import checked_domains as _cd
+from pydantic import BaseModel
+from typing import Optional, List, Dict, Any
+
+from db.mongo_client import checked_domains as _cd, source_domains as _sd, resolve_ip, write_result
 from export_domains.screenshot import _url_to_filename, is_valid_screenshot, all_filename_candidates
-import os
 
 router = APIRouter(prefix="/api")
 SCREENSHOTS_DIR = os.getenv("SCREENSHOT_DIR", os.path.join("output", "screenshots"))
+
+
+class TestUrlRequest(BaseModel):
+    url: str
+    run_ai: bool = True
+    take_screenshot: bool = True
+
+
+class SaveDomainRequest(BaseModel):
+    domain: str
+    url: Optional[str] = None
+    status: str
+    reason: str
+    ip: Optional[Any] = None
+    screenshot_taken: Optional[bool] = False
 
 
 @router.get("/domains")
 def list_domains(
     status: str = None,
     q: str = None,
+    ip: str = None,
     screenshot: str = None,
     exported: str = None,
     source: str = None,
@@ -25,6 +45,13 @@ def list_domains(
         flt["status"] = status
     if q:
         flt["_id"] = {"$regex": q, "$options": "i"}
+    if ip:
+        # Match string or array element in ip field
+        clean_ip = ip.strip()
+        flt["$or"] = [
+            {"ip": {"$regex": clean_ip, "$options": "i"}},
+            {"ip": clean_ip}
+        ]
     if screenshot == "taken":
         flt["screenshot_taken"] = True
     elif screenshot == "pending":
@@ -75,6 +102,168 @@ def list_domains(
     return {"total": total, "page": page, "per_page": per_page, "results": results}
 
 
+@router.post("/test-url")
+async def test_single_url(req: TestUrlRequest):
+    """
+    Interactive Sandbox Tester:
+    Fetches a single URL live, runs heuristic keyword screening,
+    evaluates with Ollama AI challenge (if enabled), resolves IP,
+    and optionally captures a screenshot.
+    """
+    raw_url = req.url.strip()
+    if not raw_url:
+        raise HTTPException(400, "URL cannot be empty")
+
+    if not raw_url.startswith(("http://", "https://")):
+        raw_url = f"https://{raw_url}"
+
+    import tldextract
+    import time
+
+    ext = tldextract.extract(raw_url)
+    domain = (ext.registered_domain or ext.domain).lower()
+    if not domain or "." not in domain:
+        domain = raw_url.split("/")[2].split(":")[0].lower()
+
+    # 1. Resolve DNS / IP
+    resolved_ip = resolve_ip(domain)
+
+    # 2. Fetch live webpage HTML
+    start_time = time.time()
+    html_content = ""
+    http_status = None
+    fetch_err = None
+    latency = 0.0
+
+    try:
+        from checking_url.fetcher import fetch
+        fetch_res = await fetch(raw_url, domain, timeout_seconds=15, per_domain_delay=0.0)
+        http_status = fetch_res.status_code
+        html_content = fetch_res.html or ""
+        latency = round(fetch_res.latency or (time.time() - start_time), 2)
+        if fetch_res.error:
+            fetch_err = str(fetch_res.error)
+        elif fetch_res.failure_type:
+            fetch_err = fetch_res.failure_type
+    except Exception as e:
+        fetch_err = str(e)
+        latency = round(time.time() - start_time, 2)
+
+    # 3. Heuristic Pre-classification
+    heuristic_verdict = "unconfirmed"
+    heuristic_score = 0.0
+    matched_keywords = []
+    negative_signals = []
+    reason_summary = "Live inspection"
+
+    try:
+        from checking_url.classifier import (
+            classify, load_keywords, WEAK_GAMBLING_SIGNALS,
+            detect_negative_archetype, _extract_text
+        )
+        kw_set = load_keywords()
+        if html_content:
+            heuristic_verdict, matched_keywords = classify(html_content, url=raw_url, keywords=kw_set)
+            heuristic_score = sum(0.5 if kw in WEAK_GAMBLING_SIGNALS else 1.0 for kw in matched_keywords)
+            text_content = _extract_text(html_content)
+            is_neg, neg_reason = detect_negative_archetype(text_content)
+            if is_neg and neg_reason:
+                negative_signals = [neg_reason]
+            reason_summary = f"{len(matched_keywords)} keywords matched (score: {heuristic_score:.1f})"
+        else:
+            if fetch_err == "blocked" or http_status in (403, 429):
+                heuristic_verdict = "blocked"
+                reason_summary = "Blocked: Cloudflare WAF / HTTP 403"
+            else:
+                heuristic_verdict = "dead"
+                reason_summary = f"Dead: {fetch_err or 'Host unreachable'}"
+    except Exception as e:
+        reason_summary = f"Heuristic error: {e}"
+
+    # 4. Ollama AI Evaluation (if enabled and page content exists)
+    ai_result = None
+    final_verdict = heuristic_verdict
+
+    if req.run_ai and html_content:
+        try:
+            from checking_url.ai_classifier import classify_with_challenge
+            ai_eval = await classify_with_challenge(
+                html=html_content,
+                url=raw_url,
+                matched_keywords=matched_keywords,
+                fast_mode=False
+            )
+            ai_result = ai_eval
+            if ai_eval.get("verdict") in ("gambling", "regular", "blocked", "dead"):
+                final_verdict = ai_eval.get("verdict")
+                reason_summary = ai_eval.get("reason") or reason_summary
+        except Exception as e:
+            ai_result = {"error": f"Ollama AI offline or timeout: {e}"}
+
+    if final_verdict in ("gambling", "regular"):
+        pass
+    elif http_status in (403, 429) or (html_content and "cf-challenge" in html_content.lower()):
+        final_verdict = "blocked"
+    elif http_status == 404 or (not html_content and fetch_err):
+        final_verdict = "dead"
+
+    # 5. Screenshot capture if requested
+    screenshot_taken = False
+    screenshot_url = None
+    if req.take_screenshot:
+        try:
+            from export_domains.screenshot import BrowserPool
+            pool = BrowserPool(concurrency=1)
+            await pool.start()
+            screenshots_dir = os.getenv("SCREENSHOT_DIR", SCREENSHOTS_DIR)
+            os.makedirs(screenshots_dir, exist_ok=True)
+            shot_path, shot_status, _ = await pool.capture_url(raw_url, screenshots_dir)
+            await pool.close()
+            if shot_path and os.path.exists(shot_path):
+                screenshot_taken = True
+                screenshot_url = f"/api/domains/{domain}/screenshot?t={int(time.time())}"
+        except Exception as e:
+            pass
+
+    return {
+        "domain": domain,
+        "url": raw_url,
+        "ip": resolved_ip,
+        "http_status": http_status,
+        "latency_sec": latency,
+        "fetch_error": fetch_err,
+        "status": final_verdict,
+        "reason": reason_summary,
+        "heuristic": {
+            "score": heuristic_score,
+            "matched_keywords": matched_keywords,
+            "negative_signals": negative_signals,
+            "pre_verdict": heuristic_verdict
+        },
+        "ai": ai_result,
+        "screenshot_taken": screenshot_taken,
+        "screenshot_url": screenshot_url,
+        "html_snippet": html_content[:600] if html_content else None
+    }
+
+
+@router.post("/save-domain")
+def save_tested_domain(req: SaveDomainRequest):
+    """Save/upsert a tested domain directly into checked_domains & domain_Listed."""
+    try:
+        write_result(
+            domain=req.domain,
+            status=req.status,
+            reason=req.reason,
+            url=req.url,
+            screenshot_taken=req.screenshot_taken,
+            ip=req.ip
+        )
+        return {"status": "success", "message": f"Successfully saved {req.domain} as '{req.status}' in MongoDB."}
+    except Exception as e:
+        raise HTTPException(500, f"Failed to save domain: {e}")
+
+
 @router.get("/domains/{domain}")
 def get_domain(domain: str):
     d = _cd().find_one({"_id": domain})
@@ -87,9 +276,7 @@ def get_domain(domain: str):
 @router.get("/domains/{domain}/screenshot")
 def get_screenshot(domain: str):
     d = _cd().find_one({"_id": domain}, {"url": 1})
-    if not d:
-        raise HTTPException(404, "domain not found")
-    url = d.get("url") or f"https://{domain}"
+    url = (d.get("url") if d else None) or f"https://{domain}"
     screenshots_dir = os.getenv("SCREENSHOT_DIR", SCREENSHOTS_DIR)
     for cand in all_filename_candidates(url, domain):
         p = os.path.join(screenshots_dir, cand)
@@ -106,4 +293,5 @@ def trigger_backup():
         return res
     except Exception as e:
         raise HTTPException(500, f"Database backup failed: {e}")
+
 

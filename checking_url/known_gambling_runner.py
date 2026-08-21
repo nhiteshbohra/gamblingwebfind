@@ -428,6 +428,26 @@ async def run(
                     stats["dead"] += 1
                 return
 
+            # Check if page is parked / placeholder lander
+            from checking_url.classifier import is_parked_or_for_sale, _extract_text
+            html_text = _extract_text(result.html or "")
+            is_parked, parked_hits = is_parked_or_for_sale(html_text, result.html, url)
+            if is_parked:
+                await asyncio.to_thread(_write_dead, domain, url, f"Parked page detected: {', '.join(parked_hits[:2])}", import_tag)
+                async with _lock:
+                    stats["dead"] += 1
+                return
+
+            # Thin placeholder/coming soon stub detection
+            words = html_text.split()
+            if len(words) <= 12:
+                stub_triggers = ("ready", "added", "coming", "soon", "dynadot", "registered", "t0 be added", "content is")
+                if any(w in html_text for w in stub_triggers):
+                    await asyncio.to_thread(_write_dead, domain, url, "Blank placeholder / coming soon stub lander", import_tag)
+                    async with _lock:
+                        stats["dead"] += 1
+                    return
+
             # ── Step 2: Screenshot on fully loaded page ───────────────────
             ss_path, ss_status, ss_reason = await browser_pool.capture_url(
                 url, screenshot_dir, retries=2, keywords=None

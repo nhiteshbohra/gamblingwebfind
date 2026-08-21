@@ -31,8 +31,11 @@ def all_filename_candidates(url: str, domain: str) -> list[str]:
     ]))
 
 
-def is_valid_screenshot(filepath: str, min_size_bytes: int = 500) -> bool:
-    """Validate that screenshot exists, has content (>500 bytes), is readable, and is NOT a blank/solid white page."""
+def is_valid_screenshot(filepath: str, min_size_bytes: int = 4000) -> bool:
+    """
+    Validate that screenshot exists, is readable, has substantial content (>4KB),
+    and is NOT a blank/solid color screen or a loading spinner splash screen.
+    """
     if not filepath or not os.path.exists(filepath):
         return False
     if os.path.getsize(filepath) < min_size_bytes:
@@ -40,11 +43,19 @@ def is_valid_screenshot(filepath: str, min_size_bytes: int = 500) -> bool:
     try:
         with Image.open(filepath) as img:
             img.verify()
-        # Open again to test variance (detect completely blank white or black screen)
         with Image.open(filepath) as img:
-            stat = ImageStat.Stat(img.convert('L'))
-            if stat.stddev[0] < 2.5:  # Solid/blank image with almost no visual variation
+            rgb_img = img.convert('RGB')
+            # 1. Standard deviation of luminance (must have real visual variation, not flat solid/splash screen)
+            stat = ImageStat.Stat(rgb_img.convert('L'))
+            if stat.stddev[0] < 12.0:
                 return False
+
+            # 2. Check unique color diversity across quantized thumbnail
+            thumb = rgb_img.resize((128, 90)).quantize(colors=32)
+            num_unique_colors = len(thumb.getcolors(maxcolors=64) or [])
+            if num_unique_colors < 6:
+                return False
+
         return True
     except Exception:
         return False
@@ -219,32 +230,40 @@ class BrowserPool:
                 except Exception:
                     pass
 
-                # 4. Wait for real DOM content to render (text or interactive elements)
+                # 4. Wait for real DOM content to render (text and interactive elements)
                 try:
                     await page.wait_for_function("""() => {
                         const body = document.body;
                         if (!body) return false;
                         const text = body.innerText ? body.innerText.trim() : '';
-                        const elements = document.querySelectorAll('img, canvas, button, a, svg, iframe, video, [class*="game"], [class*="bet"]');
-                        return text.length > 40 || elements.length >= 6;
-                    }""", timeout=6000)
+                        const elements = document.querySelectorAll('img, canvas, button, a, svg, iframe, video, table, [class*="game"], [class*="bet"], [class*="card"], [class*="slot"], [class*="odds"]');
+                        return (text.length > 80 && elements.length >= 6) || elements.length >= 14;
+                    }""", timeout=7000)
                 except Exception:
                     pass
 
-                # 5. Dismiss / wait for full-screen loading spinners & overlays
+                # 5. Dismiss / remove full-screen loading spinners, splash screens & click 18+ modals
                 try:
-                    await page.wait_for_selector(
-                        '.loading, .loader, .spinner, .preloader, #loading, #spinner, [class*="preloader"], [class*="loading-overlay"]',
-                        state='hidden',
-                        timeout=3000
-                    )
+                    await page.evaluate("""() => {
+                        // Remove full-screen loaders & splash screens
+                        document.querySelectorAll('.loading, .loader, .spinner, .preloader, #loading, #spinner, [class*="preloader"], [class*="loading-overlay"], [class*="loading-wrap"], .splash, #splash, .app-loader').forEach(el => el.remove());
+                        
+                        // Click common age-gate / cookie / welcome modal buttons
+                        const buttons = document.querySelectorAll('button, a.btn, input[type="button"], [class*="btn"]');
+                        for (const btn of buttons) {
+                            const txt = (btn.innerText || '').toLowerCase().trim();
+                            if (txt.includes('18+') || txt.includes('i am 18') || txt.includes('agree') || txt.includes('accept all') || txt.includes('continue') || txt.includes('enter site')) {
+                                try { btn.click(); } catch(e) {}
+                            }
+                        }
+                    }""")
                 except Exception:
                     pass
 
                 # 6. Progressive scroll to trigger lazy-loaded game banners/images
                 try:
                     await page.evaluate("window.scrollTo(0, Math.min(document.body.scrollHeight / 3, 600))")
-                    await asyncio.sleep(0.8)
+                    await asyncio.sleep(1.0)
                     await page.evaluate("window.scrollTo(0, 0)")
                     await asyncio.sleep(0.5)
                 except Exception:
@@ -319,31 +338,40 @@ class BrowserPool:
                 # 9. Take screenshot with in-flight retry if still unmounted
                 raw_bytes = await page.screenshot(type='png', full_page=False, timeout=15000)
 
-                # If blank (common on Vue/React SPAs like ballaribook), allow extra 2.5s for JS bundle to mount
-                img_test = Image.open(io.BytesIO(raw_bytes)).convert('L')
-                if ImageStat.Stat(img_test).stddev[0] < 2.5:
+                # If blank, loading spinner, or solid background, allow extra 3s for JS bundle/WebSockets to mount
+                img_test = Image.open(io.BytesIO(raw_bytes)).convert('RGB')
+                stat_test = ImageStat.Stat(img_test.convert('L'))
+                thumb_test = img_test.resize((128, 90)).quantize(colors=32)
+                num_colors = len(thumb_test.getcolors(maxcolors=64) or [])
+
+                if stat_test.stddev[0] < 12.0 or num_colors < 6:
                     try:
-                        await asyncio.sleep(2.5)
-                        await page.evaluate("window.scrollTo(0, 300)")
+                        await asyncio.sleep(3.0)
+                        await page.evaluate("window.scrollTo(0, 350)")
+                        await asyncio.sleep(0.8)
+                        await page.evaluate("window.scrollTo(0, 0)")
                         await asyncio.sleep(0.5)
                         raw_bytes = await page.screenshot(type='png', full_page=False, timeout=15000)
-                        img_test = Image.open(io.BytesIO(raw_bytes)).convert('L')
+                        img_test = Image.open(io.BytesIO(raw_bytes)).convert('RGB')
+                        stat_test = ImageStat.Stat(img_test.convert('L'))
+                        thumb_test = img_test.resize((128, 90)).quantize(colors=32)
+                        num_colors = len(thumb_test.getcolors(maxcolors=64) or [])
                     except Exception:
                         pass
 
                 await context.close()
                 context = None
 
-                # If still blank white/empty page after retry, reject as dead/unrenderable
-                if ImageStat.Stat(img_test).stddev[0] < 2.5:
+                # If still blank white/solid color/loader after retry, reject as unrenderable/dead
+                if stat_test.stddev[0] < 12.0 or num_colors < 6:
                     delete_screenshot(clean_dom, os.path.dirname(filepath))
-                    return None, "dead", "Dead: Blank white/empty page rendered in Playwright"
+                    return None, "dead", "Dead: Blank/Solid color/Loader page rendered in Playwright"
 
                 # Convert to optimized JPEG
                 img = Image.open(io.BytesIO(raw_bytes))
                 if img.mode != 'RGB':
                     img = img.convert('RGB')
-                img.save(filepath, format='JPEG', quality=68, optimize=True)
+                img.save(filepath, format='JPEG', quality=75, optimize=True)
 
                 if is_valid_screenshot(filepath):
                     return filepath, "success", []

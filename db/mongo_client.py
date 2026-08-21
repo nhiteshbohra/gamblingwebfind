@@ -454,7 +454,29 @@ def mark_domains_exported(domain_ids: list[str]):
     )
 
 
-# ── CSV seeder ────────────────────────────────────────────────────────────────
+def seed_file_to_domain_listed(file_path: str) -> int:
+    """Extract domains from any .xlsx, .csv, or .txt file and seed them into domain_Listed."""
+    domains = extract_domains_from_file(file_path)
+    if not domains:
+        print(f"[seed] No valid domains found in '{file_path}'")
+        return 0
+    today_date = datetime.now(IST).strftime("%Y-%m-%d")
+    tag = f"imported from {Path(file_path).name} on {today_date}"
+    inserted = 0
+    for domain in domains:
+        res = source_domains().update_one(
+            {"_id": domain},
+            {
+                "$set": {"domain": domain, "active": True, "processed": False, "source": tag},
+                "$setOnInsert": {"added_date": today_date},
+            },
+            upsert=True,
+        )
+        if res.upserted_id:
+            inserted += 1
+    print(f"[seed] Loaded {len(domains):,} unique domains from '{Path(file_path).name}' ({inserted:,} new inserted into domain_Listed)")
+    return len(domains)
+
 
 def seed_from_csv(path: str, active: bool = True):
     """Import domains from CSV into domain_Listed without overwriting existing domain statuses."""

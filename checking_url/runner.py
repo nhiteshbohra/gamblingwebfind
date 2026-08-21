@@ -51,8 +51,9 @@ from db.mongo_client import (
     get_db,
 )
 from checking_url.fetcher import fetch
-from checking_url.classifier import load_keywords, classify
+from checking_url.classifier import load_keywords, classify, is_gambling_domain, is_parked_or_for_sale
 from checking_url.ai_classifier import classify_with_challenge, close_ai_session, _timeout_mgr
+from checking_url.ocr_extractor import extract_ocr_text
 from export_domains.screenshot import BrowserPool, is_valid_screenshot, delete_screenshot
 
 OUTPUT_SCREENSHOT_DIR = os.getenv("SCREENSHOT_DIR", os.path.join("output", "screenshots"))
@@ -139,11 +140,49 @@ async def run(concurrency: int = None, limit: int = 0, mode: str = "new", min_ag
                 domain = str(raw_domain).strip().rstrip("/")
                 url = f"https://{domain}"
 
-            # 1. Fetch HTML
+            # 1. Fetch HTML via fast Scrapling TLS impersonator
             async with fetch_sem:
                 result = await fetch(url, domain, timeout_seconds=timeout, per_domain_delay=delay)
 
-            if result.failure_type:
+            eval_url = result.final_url or url
+            fallback_ss_path = None
+
+            # Immediate check for confirmed parked / dead domain landers before running heavy Playwright fallback
+            is_parked, parked_hits = is_parked_or_for_sale(result.html or "", html=result.html or "", url=eval_url)
+            if result.failure_type == "dead_confirmed" or is_parked:
+                delete_screenshot(domain, output_screenshot_dir)
+                await async_write_result(
+                    domain,
+                    url=eval_url,
+                    status="dead",
+                    reason=f"Dead: Parked/For-Sale lander detected ({', '.join(parked_hits[:2]) if parked_hits else 'dead_confirmed'})",
+                    screenshot_taken=False,
+                )
+                run_stats["dead"] += 1
+                return
+
+            # Playwright JS Rendering & OCR Fallback for blocked, thin-DOM, or image-poster sites
+            needs_browser_fallback = (
+                result.failure_type == "blocked"
+                or (not result.html or len(result.html.strip()) < 800)
+                or is_gambling_domain(eval_url)[0]
+            )
+
+            decision, matched_keywords = classify(result.html or "", url=eval_url, keywords=keywords)
+
+            if needs_browser_fallback and decision != "gambling":
+                # Try Playwright full browser render to bypass JS cloaking / Cloudflare / Banner poster
+                ss_path, ss_status, ss_reason = await browser_pool.capture_url(
+                    eval_url, output_screenshot_dir, retries=1, keywords=keywords
+                )
+                if ss_path and is_valid_screenshot(ss_path):
+                    fallback_ss_path = ss_path
+                    # Re-classify with screenshot OCR text included
+                    decision, matched_keywords = classify(
+                        result.html or "", url=eval_url, keywords=keywords, screenshot_input=ss_path
+                    )
+
+            if result.failure_type and decision != "gambling" and not fallback_ss_path:
                 if result.failure_type == "blocked":
                     final_status = "blocked"
                     final_reason = "Blocked: Cloudflare WAF / HTTP 403 Forbidden"
@@ -152,31 +191,25 @@ async def run(concurrency: int = None, limit: int = 0, mode: str = "new", min_ag
                     final_reason = f"Dead: {result.error or 'Host unreachable / connection failed'}"
 
                 delete_screenshot(domain, output_screenshot_dir)
-                await async_write_result(domain, url=url, status=final_status, reason=final_reason, screenshot_taken=False)
+                await async_write_result(domain, url=eval_url, status=final_status, reason=final_reason, screenshot_taken=False)
                 run_stats[final_status] += 1
                 return
 
-            # 2. Universal Keyword Threshold:
-            #    < 3 keywords   -> Strictly Regular Website
-            #    3 to 4 keywords -> Route to AI Classifier
-            #    >= 5 keywords  -> Automatically Gambling
-            decision, matched_keywords = classify(result.html or "", url=url, keywords=keywords)
             num_matched = len(matched_keywords)
 
             if decision == "gambling":
-                # >= 5 keywords: Keyword-Triggered Gambling
+                # Keyword / Anchor Triggered Gambling
                 final_status = "gambling"
                 final_reason = f"{num_matched} keywords matched"
                 run_stats["gambling"] += 1
 
             elif decision == "needs_ai":
-                # 3 to 4 keywords: Route to AI Classifier
+                # Route to AI Classifier
                 run_stats["ai_evaluated"] += 1
                 ai_res = await classify_with_challenge(
                     result.html or "",
-                    url=url,
+                    url=eval_url,
                     matched_keywords=matched_keywords,
-                    # ponytail: Recheck queues use fast_mode (1-round) to halve AI roundtrips and avoid local Ollama congestion
                     fast_mode=(mode in ("unconfirmed", "regular", "dead", "blocked") or os.getenv("AI_FAST_MODE", "false").lower() == "true"),
                 )
                 ai_verdict = ai_res.get("verdict", "unconfirmed")
@@ -191,15 +224,19 @@ async def run(concurrency: int = None, limit: int = 0, mode: str = "new", min_ag
                     run_stats["regular"] += 1
                     final_reason = ai_res.get("reason", "AI rejected: Regular website")
                     delete_screenshot(domain, output_screenshot_dir)
+                elif ai_verdict in ("dead", "blocked"):
+                    final_status = ai_verdict
+                    run_stats[ai_verdict] += 1
+                    final_reason = ai_res.get("reason", f"AI identified site as {ai_verdict}")
+                    delete_screenshot(domain, output_screenshot_dir)
                 else:
-                    # Ollama offline or timeout -> Unconfirmed fallback with explicit reason
+                    # Ollama offline or timeout -> Unconfirmed fallback without deleting screenshot
                     final_status = "unconfirmed"
                     run_stats["unconfirmed"] += 1
                     final_reason = ai_res.get("reason") or "Unconfirmed: AI model was busy/offline, queued to re-run"
-                    delete_screenshot(domain, output_screenshot_dir)
 
             else:
-                # Less than 3 keywords: Strictly Regular Website
+                # Less than threshold keywords: Strictly Regular Website
                 final_status = "regular"
                 final_reason = f"{num_matched} keywords matched (regular)" if num_matched > 0 else "0 keywords matched"
                 run_stats["regular"] += 1
@@ -209,26 +246,25 @@ async def run(concurrency: int = None, limit: int = 0, mode: str = "new", min_ag
             # Strict Proof Requirement: Only capture if validated as gambling
             if final_status == "gambling":
                 ss_path, ss_status, ss_reason = await browser_pool.capture_url(
-                    url, output_screenshot_dir, retries=2, keywords=keywords
+                    eval_url, output_screenshot_dir, retries=2, keywords=keywords
                 )
                 if ss_path and is_valid_screenshot(ss_path):
                     run_stats["screenshots_taken"] += 1
                     await async_write_result(
                         domain,
-                        url=url,
+                        url=eval_url,
                         status="gambling",
                         reason=final_reason,
                         screenshot_taken=True,
                         screenshot_failed_reason=None,
                     )
                 else:
-                    # Network Error / Unconfirmed Fallback & Immediate Cleanup Rule
-                    delete_screenshot(domain, output_screenshot_dir)
                     _DEAD_SS_STATUSES = {"dead", "dns_failed", "connection_refused", "timeout", "ssl_or_reset"}
                     if ss_status == "blocked":
+                        delete_screenshot(domain, output_screenshot_dir)
                         await async_write_result(
                             domain,
-                            url=url,
+                            url=eval_url,
                             status="blocked",
                             reason=f"Blocked: {ss_reason}",
                             screenshot_taken=False,
@@ -236,9 +272,10 @@ async def run(concurrency: int = None, limit: int = 0, mode: str = "new", min_ag
                         )
                         run_stats["blocked"] += 1
                     elif ss_status in _DEAD_SS_STATUSES:
+                        delete_screenshot(domain, output_screenshot_dir)
                         await async_write_result(
                             domain,
-                            url=url,
+                            url=eval_url,
                             status="dead",
                             reason=f"Dead: {ss_reason}",
                             screenshot_taken=False,
@@ -248,7 +285,7 @@ async def run(concurrency: int = None, limit: int = 0, mode: str = "new", min_ag
                     else:
                         await async_write_result(
                             domain,
-                            url=url,
+                            url=eval_url,
                             status="unconfirmed",
                             reason=f"Unconfirmed: Screenshot error ({ss_reason})",
                             screenshot_taken=False,
@@ -256,8 +293,9 @@ async def run(concurrency: int = None, limit: int = 0, mode: str = "new", min_ag
                         )
                         run_stats["unconfirmed"] += 1
             else:
-                delete_screenshot(domain, output_screenshot_dir)
-                await async_write_result(domain, url=url, status=final_status, reason=final_reason, screenshot_taken=False)
+                if final_status != "unconfirmed":
+                    delete_screenshot(domain, output_screenshot_dir)
+                await async_write_result(domain, url=eval_url, status=final_status, reason=final_reason, screenshot_taken=False)
 
         except Exception as e:
             domain = doc.get("domain", "")
@@ -330,7 +368,12 @@ if __name__ == "__main__":
     parser.add_argument("--concurrency", type=int, default=int(os.getenv("CHECK_CONCURRENCY", os.getenv("MAX_CONCURRENT_FETCHES", 20))))
     parser.add_argument("--limit", type=int, default=int(os.getenv("CHECK_LIMIT", 0)))
     parser.add_argument("--min-age-days", type=int, default=int(os.getenv("RECHECK_MIN_AGE_DAYS", 0)), help="Cooldown age threshold in days for regular/dead rechecks")
+    parser.add_argument("--file", "--seed-file", help="Path to Excel/CSV/txt file to seed into domain_Listed before running")
     args = parser.parse_args()
+
+    if args.file:
+        from db.mongo_client import seed_file_to_domain_listed
+        seed_file_to_domain_listed(args.file)
 
     from checking_url.ai_classifier import start_ollama_if_needed
     try:

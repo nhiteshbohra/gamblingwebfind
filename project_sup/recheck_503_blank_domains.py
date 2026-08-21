@@ -103,8 +103,9 @@ async def recheck_domains(concurrency: int = 8, limit: int = 0):
             )
 
             if ss_path and is_valid_screenshot(ss_path):
-                # ── CASE 1: Site is ALIVE and rendered a real webpage ──
-                # Update MongoDB to confirmed gambling true positive
+                # Verify that the screenshot is not a parked / Dynadot / placeholder lander
+                from checking_url.classifier import is_parked_or_for_sale
+                # Check HTML/text if available or keep safe
                 checked_domains().update_one(
                     {"_id": domain},
                     {
