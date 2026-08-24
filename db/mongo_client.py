@@ -59,6 +59,72 @@ def resolve_ip(domain: str) -> str | list[str] | None:
     except Exception:
         return None
 
+
+def resolve_asn(ip: str) -> str | None:
+    """Look up the hosting ASN for an IP via Team Cymru's free DNS-based WHOIS service
+    (no API key, no local GeoIP/MaxMind database to download/maintain — just a DNS TXT
+    query, which fits a resource-constrained machine and a 1M-domain batch run).
+
+    Used for hosting-cluster corroboration: illegal betting operators frequently reuse the
+    same bulletproof/offshore hosting providers and mirror templates across many domains, so
+    "this new domain's ASN already has a heavy concentration of confirmed gambling domains"
+    is a useful secondary signal. See get_gambling_asn_concentration().
+    """
+    if not ip or ":" in ip:  # skip IPv6 for the Cymru v4 origin service
+        return None
+    try:
+        import dns.resolver
+        octets = ip.strip().split(".")
+        if len(octets) != 4 or not all(o.isdigit() for o in octets):
+            return None
+        reversed_ip = ".".join(reversed(octets))
+        res = dns.resolver.Resolver()
+        res.nameservers = ["8.8.8.8", "1.1.1.1"]
+        res.timeout = 2.0
+        res.lifetime = 2.5
+        answers = res.resolve(f"{reversed_ip}.origin.asn.cymru.com", "TXT")
+        # Response format: "ASN | IP_PREFIX | COUNTRY | REGISTRY | ALLOCATED_DATE"
+        txt = str(answers[0]).strip('"')
+        asn_part = txt.split("|")[0].strip()
+        return f"AS{asn_part}" if asn_part.isdigit() else None
+    except Exception:
+        return None
+
+
+def get_gambling_asn_concentration(min_sample: int = 5, min_ratio: float = 0.7) -> dict:
+    """Return {asn: gambling_ratio} for ASNs that are heavily gambling-concentrated in what
+    we've already classified — at least `min_sample` domains observed on that ASN AND at
+    least `min_ratio` of them confirmed gambling.
+
+    This is deliberately conservative: big shared clouds/CDNs (AWS, Cloudflare, Azure,
+    DigitalOcean, OVH...) host huge numbers of BOTH gambling and completely unrelated
+    legitimate sites, so their ratio will essentially never cross a high threshold like 0.7 —
+    only small, dedicated hosting clusters that illegal operators reuse across many mirror
+    domains will qualify. This is used as a soft corroborating signal for already-ambiguous
+    (needs_ai) domains, never as a standalone auto-gambling trigger — shared hosting alone is
+    not proof, and treating it as one would reintroduce the exact kind of unreviewed
+    false-positive lock this project already got burned by once.
+    """
+    try:
+        pipeline = [
+            {"$match": {"asn": {"$exists": True, "$ne": None}, "status": {"$in": ["gambling", "regular"]}}},
+            {"$group": {
+                "_id": "$asn",
+                "total": {"$sum": 1},
+                "gambling": {"$sum": {"$cond": [{"$eq": ["$status", "gambling"]}, 1, 0]}},
+            }},
+            {"$match": {"total": {"$gte": min_sample}}},
+        ]
+        result = {}
+        for doc in checked_domains().aggregate(pipeline):
+            ratio = doc["gambling"] / doc["total"]
+            if ratio >= min_ratio and doc["_id"]:
+                result[doc["_id"]] = round(ratio, 2)
+        return result
+    except Exception as e:
+        print(f"[get_gambling_asn_concentration WARNING] {e}")
+        return {}
+
 # ── Connection ────────────────────────────────────────────────────────────────
 
 _client: MongoClient | None = None
@@ -325,6 +391,11 @@ def write_result(
     screenshot_taken: bool | None = None,
     screenshot_failed_reason: str | None = None,
     ip: str | None = None,
+    asn: str | None = None,
+    confidence: float | None = None,
+    category: str | None = None,
+    decided_by: str | None = None,
+    ai_context: dict | None = None,
 ):
     """Upsert a classification result into checked_domains AND sync active/processed
     in domain_Listed.
@@ -334,7 +405,19 @@ def write_result(
       - 'regular': non-gambling site
       - 'unconfirmed': Ollama offline/timeout or network error (processed=False to re-run!)
       - 'blocked': 403 / Cloudflare WAF
-      - 'dead': 404 / Connection failed / Parked lander
+      - 'dead': 404 confirmed / Connection failed (no live content, no parking lander)
+      - 'regular' also covers: domain-for-sale / registrar parking landers — reachable
+        and rendering real content, just not gambling and not dead, so these are
+        classified as 'regular' rather than 'dead'.
+
+    confidence/category/decided_by persist the AI's own self-reported certainty and which
+    pipeline stage produced the verdict (e.g. "heuristic_score", "domain_anchor_strong",
+    "ai_round1", "ai_round2_challenge", "validator_confirmed", "validator_override") so a
+    review queue can be built afterwards (e.g. "every gambling verdict with confidence < 0.75
+    or decided_by == heuristic_score") without re-running anything. Previously these were
+    computed by classify_with_challenge() but discarded at write time — with a 1M-domain
+    irreversible-ban pipeline, throwing away the model's own certainty made it impossible to
+    triage which verdicts most need a human's eyes before acting on them.
     """
     today_date = datetime.now(IST).strftime("%Y-%m-%d")
 
@@ -351,6 +434,15 @@ def write_result(
 
     if not ip:
         ip = resolve_ip(domain)
+    # ASN is only useful for the gambling/regular concentration signal (see
+    # get_gambling_asn_concentration) — skip the extra DNS round trip for
+    # dead/blocked/unconfirmed writes where it would never be queried anyway.
+    if ip and not asn and status in ("gambling", "regular"):
+        try:
+            single_ip = ip[0] if isinstance(ip, list) else ip
+            asn = resolve_asn(single_ip)
+        except Exception:
+            asn = None
 
     set_fields = {
         "domain": domain,
@@ -358,6 +450,18 @@ def write_result(
         "status": status,
         "reason": formatted_reason,
     }
+    if ip:
+        set_fields["ip"] = ip
+    if asn:
+        set_fields["asn"] = asn
+    if confidence is not None:
+        set_fields["confidence"] = confidence
+    if category is not None:
+        set_fields["category"] = category
+    if decided_by is not None:
+        set_fields["decided_by"] = decided_by
+    if ai_context is not None:
+        set_fields["ai_context"] = ai_context
 
     # screenshot_taken and screenshot_date are strictly for gambling status only
     if status == "gambling":
@@ -428,6 +532,27 @@ def find_pending_capture(limit: int = 0):
     if limit:
         cur = cur.limit(limit)
     return cur
+
+
+def find_unreviewed_gambling_domains(limit: int = 0):
+    """Gambling verdicts that were locked by the heuristic classifier alone and never
+    passed through the AI analyst/validator (reason == "<N> keywords matched", written by
+    runner.py's decision == "gambling" branch). These are the records at risk from the
+    classifier.py domain-anchor / actionable-signal false-positive bug — use
+    `python -m checking_url.runner --mode gambling` to re-run them through the fixed
+    heuristic + AI pipeline and correct any that were wrongly locked.
+    """
+    query = {
+        "status": "gambling",
+        "reason": {"$regex": r"^\d+ keywords matched$"},
+    }
+    cur = checked_domains().find(query)
+    if limit:
+        cur = cur.limit(limit)
+    for doc in cur:
+        domain = doc.get("domain") or doc.get("_id")
+        if domain:
+            yield {"domain": domain, "_id": domain, "url": doc.get("url", f"https://{domain}")}
 
 
 def find_unexported_gambling_domains(limit: int = 0):

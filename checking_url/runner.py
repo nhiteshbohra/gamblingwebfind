@@ -47,12 +47,16 @@ from db.mongo_client import (
     find_unconfirmed_domains,
     find_regular_domains,
     find_dead_domains,
+    find_unreviewed_gambling_domains,
+    get_gambling_asn_concentration,
+    resolve_ip,
+    resolve_asn,
     write_result,
     get_db,
 )
 from checking_url.fetcher import fetch
-from checking_url.classifier import load_keywords, classify, is_gambling_domain, is_parked_or_for_sale
-from checking_url.ai_classifier import classify_with_challenge, close_ai_session, _timeout_mgr
+from checking_url.classifier import load_keywords, classify, is_gambling_domain, is_parked_or_for_sale, _extract_text
+from checking_url.ai_classifier import classify_with_challenge, close_ai_session, _timeout_mgr, classify_screenshot_vision, clean_page_text
 from checking_url.ocr_extractor import extract_ocr_text
 from export_domains.screenshot import BrowserPool, is_valid_screenshot, delete_screenshot
 
@@ -77,6 +81,14 @@ async def run(concurrency: int = None, limit: int = 0, mode: str = "new", min_ag
     # timeouts don't carry over and slow down this fresh batch.
     await _timeout_mgr.reset_ema()
 
+    # Hosting-cluster corroboration: build the ASN concentration table once per run (not
+    # per-domain — this is a full collection aggregation) from everything already
+    # classified. Used only as a soft corroborating hint for already-ambiguous (needs_ai)
+    # domains — see get_gambling_asn_concentration() for why this never auto-locks a verdict.
+    asn_concentration = await asyncio.to_thread(get_gambling_asn_concentration)
+    if asn_concentration:
+        print(f"[check] Loaded {len(asn_concentration)} gambling-concentrated hosting ASNs for corroboration.")
+
     if mode == "blocked":
         pending = list(find_blocked_domains(limit=limit))
         desc_label = "Rechecking Blocked"
@@ -89,12 +101,15 @@ async def run(concurrency: int = None, limit: int = 0, mode: str = "new", min_ag
     elif mode == "dead":
         pending = list(find_dead_domains(limit=limit, min_age_days=min_age_days))
         desc_label = "Rechecking Dead"
+    elif mode == "gambling":
+        pending = list(find_unreviewed_gambling_domains(limit=limit))
+        desc_label = "Rechecking Unreviewed Gambling"
     else:
         pending = list(find_active_domains(limit=limit))
         desc_label = "Checking & Capturing"
 
     if not pending:
-        target_name = mode if mode in ("blocked", "unconfirmed", "regular", "dead") else "active unprocessed"
+        target_name = mode if mode in ("blocked", "unconfirmed", "regular", "dead", "gambling") else "active unprocessed"
         print(f"[check] No {target_name} domains to process.")
         return {}
 
@@ -147,24 +162,45 @@ async def run(concurrency: int = None, limit: int = 0, mode: str = "new", min_ag
             eval_url = result.final_url or url
             fallback_ss_path = None
 
-            # Immediate check for confirmed parked / dead domain landers before running heavy Playwright fallback
+            # Immediate check for confirmed parked/for-sale landers before running heavy Playwright
+            # fallback. A parked-for-sale domain is reachable and rendering real content — it's
+            # just not gambling and not dead — so it's written as 'regular', not 'dead'.
             is_parked, parked_hits = is_parked_or_for_sale(result.html or "", html=result.html or "", url=eval_url)
-            if result.failure_type == "dead_confirmed" or is_parked:
+            if result.failure_type == "parked" or is_parked:
+                delete_screenshot(domain, output_screenshot_dir)
+                await async_write_result(
+                    domain,
+                    url=eval_url,
+                    status="regular",
+                    reason=f"Regular: Parked/For-Sale domain lander detected ({', '.join(parked_hits[:2]) if parked_hits else 'parked'})",
+                    screenshot_taken=False,
+                )
+                run_stats["regular"] += 1
+                return
+
+            # True dead: confirmed 404 with no parked/for-sale lander content.
+            if result.failure_type == "dead_confirmed":
                 delete_screenshot(domain, output_screenshot_dir)
                 await async_write_result(
                     domain,
                     url=eval_url,
                     status="dead",
-                    reason=f"Dead: Parked/For-Sale lander detected ({', '.join(parked_hits[:2]) if parked_hits else 'dead_confirmed'})",
+                    reason="Dead: 404 Not Found",
                     screenshot_taken=False,
                 )
                 run_stats["dead"] += 1
                 return
 
-            # Playwright JS Rendering & OCR Fallback for blocked, thin-DOM, or image-poster sites
+            # Playwright JS Rendering & OCR Fallback for blocked, thin-DOM, or image-poster sites.
+            # Raw HTML length alone misses JS-SPA gambling sites: a React/Vue shell can ship
+            # several KB of script/CSS boilerplate (clearing the 800-char raw threshold) while
+            # having almost no visible text, so a non-anchored SPA gambling site would otherwise
+            # be classified off near-empty extracted text and never get browser-rendered.
+            visible_text_len = len(_extract_text(result.html or ""))
             needs_browser_fallback = (
                 result.failure_type == "blocked"
                 or (not result.html or len(result.html.strip()) < 800)
+                or visible_text_len < 250
                 or is_gambling_domain(eval_url)[0]
             )
 
@@ -182,10 +218,34 @@ async def run(concurrency: int = None, limit: int = 0, mode: str = "new", min_ag
                         result.html or "", url=eval_url, keywords=keywords, screenshot_input=ss_path
                     )
 
+            # Vision last resort: a canvas/WebGL-rendered casino/slot game ships zero DOM
+            # text AND zero OCR-readable banner text (no static text to read, just animated
+            # game graphics), so a page can pass through the entire text pipeline above and
+            # still land on "regular" purely because there was nothing for it to read. Only
+            # spend the extra vision-model call on pages that actually look empty everywhere
+            # else and where we already paid for a screenshot.
+            if fallback_ss_path and decision != "gambling" and visible_text_len < 250:
+                vision_res = await classify_screenshot_vision(fallback_ss_path, eval_url)
+                if (
+                    vision_res
+                    and str(vision_res.get("verdict", "")).strip().lower() == "gambling"
+                    and float(vision_res.get("confidence", 0)) >= 0.6
+                ):
+                    decision = "needs_ai"
+                    matched_keywords = list(matched_keywords) + [
+                        f"vision:{str(vision_res.get('visual_evidence', 'gambling_ui_detected'))[:60]}"
+                    ]
+
             if result.failure_type and decision != "gambling" and not fallback_ss_path:
                 if result.failure_type == "blocked":
                     final_status = "blocked"
                     final_reason = "Blocked: Cloudflare WAF / HTTP 403 Forbidden"
+                elif result.failure_type == "server_error":
+                    # Transient 5xx after retries — do NOT mark 'dead' (frozen, never
+                    # auto-rechecked). Route to 'unconfirmed' so it's picked up again
+                    # on the next run instead of being silently written off.
+                    final_status = "unconfirmed"
+                    final_reason = f"Unconfirmed: Server error (5xx) after retries, requeued for later re-check"
                 else:
                     final_status = "dead"
                     final_reason = f"Dead: {result.error or 'Host unreachable / connection failed'}"
@@ -196,23 +256,78 @@ async def run(concurrency: int = None, limit: int = 0, mode: str = "new", min_ag
                 return
 
             num_matched = len(matched_keywords)
+            # Audit trail: which stage produced the verdict, and the AI's own confidence/
+            # category when one was involved — persisted so a review queue can be built
+            # afterwards without re-running anything (see write_result docstring).
+            final_confidence = None
+            final_category = None
+            final_decided_by = "heuristic_score"
+            final_ip = None
+            final_asn = None
+            final_ai_context = None
 
             if decision == "gambling":
                 # Keyword / Anchor Triggered Gambling
                 final_status = "gambling"
                 final_reason = f"{num_matched} keywords matched"
+                final_decided_by = "domain_anchor_strong" if any(str(k).startswith("domain_keyword(") or str(k).startswith("gambling_tld(") for k in matched_keywords) else "heuristic_score"
                 run_stats["gambling"] += 1
 
             elif decision == "needs_ai":
                 # Route to AI Classifier
                 run_stats["ai_evaluated"] += 1
+
+                # Hosting-cluster corroboration: if this domain's IP sits on an ASN we've
+                # already found heavily concentrated with confirmed gambling domains, surface
+                # that as extra context for the AI rather than deciding anything ourselves —
+                # see get_gambling_asn_concentration() docstring for why this is a hint, not
+                # a trigger. Only spent here (the already-small needs_ai bucket), not on
+                # every domain.
+                if asn_concentration:
+                    try:
+                        domain_ip = await asyncio.to_thread(resolve_ip, domain)
+                        single_ip = (domain_ip[0] if isinstance(domain_ip, list) else domain_ip) if domain_ip else None
+                        domain_asn = await asyncio.to_thread(resolve_asn, single_ip) if single_ip else None
+                        if domain_asn and domain_asn in asn_concentration:
+                            final_ip, final_asn = single_ip, domain_asn
+                            matched_keywords = list(matched_keywords) + [
+                                f"hosting_cluster:{domain_asn}(gambling_ratio={asn_concentration[domain_asn]})"
+                            ]
+                        elif single_ip:
+                            final_ip, final_asn = single_ip, domain_asn
+                    except Exception:
+                        pass
+
+                # Save the page context actually shown to the AI (title/meta/CTAs/body text)
+                # so a human reviewer can later see exactly what the model reasoned over,
+                # without re-fetching a site that may have changed or gone offline by then.
+                try:
+                    ai_title, ai_meta, ai_ctas, ai_body = clean_page_text(result.html or "", max_chars=2500)
+                    final_ai_context = {
+                        "title": ai_title,
+                        "meta_description": ai_meta,
+                        "cta_buttons": ai_ctas,
+                        "body_excerpt": ai_body[:1200],
+                        "screenshot_used": bool(fallback_ss_path),
+                    }
+                except Exception:
+                    final_ai_context = None
+
                 ai_res = await classify_with_challenge(
                     result.html or "",
                     url=eval_url,
                     matched_keywords=matched_keywords,
                     fast_mode=(mode in ("unconfirmed", "regular", "dead", "blocked") or os.getenv("AI_FAST_MODE", "false").lower() == "true"),
                 )
-                ai_verdict = ai_res.get("verdict", "unconfirmed")
+                ai_verdict = str(ai_res.get("verdict", "unconfirmed")).strip().lower()
+                final_confidence = ai_res.get("confidence")
+                final_category = ai_res.get("category")
+                final_decided_by = (
+                    "tiebreaker_resolved" if ai_res.get("category") == "tiebreaker_resolved" else
+                    "validator_override" if ai_res.get("category") == "validator_override" else
+                    "validator_confirmed" if ai_res.get("challenge_override") is False and "Validated:" in str(ai_res.get("reason", "")) else
+                    "ai_round2_challenge" if ai_res.get("challenge_override") else "ai_round1"
+                )
 
                 if ai_verdict == "gambling":
                     final_status = "gambling"
@@ -238,7 +353,11 @@ async def run(concurrency: int = None, limit: int = 0, mode: str = "new", min_ag
             else:
                 # Less than threshold keywords: Strictly Regular Website
                 final_status = "regular"
-                final_reason = f"{num_matched} keywords matched (regular)" if num_matched > 0 else "0 keywords matched"
+                if any(str(k).startswith("allowlist:") for k in matched_keywords):
+                    final_decided_by = "trusted_allowlist"
+                    final_reason = "Institutional allowlist match (trusted_domains.json)"
+                else:
+                    final_reason = f"{num_matched} keywords matched (regular)" if num_matched > 0 else "0 keywords matched"
                 run_stats["regular"] += 1
                 delete_screenshot(domain, output_screenshot_dir)
 
@@ -257,6 +376,12 @@ async def run(concurrency: int = None, limit: int = 0, mode: str = "new", min_ag
                         reason=final_reason,
                         screenshot_taken=True,
                         screenshot_failed_reason=None,
+                        ip=final_ip,
+                        asn=final_asn,
+                        confidence=final_confidence,
+                        category=final_category,
+                        decided_by=final_decided_by,
+                        ai_context=final_ai_context,
                     )
                 else:
                     _DEAD_SS_STATUSES = {"dead", "dns_failed", "connection_refused", "timeout", "ssl_or_reset"}
@@ -295,7 +420,11 @@ async def run(concurrency: int = None, limit: int = 0, mode: str = "new", min_ag
             else:
                 if final_status != "unconfirmed":
                     delete_screenshot(domain, output_screenshot_dir)
-                await async_write_result(domain, url=eval_url, status=final_status, reason=final_reason, screenshot_taken=False)
+                await async_write_result(
+                    domain, url=eval_url, status=final_status, reason=final_reason, screenshot_taken=False,
+                    ip=final_ip, asn=final_asn, confidence=final_confidence, category=final_category,
+                    decided_by=final_decided_by, ai_context=final_ai_context,
+                )
 
         except Exception as e:
             domain = doc.get("domain", "")
@@ -364,7 +493,7 @@ async def run(concurrency: int = None, limit: int = 0, mode: str = "new", min_ag
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="checking_url runner")
-    parser.add_argument("--mode", default="new", choices=["new", "blocked", "unconfirmed", "regular", "dead"], help="Target queue")
+    parser.add_argument("--mode", default="new", choices=["new", "blocked", "unconfirmed", "regular", "dead", "gambling"], help="Target queue")
     parser.add_argument("--concurrency", type=int, default=int(os.getenv("CHECK_CONCURRENCY", os.getenv("MAX_CONCURRENT_FETCHES", 20))))
     parser.add_argument("--limit", type=int, default=int(os.getenv("CHECK_LIMIT", 0)))
     parser.add_argument("--min-age-days", type=int, default=int(os.getenv("RECHECK_MIN_AGE_DAYS", 0)), help="Cooldown age threshold in days for regular/dead rechecks")

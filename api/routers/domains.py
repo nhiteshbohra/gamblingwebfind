@@ -174,6 +174,10 @@ async def test_single_url(req: TestUrlRequest):
             if fetch_err == "blocked" or http_status in (403, 429):
                 heuristic_verdict = "blocked"
                 reason_summary = "Blocked: Cloudflare WAF / HTTP 403"
+            elif fetch_err == "parked":
+                # Parked/for-sale registrar lander — reachable, not gambling, not dead.
+                heuristic_verdict = "regular"
+                reason_summary = "Regular: Parked/For-Sale domain lander detected"
             else:
                 heuristic_verdict = "dead"
                 reason_summary = f"Dead: {fetch_err or 'Host unreachable'}"

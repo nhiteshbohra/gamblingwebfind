@@ -60,14 +60,20 @@ Do NOT classify as gambling if you can provide SPECIFIC page evidence that the w
 - Hospitality (Hotels/Resorts): Booking/reservation pages, room listings, check-in/check-out info, amenities, dining menus, event/conference spaces — even if "casino" appears in the property name, nearby-attraction text, or an address, AS LONG AS the site is not itself advertising a gaming floor, slots, or table games as something visitors can play there.
 - Restaurants: Menus, reservations, delivery/order-online links, location/hours — including restaurants located inside or near a casino resort, as long as the restaurant's own page is about dining, not gambling.
 - Commercial Banking & Financial Institutions: Official banks, credit unions, NBFCs, or government/commercial banking portals (e.g. savings accounts, loans, fixed deposits, net banking, Agri/NRI/Personal banking). NEVER classify an official bank as gambling simply because it mentions deposits, accounts, or reward schemes.
+- Medical / Clinical / Other Unrelated Businesses whose NAME or DOMAIN merely contains a gambling-sounding fragment (e.g. a "Spinal Care Clinic" containing "spin", an "Antitrust Monopoly Watch" site containing "monopoly", a "Stakeholder Relations" page containing "stake"). The domain name or business name is NEVER evidence by itself — judge only the actual page content and purpose.
+- Gambling REVIEW / RANKING / COMPARISON / AFFILIATE Sites: A site that reviews, rates, ranks, or compares online casinos/betting sites (e.g. "Best Online Casinos 2026", "Top 10 Betting Sites Reviewed") is NOT itself a gambling operator — it is a content/media site. THIS IS THE MOST IMPORTANT DISTINCTION TO GET RIGHT and the one you must check most carefully: such sites will legitimately contain heavy gambling vocabulary ("online casino", "sports betting", "deposit bonus", "free spins") because that is their subject matter, not because they operate gambling themselves. Look for review-site signals: "editor rating", "our review", "affiliate disclosure", "we may earn commission", "compare bonuses", "ranked", "top picks", star ratings of casinos, or third-party brand names being discussed/compared rather than a single operator's own product. If the SITE ITSELF has no Login/Register account system of its own (i.e. it sends visitors OUT to click through to a DIFFERENT third-party brand's site to register/play) — it is "regular" (a media/affiliate site), REGARDLESS of how many gambling keywords appear in its text. Classify as "gambling" if the page IS the operator: it has its OWN Login/Register account system for THIS exact brand, AND either shows gambling content directly OR the page itself claims to be a licensed/regulated real-money operator (e.g. "licensed and regulated by [a gambling regulator]", a license/account number, GamStop/GamCare/BeGambleAware self-exclusion links, "you can register and place a bet"). The actual bet-slip or game grid is very often hidden behind login or loaded dynamically by JavaScript and will NOT appear in the page text — do NOT require it to be visible before classifying as gambling.
 
 NEGATIVE EXAMPLES (classify these as "regular"):
 - A hotel page saying "walking distance to the casino district" → regular (no gaming floor offered by this site).
 - A steakhouse whose address happens to be inside a casino resort, with a menu and reservation form → regular.
 - A travel blog or news article reviewing/describing a casino resort → regular (it's not the operator).
 - A university/college page (even without .edu domain) with admissions, courses, faculty, or campus life content → regular.
+- A page titled "Best Online Casinos 2026" that reviews and links out to five different casino brands with an affiliate disclosure → regular (it's a review/affiliate site, not an operator, even though "online casino" appears dozens of times).
+- A bank page that uses the words "cashier", "instant withdrawal", or "deposit now" purely in the context of ATM/net-banking services, with no betting product anywhere on the page → regular.
 
-IMPORTANT: Simply having the words "contact", "careers", "entertainment", "dining", "lifestyle" does NOT by itself make a site gambling OR non-gambling — look for whether the SITE ITSELF is offering wagering, betting IDs, casino games, or lottery products.
+IMPORTANT — GENERIC WORDS ARE NOT EVIDENCE: Simply having the words "contact", "careers", "entertainment", "dining", "lifestyle", "cashier", "deposit", "withdrawal", "bonus", or "win" does NOT by itself make a site gambling OR non-gambling — look for whether the SITE ITSELF is offering wagering, betting IDs, casino games, or lottery products. A generic finance/promotional word only counts as gambling evidence when it appears attached to an actual gambling mechanism (e.g. "deposit to place your bet", not just "deposit funds").
+
+IMPORTANT — DISGUISE / EVASION AWARENESS: Illegal betting operators sometimes dress a real betting site as a travel, hotel, or lifestyle page specifically to evade detection. If a page has BOTH hospitality-style wording AND a genuine betting mechanism (e.g. "place bet now", live odds, a betting ID funnel, deposit-to-wager flow) — the betting evidence wins. Hospitality wording never excuses actual gambling functionality found on the same page.
 
 ================================================================================
 3. RESOLUTION POLICY:
@@ -77,19 +83,19 @@ IMPORTANT: Simply having the words "contact", "careers", "entertainment", "dinin
 - If the site teaches blackjack/card counting for real casino use → "gambling".
 - If the site is purely educational, e-commerce for physical goods, hospitality/dining, or news/government → "regular".
 - If borderline: check if there is ANY mechanism to deposit real money or obtain a betting ID. If yes → "gambling".
-- WHEN IN DOUBT and you cannot cite a specific gambling mechanism (deposit flow, betting ID, casino game, lottery product) present on THIS site → classify as "regular" with confidence below 0.6, so it can be reviewed further. Do not classify as "gambling" based on vague thematic association (e.g. the word "casino" appearing without an actual gambling offering) — false positives on legitimate businesses (hotels, colleges, restaurants) are a real cost, not a safe default.
+- WHEN IN DOUBT and you cannot cite a specific gambling mechanism (deposit flow, betting ID, casino game, lottery product) present on THIS site → classify as "regular" with confidence below 0.6, so it can be reviewed further. Do not classify as "gambling" based on vague thematic association (e.g. the word "casino" appearing without an actual gambling offering, or a domain name that merely sounds gambling-related) — false positives on legitimate businesses (hotels, colleges, restaurants, banks, clinics) are a real cost, not a safe default.
 
 ================================================================================
 4. STRICT JSON OUTPUT FORMAT:
 ================================================================================
-You must respond ONLY with a single valid JSON object. Do not include introductory text, markdown backticks, or commentary.
+You must respond ONLY with a single valid JSON object. Do not include introductory text, markdown backticks, or commentary. The example below illustrates the FORMAT only — never copy its wording into a real answer; every field must be derived from the actual page you were given.
 
-Example output:
+Example output (structure only, not real content):
 {
-  "verdict": "gambling",
-  "confidence": 0.98,
+  "verdict": "gambling" or "regular",
+  "confidence": <your actual confidence 0.0-1.0>,
   "category": "sports_betting | live_casino | satta_matka | crash_game | lottery | blackjack | casino_resort | forex_bonus | betting_id_funnel | regular",
-  "key_triggers": ["Cricket Exchange", "WhatsApp ID", "UPI Deposit"],
-  "reason": "Offers live IPL match odds and WhatsApp contact to purchase betting IDs."
+  "key_triggers": ["<specific things you found on THIS page>"],
+  "reason": "<one sentence, specific to THIS page's actual content>"
 }
 """

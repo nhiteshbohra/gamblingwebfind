@@ -87,7 +87,7 @@ This document provides a comprehensive technical reference for the architecture,
 4. **`checking_url/` (Stage 2 Verification Engine)**:
    - `fetcher.py`: Asynchronously fetches target pages while impersonating browser TLS fingerprints; classifies network failures (`blocked`, `dead`, `connection_failed`).
    - `classifier.py`: Evaluates HTML against 988 keywords and regex signals, applying negative archetype gates (education, news, hospital) to suppress false positives.
-   - `ai_classifier.py`: Drives local Ollama LLM (`qwen2.5:3b`) using Analyst and Validator models to resolve ambiguous sites.
+   - `ai_classifier.py`: Drives local Ollama LLM (`gambling-analyst`, a custom model built from `qwen2.5:3b` via `Modelfile`) using Analyst and Validator rounds to resolve ambiguous sites. Validator is `gambling-validator`, a separate model built from `Modelfile.validator` with an adversarial "find reasons the verdict is wrong" system prompt. (Fixed 2026-08-21: `.env` previously pointed `OLLAMA_VALIDATOR_MODEL` at `gambling-analyst`, and `gambling-validator` had never been built, so the Validator round was silently re-running the Analyst model instead of an independent skeptic. Both are now built and verified — `ollama show <model> --modelfile` matches each Modelfile byte-for-byte.)
    - `runner.py`: Orchestrates parallel async task queues, progress reporting (`tqdm`), and immediate visual proof capture via `BrowserPool`.
 5. **`export_domains/` (Stage 3 Reporting Engine)**:
    - `exporter.py`: Compiles verified gambling results into Word documents, screen-optimized PDFs, and Excel spreadsheets.
@@ -101,7 +101,7 @@ This document provides a comprehensive technical reference for the architecture,
 |:---|:---|:---|
 | **Language** | Python 3.11+ | Unmatched ecosystem for web crawling, async I/O (`asyncio`), data analysis, and AI integrations. |
 | **HTTP Engine** | `Scrapling` + `curl_cffi` | Provides browser TLS fingerprint impersonation to bypass Cloudflare and WAF protections. |
-| **Local LLM** | Ollama (`qwen2.5:3b`) | Eliminates external API costs and data privacy concerns while offering high-speed local inference. |
+| **Local LLM** | Ollama (`gambling-analyst`, built from `qwen2.5:3b`) | Eliminates external API costs and data privacy concerns while offering high-speed local inference. |
 | **Browser Engine** | Playwright (Chromium) | Reliable headless browser automation for JavaScript rendering and full-page visual capture. |
 | **Database** | MongoDB | Flexible schema-less JSON storage ideal for varying HTTP metadata, headers, and classification logs. |
 | **API Framework** | FastAPI + Uvicorn | Asynchronous Python REST framework with automatic OpenAPI documentation and high request throughput. |
@@ -276,7 +276,7 @@ sequenceDiagram
   - $2.5 \le \text{Score} < 5.0 \implies \text{Needs AI}$ (escalated to Stage 4).
 
 #### Step 4: Local AI Challenge Round
-- **Action**: Escalated sites are sent to local Ollama LLM (`qwen2.5:3b`).
+- **Action**: Escalated sites are sent to local Ollama LLM (`gambling-analyst`, built from `qwen2.5:3b`).
 - **Handling Component**: `checking_url/ai_classifier.py` (`classify_with_challenge`).
 - **Two-Round Validation**:
   - *Round 1 (Analyst)*: Evaluates title, meta descriptions, and visible text.
@@ -413,17 +413,19 @@ MONGO_URI=mongodb://localhost:27017/
 MONGO_DB_NAME=gamblingsites
 MAX_CONCURRENT_FETCHES=20
 FETCH_TIMEOUT=10
-OLLAMA_HOST=http://localhost:11434
-OLLAMA_MODEL=qwen2.5:3b
+OLLAMA_BASE_URL=http://127.0.0.1:11434
+OLLAMA_MODEL=gambling-analyst
+OLLAMA_VALIDATOR_MODEL=gambling-analyst
 ```
 
 #### 6. Initialize Ollama Models
 Ensure Ollama is running, then pull and create custom model instances:
 ```bash
 ollama pull qwen2.5:3b
-ollama create qwen2.5:3b -f Modelfile
-ollama create qwen2.5:3b-validator -f Modelfile.validator
+ollama create gambling-analyst -f Modelfile
+ollama create gambling-validator -f Modelfile.validator
 ```
+Confirm both are built with `ollama list`, and that `OLLAMA_MODEL=gambling-analyst` / `OLLAMA_VALIDATOR_MODEL=gambling-validator` in your `.env` — these must point at two distinct models, not the same one twice, or the Validator round degenerates into the Analyst re-confirming itself.
 
 ---
 

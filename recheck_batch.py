@@ -281,6 +281,9 @@ async def recheck_batch(
                     if fetch_res.failure_type == "blocked":
                         final_status = "blocked"
                         final_reason = "Blocked: Cloudflare WAF / 403 Forbidden"
+                    elif fetch_res.failure_type == "parked":
+                        final_status = "regular"
+                        final_reason = "Regular: Parked/For-Sale domain lander detected"
                     else:
                         final_status = "dead"
                         final_reason = f"Dead: {fetch_res.error or fetch_res.failure_type}"

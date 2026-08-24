@@ -70,11 +70,11 @@ def _load_checkpoint(checkpoint_path: str) -> dict:
                 raw = json.load(f)
             return {
                 "done": set(raw.get("done", [])),
-                "stats": raw.get("stats", {"gambling_active": 0, "dead": 0, "screenshots": 0}),
+                "stats": raw.get("stats", {"gambling_active": 0, "dead": 0, "regular": 0, "screenshots": 0}),
             }
         except Exception:
             pass
-    return {"done": set(), "stats": {"gambling_active": 0, "dead": 0, "screenshots": 0}}
+    return {"done": set(), "stats": {"gambling_active": 0, "dead": 0, "regular": 0, "screenshots": 0}}
 
 
 def _save_checkpoint(checkpoint_path: str, done: set, stats: dict):
@@ -166,6 +166,48 @@ def _write_dead(domain: str, url: str, reason: str, import_tag: str, ip: str = N
         upsert=True,
     )
     # Mark dead in source collection + stamp source
+    source_domains().update_one(
+        {"_id": domain},
+        {
+            "$set": {
+                "domain": domain,
+                "active": False,
+                "processed": True,
+                "source": import_tag,
+            },
+            "$setOnInsert": {"added_date": today},
+        },
+        upsert=True,
+    )
+
+
+def _write_regular(domain: str, url: str, reason: str, import_tag: str, ip: str = None):
+    """Domain is reachable but not gambling — used for parked/for-sale registrar landers,
+    which are live content, just not gambling and not dead."""
+    today = datetime.now(IST).strftime("%Y-%m-%d")
+    if not ip:
+        ip = resolve_ip(domain)
+
+    set_fields = {
+        "domain": domain,
+        "url": url,
+        "status": "regular",
+        "reason": f"Regular: {reason}",
+        "source": import_tag,
+    }
+    if ip:
+        set_fields["ip"] = ip
+
+    checked_domains().update_one(
+        {"_id": domain},
+        {
+            "$set": set_fields,
+            "$setOnInsert": {"added_date": today},
+        },
+        upsert=True,
+    )
+    # Not gambling — keep it out of the active gambling-recheck queue, but this is a live
+    # domain (unlike _write_dead), just stamp source and processed state.
     source_domains().update_one(
         {"_id": domain},
         {
@@ -303,7 +345,7 @@ async def run(
     done_set: set = cp["done"]
     stats: dict = cp["stats"]
     # Ensure all stat keys exist (backward-compat with older checkpoints)
-    for _k in ("gambling_active", "dead", "screenshots", "skipped", "promoted", "kept_status"):
+    for _k in ("gambling_active", "dead", "regular", "screenshots", "skipped", "promoted", "kept_status"):
         stats.setdefault(_k, 0)
 
     pending = [d for d in all_domains if d not in done_set]
@@ -383,6 +425,15 @@ async def run(
                 async with fetch_sem:
                     result = await fetch(url, domain, timeout_seconds=timeout, per_domain_delay=delay)
 
+                if result.failure_type == "parked":
+                    # Now a reachable parked/for-sale registrar lander — not gambling, not
+                    # dead, so reclassify as regular regardless of its previous status.
+                    reason = result.error or "Parked/For-Sale domain lander detected"
+                    await asyncio.to_thread(_write_regular, domain, url, reason, import_tag)
+                    async with _lock:
+                        stats["regular"] += 1
+                    return
+
                 if result.failure_type:
                     # Still unreachable → keep existing status, just refresh last_checked_at
                     await asyncio.to_thread(_write_keep_status, domain, url, existing_status, import_tag)
@@ -420,22 +471,32 @@ async def run(
             async with fetch_sem:
                 result = await fetch(url, domain, timeout_seconds=timeout, per_domain_delay=delay)
 
+            if result.failure_type == "parked":
+                # Reachable parked/for-sale registrar lander — not gambling, not dead.
+                reason = result.error or "Parked/For-Sale domain lander detected"
+                await asyncio.to_thread(_write_regular, domain, url, reason, import_tag)
+                async with _lock:
+                    stats["regular"] += 1
+                return
+
             if result.failure_type:
-                # Any fetch error → dead
+                # Any other fetch error (connection failed / true 404) → dead
                 reason = result.error or result.failure_type or "Unreachable"
                 await asyncio.to_thread(_write_dead, domain, url, reason, import_tag)
                 async with _lock:
                     stats["dead"] += 1
                 return
 
-            # Check if page is parked / placeholder lander
+            # Redundant safety net: check the page body directly for parked / placeholder
+            # lander markers in case fetcher-level detection missed it (e.g. marker list
+            # drift between the two checks).
             from checking_url.classifier import is_parked_or_for_sale, _extract_text
             html_text = _extract_text(result.html or "")
             is_parked, parked_hits = is_parked_or_for_sale(html_text, result.html, url)
             if is_parked:
-                await asyncio.to_thread(_write_dead, domain, url, f"Parked page detected: {', '.join(parked_hits[:2])}", import_tag)
+                await asyncio.to_thread(_write_regular, domain, url, f"Parked page detected: {', '.join(parked_hits[:2])}", import_tag)
                 async with _lock:
-                    stats["dead"] += 1
+                    stats["regular"] += 1
                 return
 
             # Thin placeholder/coming soon stub detection
@@ -484,6 +545,7 @@ async def run(
                 pbar.set_postfix({
                     "Active": stats["gambling_active"],
                     "Dead": stats["dead"],
+                    "Regular": stats["regular"],
                     "Skip": stats["skipped"],
                     "SS": stats["screenshots"],
                 })
@@ -529,7 +591,7 @@ async def run(
 
 
 def _print_summary(stats: dict, total: int):
-    done = stats.get("gambling_active", 0) + stats.get("dead", 0) + stats.get("kept_status", 0)
+    done = stats.get("gambling_active", 0) + stats.get("dead", 0) + stats.get("regular", 0) + stats.get("kept_status", 0)
     print("\n" + "=" * 65)
     print("         KNOWN GAMBLING DOMAINS — SCAN SUMMARY")
     print("=" * 65)
@@ -539,6 +601,7 @@ def _print_summary(stats: dict, total: int):
     print(f"  ├─ Active (gambling)           : {stats.get('gambling_active', 0):,}")
     print(f"  │   ├─ Screenshots taken       : {stats.get('screenshots', 0):,}")
     print(f"  │   └─ Promoted from other     : {stats.get('promoted', 0):,}")
+    print(f"  ├─ Regular (parked/for-sale)   : {stats.get('regular', 0):,}")
     print(f"  ├─ Dead / Unreachable          : {stats.get('dead', 0):,}")
     print(f"  └─ Kept existing status        : {stats.get('kept_status', 0):,}  (dead/blocked, still offline)")
     print("=" * 65 + "\n")

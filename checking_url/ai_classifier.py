@@ -15,6 +15,7 @@ import os
 import json
 import re
 import asyncio
+import base64
 import logging
 from pathlib import Path
 from bs4 import BeautifulSoup
@@ -64,6 +65,19 @@ except ImportError:
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gambling-analyst")
 OLLAMA_VALIDATOR_MODEL = os.getenv("OLLAMA_VALIDATOR_MODEL", "gambling-validator")
+# Tie-breaker: only invoked for the small slice of disputed/uncertain cases (validator says
+# "uncertain", or both validator model attempts fail) — a bigger model is affordable there
+# since it's a tiny fraction of total volume, unlike running it on every domain. Default is
+# 7B (~4.5GB q4) rather than 14B (~9GB) because AI_CONCURRENCY allows overlapping requests
+# for DIFFERENT domains at DIFFERENT stages (analyst / validator / tiebreaker), so Ollama can
+# end up holding two models resident at once — 7B keeps that safe on a 16GB machine. Bump to
+# qwen2.5:14b-instruct-q4_K_M only if you also set OLLAMA_MAX_LOADED_MODELS=1 on the Ollama
+# server (forces it to evict the previous model before loading a new one).
+OLLAMA_TIEBREAKER_MODEL = os.getenv("OLLAMA_TIEBREAKER_MODEL", "qwen2.5:7b-instruct-q4_K_M")
+# Vision fallback for canvas/WebGL-rendered casino UIs (slot reels, live dealer feeds) that
+# ship zero DOM text and zero OCR-readable banner text. Kept small on purpose — see
+# classify_screenshot_vision() for why "moondream" is the right size for this machine.
+OLLAMA_VISION_MODEL = os.getenv("OLLAMA_VISION_MODEL", "moondream")
 # ponytail: Default AI concurrency set to 2 to give 8B model ample VRAM and zero queue starvation
 AI_CONCURRENCY = int(os.getenv("AI_CONCURRENCY", 2))
 
@@ -118,14 +132,14 @@ class DynamicTimeoutManager:
             )
 
     async def record_timeout(self):
-        """Track timeouts — if too many, bump EMA slightly to get more headroom."""
+        """Track timeouts — bump EMA conservatively so next request gets a bit more headroom without compounding excessively."""
         async with self._lock:
             self._total_calls += 1
             self._total_timeouts += 1
-            # Bump EMA upward so next request gets a bit more time
+            # Conservative 5% bump instead of 20% to prevent runaway 60s timeout freezes
             self._ema_response_time = min(
                 AI_TIMEOUT_MAX / self.SAFETY_MULTIPLIER,
-                self._ema_response_time * 1.2
+                self._ema_response_time * 1.05
             )
 
     async def reset_ema(self):
@@ -191,11 +205,80 @@ def detect_gambling_funnels(html: str) -> list[str]:
 
     matched = [m for m in GAMBLING_FUNNEL_MARKERS_STRONG if m in html_lower]
 
-    has_gambling_context = any(c in html_lower for c in _FUNNEL_SOCIAL_CONTEXT)
+    # Word-boundary match required — a bare substring check on short words like "bet" matches
+    # inside ordinary English ("between", "alphabet", "diabetes", "Tibetan"), which would let
+    # ANY page using the word "between" plus a WhatsApp/Telegram contact link (ubiquitous on
+    # legitimate small-business sites) trip this and get instant-locked to gambling downstream.
+    has_gambling_context = any(re.search(rf"\b{re.escape(c)}\b", html_lower) for c in _FUNNEL_SOCIAL_CONTEXT)
     if has_gambling_context:
         matched += [m for m in GAMBLING_FUNNEL_MARKERS_SOCIAL if m in html_lower]
 
     return matched
+
+
+# Verbatim mentions of known gambling regulators / self-exclusion & problem-gambling support
+# bodies are near-zero-noise signals — a non-gambling site essentially never cites these. Small
+# local models proved unreliable at weighing this correctly even with explicit prompt
+# instructions: live-tested repeatedly against a real UK Gambling Commission-licensed operator
+# whose page explicitly said "licensed and regulated... Gambling Commission... GamStop...
+# GamCare... BeGambleAware... you can register and place a bet" and was still confidently
+# REJECTED as "regular" in some runs, with reasoning that literally acknowledged the licensing
+# language and then contradicted itself. This is a code-level safety net: it does NOT auto-lock
+# "gambling" (shared hosting/false brand mentions could exist) — it only prevents a validator's
+# rejection from being trusted blindly when these signals are present, forcing a tie-breaker
+# look instead, in both the "clean" and "hedged" rejection paths.
+LICENSED_OPERATOR_SIGNALS = (
+    # Deliberately self-referential compliance phrasing only ("we ARE licensed", "our
+    # account/license number is...") — NOT bare regulator/charity names like "gamstop" or
+    # "gamcare" alone, which legitimately appear on genuine support/awareness/charity/news
+    # sites that are emphatically not operators (a real false positive I caught live-testing
+    # this exact fix against a gambling-addiction support charity page).
+    "licensed and regulated by", "licensed and regulated in", "licensed by the gambling commission",
+    "gambling commission account", "under account", "malta gaming authority",
+    "curacao egaming", "curacao gaming license", "regulated by the gambling commission",
+    "our gambling license", "gaming license number",
+)
+
+
+def detect_licensed_operator_signals(text: str) -> list[str]:
+    """Detect verbatim regulator/self-exclusion-body mentions in already-extracted page text."""
+    if not text:
+        return []
+    text_lower = text.lower()
+    return [s for s in LICENSED_OPERATOR_SIGNALS if s in text_lower]
+
+
+# Gambling-specific CTA button text (deliberately excludes generic account-system terms like
+# bare "login"/"deposit"/"withdraw" that also appear on banks/e-commerce/forums) — these are
+# the subset of clean_page_text()'s cta_patterns that essentially only belong to a gambling
+# operator's own interactive elements.
+_GAMBLING_SPECIFIC_CTA_MARKERS = (
+    "claim bonus", "bet id", "demo id", "bookmaker", "spin", "play now",
+    "lottery", "lotto", "scratch", "no-deposit", "free bonus",
+)
+
+
+def detect_operator_cta_signals(cta_buttons: list | None) -> list[str]:
+    """Detect gambling-specific interactive CTAs (already extracted from the live page's own
+    <a>/<button> tags by clean_page_text()) — proof the SITE ITSELF has operator-style
+    interactive elements, not just descriptive text. Used to catch a validator rejection that
+    claims "no login/register-to-play mechanism" while the page's own extracted buttons say
+    otherwise — this was reproduced live: a validator rejected a real operator (juegging-
+    sports.bet) with "does not contain gambling mechanisms such as login/register-to-play"
+    while its own cta_buttons list contained "Login", "Withdrawal", and "CLAIM BONUS" — a
+    directly falsifiable contradiction the code can catch without relying on the model to
+    notice its own inconsistency.
+    """
+    if not cta_buttons:
+        return []
+    hits = []
+    for btn in cta_buttons:
+        btn_lower = str(btn).lower()
+        for marker in _GAMBLING_SPECIFIC_CTA_MARKERS:
+            if marker in btn_lower:
+                hits.append(str(btn))
+                break
+    return hits
 
 
 def detect_igaming_providers(html: str) -> list[str]:
@@ -353,11 +436,19 @@ def clean_page_text(html: str, max_chars: int = 2500) -> tuple[str, str, list[st
                 if len(cta_buttons) >= 8:
                     break
 
+        # img alt text carries real content on image-heavy pages (banner carousels, promo
+        # graphics, jackpot artwork) that get_text() never sees — it only returns text nodes,
+        # never attribute values. Collect it before the AI ever sees the page, not just for
+        # the heuristic layer's own extractor (see classifier._extract_text).
+        alt_texts = [img["alt"].strip() for img in soup.find_all("img", attrs={"alt": True}) if img["alt"].strip()]
+
         for tag in soup(["script", "style", "svg", "noscript", "iframe", "path"]):
             tag.decompose()
 
         body_text = soup.get_text(separator=" ", strip=True)
         body_text = re.sub(r"\s+", " ", body_text)
+        if alt_texts:
+            body_text = (body_text + " " + " ".join(alt_texts)).strip()
 
         trimmed_text = body_text[:max_chars].strip()
         return title, meta_desc, cta_buttons, trimmed_text
@@ -393,18 +484,6 @@ def parse_ai_json_response(raw_text: str) -> dict | None:
     return None
 
 
-    async def record_timeout(self):
-        """Track timeouts — bump EMA conservatively so next request gets a bit more headroom without compounding excessively."""
-        async with self._lock:
-            self._total_calls += 1
-            self._total_timeouts += 1
-            # Conservative 5% bump instead of 20% to prevent runaway 60s timeout freezes
-            self._ema_response_time = min(
-                AI_TIMEOUT_MAX / self.SAFETY_MULTIPLIER,
-                self._ema_response_time * 1.05
-            )
-
-
 def _evaluate_regular_evidence(reason: str, evidence: str, body_text: str, html: str) -> tuple[bool, str]:
     """
     Anti-Hallucination Ground-Truth Evaluator:
@@ -416,8 +495,11 @@ def _evaluate_regular_evidence(reason: str, evidence: str, body_text: str, html:
     combined_ai_claim = (reason + " " + evidence).lower()
     page_content = (body_text + " " + (html or "")[:100000]).lower()
 
-    # Check if page has gambling / betting keywords present
-    has_gambling_terms = any(kw in page_content for kw in (
+    # Check if page has gambling / betting keywords present. Word-boundary match required —
+    # a bare substring check on "bet" matches inside ordinary English ("between", "alphabet",
+    # "diabetes"), which would wrongly suppress real news/sports-score archetype evidence
+    # (below) for any page merely containing the word "between".
+    has_gambling_terms = any(re.search(rf"\b{re.escape(kw)}\b", page_content) for kw in (
         "bet", "betting", "casino", "satta", "matka", "poker", "slot", "slots",
         "odds", "bookmaker", "sportsbook", "wagering", "aviator", "roulette"
     ))
@@ -506,6 +588,84 @@ async def _call_ollama(prompt: str, url: str = "") -> dict | None:
             )
         except Exception as e:
             logger.warning(f"[ai_classifier] Inference failed for {url}: {e}")
+    return None
+
+
+async def classify_screenshot_vision(image_path: str, url: str = "") -> dict | None:
+    """
+    Vision-model last resort for canvas/WebGL-rendered gambling UIs (slot reels, live-dealer
+    video feeds, bet-slip panels, roulette wheels) that render entirely inside a <canvas> or
+    WebGL context — these ship ZERO DOM text (the keyword classifier sees nothing) and often
+    zero printed banner text either (OCR sees nothing, since there's no static text to read,
+    just animated game graphics). Only call this on pages that already look empty everywhere
+    else (see runner.py) — it's a targeted patch for one specific blind spot, not a general
+    replacement for the text pipeline.
+
+    Uses a small, purpose-built vision model (default: moondream, ~1.7GB) rather than a large
+    general VLM — this is a fast binary "does this look like a casino/betting UI" check, not
+    open-ended image reasoning, so a lightweight model is the right fit for a 16GB-RAM box
+    that's also holding Ollama's text model, MongoDB, and a Playwright browser pool in memory.
+    """
+    if not image_path or not os.path.exists(image_path):
+        return None
+    try:
+        with open(image_path, "rb") as f:
+            img_b64 = base64.b64encode(f.read()).decode("utf-8")
+    except Exception as e:
+        logger.warning(f"[vision] Could not read screenshot {image_path}: {e}")
+        return None
+
+    prompt = f"""You are looking at a screenshot of the website {url}.
+
+Does this image show an online casino, sports betting, slot machine, live dealer game, poker
+table, betting odds / bet-slip interface, or lottery / crash-game UI?
+
+Look specifically for: slot machine reels, casino chips or playing cards, a roulette wheel,
+a bet-amount input with "Bet"/"Spin"/"Deposit" buttons, sports odds tables, a live dealer
+video feed, jackpot/prize displays, or crash-game multiplier graphics (e.g. Aviator).
+
+A generic business/app homepage, login screen, article, or product page with none of these
+elements is NOT gambling, even if the color scheme is flashy.
+
+Respond ONLY in valid JSON:
+{{
+  "verdict": "gambling" or "regular",
+  "confidence": 0.0 to 1.0,
+  "visual_evidence": "what you actually see in the image that supports this"
+}}
+"""
+    payload = {
+        "model": OLLAMA_VISION_MODEL,
+        "prompt": prompt,
+        "images": [img_b64],
+        "stream": False,
+        "format": "json",
+        "options": {"temperature": 0.1, "num_ctx": 2048},
+    }
+
+    sem = get_semaphore()
+    async with sem:
+        try:
+            session = await get_session()
+            async with session.post(
+                f"{OLLAMA_BASE_URL}/api/generate",
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=max(30.0, AI_TIMEOUT_MAX)),
+            ) as resp:
+                if resp.status == 200:
+                    result = await resp.json()
+                    return parse_ai_json_response(result.get("response", ""))
+                elif resp.status == 404:
+                    logger.warning(
+                        f"[vision] Model '{OLLAMA_VISION_MODEL}' not found in Ollama — "
+                        f"run: ollama pull {OLLAMA_VISION_MODEL}"
+                    )
+        except (aiohttp.ClientConnectorError, aiohttp.ServerDisconnectedError):
+            logger.warning(f"[vision] Ollama server offline for {url}")
+        except asyncio.TimeoutError:
+            logger.warning(f"[vision] Timeout classifying screenshot for {url}")
+        except Exception as e:
+            logger.warning(f"[vision] Screenshot classification failed for {url}: {e}")
     return None
 
 
@@ -609,11 +769,89 @@ async def classify_with_ai(
     return await classify_with_challenge(html, url)
 
 
+async def _call_tiebreaker(url: str, title: str, body_text: str, analyst_verdict: dict, dispute_reason: str) -> dict | None:
+    """
+    Third opinion from a larger model (default qwen2.5:14b), invoked ONLY for the small
+    slice of genuinely disputed cases: the validator says "uncertain", or both validator
+    model attempts failed. This is deliberately not used on every domain — only a fraction
+    of the already-small `needs_ai` bucket ever reaches a dispute, so spending a bigger
+    model's extra inference time there is affordable even on a 16GB-RAM machine, whereas
+    running it on every domain would not be. Returns None on any failure so the caller can
+    fall back to its existing 'unconfirmed' behavior — this never lowers safety, it only
+    gives disputed cases a real decisive look instead of an automatic requeue.
+    """
+    key_triggers = analyst_verdict.get("key_triggers", [])
+    prompt = f"""You are the final decisive reviewer. Two prior AI passes could not agree on
+this website. Make a clear, final call.
+
+URL: {url}
+Title: {title}
+Page Content: {body_text[:1500]}
+
+First model said: verdict={analyst_verdict.get('verdict')}, confidence={analyst_verdict.get('confidence')}, reason="{analyst_verdict.get('reason', '')}"
+Second model (validator) could not decide: "{dispute_reason}"
+
+Rules:
+- Legitimate banks, financial institutions, hotels/restaurants, educational portals, government
+  sites, and e-commerce stores are REGULAR — reject gambling even if isolated words like
+  'deposit', 'bonus', 'win', or 'stake' appear in a non-gambling context.
+- Real-money online casinos, sportsbooks, poker/rummy/teen patti platforms, betting exchanges,
+  crash games (Aviator), and lottery/satta-matka sites are GAMBLING.
+- If the page states it is "licensed and regulated" by a gambling regulator, cites a gambling
+  license/account number, or links to self-exclusion/problem-gambling support bodies (GamStop,
+  GamCare, BeGambleAware, or similar) — this is standard, legally required self-description for
+  a real licensed gambling operator. Do NOT treat "responsible gambling" language as evidence
+  the site is a support/advocacy site rather than an operator; it is the opposite. The bet-slip
+  or game grid is often hidden behind login and will not appear in this text — do not require it.
+- You must pick "gambling" or "regular" — do not say unconfirmed/uncertain.
+
+Respond ONLY in valid JSON:
+{{
+  "verdict": "gambling" or "regular",
+  "confidence": 0.0 to 1.0,
+  "reason": "final decisive reason"
+}}
+"""
+    payload = {
+        "model": OLLAMA_TIEBREAKER_MODEL,
+        "prompt": prompt,
+        "stream": False,
+        "format": "json",
+        "options": {"temperature": 0.1, "top_p": 0.9, "num_ctx": 4096},
+    }
+    try:
+        session = await get_session()
+        async with session.post(
+            f"{OLLAMA_BASE_URL}/api/generate",
+            json=payload,
+            timeout=aiohttp.ClientTimeout(total=max(60.0, AI_TIMEOUT_MAX * 2)),
+        ) as resp:
+            if resp.status == 200:
+                result = await resp.json()
+                tb = parse_ai_json_response(result.get("response", ""))
+                if tb and str(tb.get("verdict", "")).strip().lower() in ("gambling", "regular"):
+                    logger.info(f"[tiebreaker] Resolved disputed verdict for {url}: {tb.get('verdict')} ({dispute_reason})")
+                    return {
+                        "verdict": str(tb.get("verdict")).strip().lower(),
+                        "confidence": float(tb.get("confidence", 0.6)),
+                        "category": "tiebreaker_resolved",
+                        "key_triggers": key_triggers,
+                        "reason": f"Tie-breaker ({OLLAMA_TIEBREAKER_MODEL}) resolved dispute: {tb.get('reason', '')}",
+                        "challenge_override": True,
+                    }
+            elif resp.status == 404:
+                logger.warning(f"[tiebreaker] Model '{OLLAMA_TIEBREAKER_MODEL}' not found — run: ollama pull {OLLAMA_TIEBREAKER_MODEL}")
+    except Exception as e:
+        logger.warning(f"[tiebreaker] Failed for {url}: {type(e).__name__}: {e}")
+    return None
+
+
 async def validate_gambling_verdict(
     url: str,
     title: str,
     body_text: str,
     analyst_verdict: dict,
+    cta_buttons: list | None = None,
 ) -> dict:
     """
     Validator (Judge) Model — challenges a gambling verdict from the analyst.
@@ -625,10 +863,15 @@ async def validate_gambling_verdict(
     key_triggers = analyst_verdict.get("key_triggers", [])
     analyst_reason = analyst_verdict.get("reason", "")
     analyst_confidence = analyst_verdict.get("confidence", 0.5)
+    licensed_operator_signals = detect_licensed_operator_signals(body_text)
+    operator_cta_signals = detect_operator_cta_signals(cta_buttons)
+    # Combined hard-evidence red flags — any of these existing while the validator rejects
+    # "gambling" means the rejection is contradicting directly-checkable page evidence.
+    hard_evidence_signals = licensed_operator_signals + operator_cta_signals
 
     validator_prompt = f"""URL: {url}
 Title: {title}
-Page Content: {body_text[:1200]}
+Page Content: {body_text[:2000]}
 
 --- PREVIOUS MODEL VERDICT ---
 Verdict: gambling
@@ -642,6 +885,10 @@ Is the cited evidence ACTUALLY present in the page text? Is this truly an online
 CRITICAL FALSE-POSITIVE CHECKS:
 - If this is a commercial bank, financial institution, hotel/restaurant, educational portal, government site, or physical e-commerce store, you MUST REJECT the gambling verdict and return "verdict": "regular", "validation": "rejected".
 - Do not confirm gambling solely because words like 'deposit', 'bonus', 'rewards', or 'win' appear in a banking, corporate, or retail context.
+
+CRITICAL FALSE-NEGATIVE CHECK (a real licensed operator must NOT be rejected):
+- If the page states it is "licensed and regulated" by a gambling regulator (e.g. Gambling Commission, Malta Gaming Authority, Curacao), cites a gambling license/account number, links to self-exclusion or problem-gambling support bodies (GamStop, GamCare, BeGambleAware, or similar), or says something like "you can register and place a bet" / "18+ to play" — this is standard, LEGALLY REQUIRED self-description for a real licensed gambling operator, not evidence of a support/advocacy site. Do NOT reject the gambling verdict just because the page talks about "responsible gambling" — every real licensed operator is required to include that exact language. Confirm "gambling" for these unless you find explicit evidence the SITE ITSELF is something else entirely (e.g. it is actually a hotel with rooms to book, or a bank with accounts to open) — the mere presence of compliance/regulatory language on an operator's own page is not that evidence.
+- The bet-slip or game grid is very often hidden behind login or loaded by JavaScript and will NOT appear in the page text you were given — do not require it to be visible before confirming gambling.
 
 Respond ONLY in valid JSON:
 {{
@@ -678,11 +925,13 @@ Respond ONLY in valid JSON:
                         if val_result is None:
                             continue
 
-                        val_verdict = val_result.get("verdict", "gambling")
-                        val_validation = val_result.get("validation", "confirmed")
+                        val_verdict = str(val_result.get("verdict", "gambling")).strip().lower()
+                        val_validation = str(val_result.get("validation", "confirmed")).strip().lower()
                         rejection_reason = val_result.get("rejection_reason")
 
-                        if val_validation == "rejected" and val_verdict != "gambling":
+                        if val_validation == "rejected" and val_verdict == "regular" and not hard_evidence_signals:
+                            # Clean, confident rejection with no licensed-operator red flags —
+                            # trust it directly, no need for a tie-breaker.
                             logger.info(
                                 f"[validator] REJECTED gambling for {url} ({model}): {rejection_reason}"
                             )
@@ -694,13 +943,66 @@ Respond ONLY in valid JSON:
                                 "reason": f"Validator rejected: {rejection_reason or val_result.get('final_reason', '')}",
                                 "challenge_override": True,
                             }
+                        elif val_validation == "rejected" and val_verdict == "regular" and hard_evidence_signals:
+                            # The validator rejected "gambling" despite the page itself citing a
+                            # gambling regulator, license number, or self-exclusion/problem-
+                            # gambling support body (GamStop/GamCare/BeGambleAware or similar) —
+                            # near-zero-noise signals a non-gambling site essentially never
+                            # contains. Small local models proved unreliable at weighing this
+                            # correctly even with explicit prompt instructions (live-reproduced
+                            # against a real licensed operator whose rejection reasoning
+                            # acknowledged the licensing language and still said "regular"). Do
+                            # not trust a single small model's confident-but-contradicted call —
+                            # force a decisive third look instead.
+                            dispute_reason = (
+                                f"Validator rejected despite licensed-operator signals present in page: "
+                                f"{', '.join(hard_evidence_signals[:4])} (validator said: {rejection_reason or val_result.get('final_reason', '')})"
+                            )
+                            tb_result = await _call_tiebreaker(url, title, body_text, analyst_verdict, dispute_reason)
+                            if tb_result is not None:
+                                return tb_result
+                            return {
+                                "verdict": "unconfirmed",
+                                "confidence": 0.3,
+                                "category": "validator_uncertain",
+                                "key_triggers": key_triggers,
+                                "reason": f"Disputed: {dispute_reason} (tie-breaker also unavailable)",
+                                "challenge_override": False,
+                            }
+                        elif val_validation == "rejected" and val_verdict != "gambling":
+                            # Validator disagreed with "gambling" but didn't commit to "regular"
+                            # either (e.g. hedged with "unconfirmed") — this is functionally the
+                            # same kind of dispute as "uncertain" below (observed live: a resort
+                            # page with explicit "online casino games and sports betting" text
+                            # got hedged here instead of confirmed) and deserves the same
+                            # decisive third look rather than being silently finalized as a hedge.
+                            dispute_reason = rejection_reason or val_result.get('final_reason', '') or f"validator rejected but returned verdict={val_verdict!r}"
+                            if hard_evidence_signals:
+                                dispute_reason += f" (hard evidence signals present: {', '.join(hard_evidence_signals[:4])})"
+                            tb_result = await _call_tiebreaker(url, title, body_text, analyst_verdict, dispute_reason)
+                            if tb_result is not None:
+                                return tb_result
+                            return {
+                                "verdict": "unconfirmed",
+                                "confidence": 0.3,
+                                "category": "validator_uncertain",
+                                "key_triggers": key_triggers,
+                                "reason": f"Validator disputed but did not confirm: {dispute_reason} (tie-breaker also unavailable)",
+                                "challenge_override": False,
+                            }
                         elif val_validation == "uncertain":
+                            dispute_reason = val_result.get('final_reason', '') or "validator uncertain"
+                            if hard_evidence_signals:
+                                dispute_reason += f" (hard evidence signals present: {', '.join(hard_evidence_signals[:4])})"
+                            tb_result = await _call_tiebreaker(url, title, body_text, analyst_verdict, dispute_reason)
+                            if tb_result is not None:
+                                return tb_result
                             return {
                                 "verdict": "unconfirmed",
                                 "confidence": 0.4,
                                 "category": "validator_uncertain",
                                 "key_triggers": key_triggers,
-                                "reason": f"Validator uncertain: {val_result.get('final_reason', '')}",
+                                "reason": f"Validator uncertain: {dispute_reason} (tie-breaker also unavailable)",
                                 "challenge_override": False,
                             }
                         else:
@@ -710,9 +1012,39 @@ Respond ONLY in valid JSON:
                             )
                             return confirmed_result
             except Exception as e:
-                logger.warning(f"[validator] Validation with model '{model}' failed for {url}: {e}")
+                logger.warning(
+                    f"[validator] Validation with model '{model}' failed for {url}: "
+                    f"{type(e).__name__}: {e or 'no error message'}"
+                )
 
-    return analyst_verdict
+    # Every validator model attempt failed (timeout / offline / bad response).
+    # Do NOT silently trust the Analyst's unvalidated "gambling" verdict here — that
+    # would mean every validator outage becomes a single-model decision with no
+    # second opinion, which is exactly where both false positives (Analyst
+    # over-triggers on a borderline legit site) and false negatives (Analyst
+    # under-triggers on a real gambling site) go unchecked. Route to unconfirmed
+    # so it gets requeued instead of shipped straight into a report/ban decision.
+    logger.warning(
+        f"[validator] All validator models unavailable for {url} — trying tie-breaker "
+        f"before falling back to 'unconfirmed' "
+        f"(Analyst said '{analyst_verdict.get('verdict')}', "
+        f"confidence={analyst_verdict.get('confidence')})"
+    )
+    tb_result = await _call_tiebreaker(url, title, body_text, analyst_verdict, "validator model(s) unavailable")
+    if tb_result is not None:
+        return tb_result
+    return {
+        "verdict": "unconfirmed",
+        "confidence": 0.0,
+        "category": "validator_unavailable",
+        "key_triggers": analyst_verdict.get("key_triggers", []),
+        "reason": (
+            f"Unconfirmed: Validator model unavailable, Analyst said "
+            f"'{analyst_verdict.get('verdict')}' but could not be independently "
+            f"confirmed — requeued for re-check"
+        ),
+        "challenge_override": False,
+    }
 
 
 async def classify_with_challenge(
@@ -850,7 +1182,7 @@ Respond ONLY in valid JSON:
             "reason": str(round1.get("reason", "AI Round 1 gambling classification")),
             "challenge_override": False,
         }
-        return await validate_gambling_verdict(url, title, body_text, analyst_verdict)
+        return await validate_gambling_verdict(url, title, body_text, analyst_verdict, cta_buttons)
 
     # ── ROUND 2: Challenge — AI must prove "regular" verdict with Ground Truth ──
     if verdict == "regular":
@@ -886,7 +1218,7 @@ Respond ONLY in valid JSON:
                     "reason": f"Live gambling domain signal ({domain_signal}) with content: {title[:50]}",
                     "challenge_override": True,
                 }
-                return await validate_gambling_verdict(url, title, body_text, analyst_verdict)
+                return await validate_gambling_verdict(url, title, body_text, analyst_verdict, cta_buttons)
 
         # Low confidence → send to Round 2 evidence challenge instead of an immediate flip
         # fast_mode=True: skip Round 2 ONLY for non-anchored regular domains
@@ -952,7 +1284,7 @@ Respond ONLY in valid JSON:
                 "reason": f"Challenge round corrected to gambling: {r2_reason}",
                 "challenge_override": True,
             }
-            return await validate_gambling_verdict(url, title, body_text, r2_analyst)
+            return await validate_gambling_verdict(url, title, body_text, r2_analyst, cta_buttons)
 
         # Validate Ground Truth in HTML (Anti-Hallucination)
         evidence_convincing, eval_msg = _evaluate_regular_evidence(r2_reason, r2_evidence, body_text, html)
@@ -966,7 +1298,7 @@ Respond ONLY in valid JSON:
                 "reason": f"{eval_msg} (Claimed: '{r2_reason[:80]}')",
                 "challenge_override": True,
             }
-            return await validate_gambling_verdict(url, title, body_text, reject_analyst)
+            return await validate_gambling_verdict(url, title, body_text, reject_analyst, cta_buttons)
 
         return {
             "verdict": "regular",

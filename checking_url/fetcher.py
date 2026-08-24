@@ -42,19 +42,34 @@ _BLOCKED_BODY_MARKERS = [
 
 
 def _classify_failure(status_code=None, html=None, error=None):
-    """Return failure_type string."""
+    """Return failure_type string.
+
+    'parked' (domain-for-sale / registrar parking lander) is intentionally distinct from
+    'dead_confirmed' (true 404 / no live content at all) — a parked-for-sale domain is
+    reachable and rendering *something*, it's just not gambling and not dead, so the
+    caller treats it as 'regular' rather than 'dead'. Body-marker checks run before the
+    plain 404 fallback so a 404 page that still renders parking-lander copy is classified
+    as 'parked', not 'dead_confirmed'.
+    """
     if error is not None:
         return 'connection_failed'
     if status_code in (403, 429):
         return 'blocked'
-    if status_code == 404:
-        return 'dead_confirmed'
+    if status_code is not None and 500 <= status_code < 600:
+        # Transient server-side errors (maintenance, overload, bad gateway) are not
+        # proof the domain is dead — lumping them in with 404/connection failures
+        # permanently freezes a possibly-live gambling site into the 'dead' bucket
+        # (dead domains are not auto-rechecked). Give them their own category so the
+        # caller can retry before giving up.
+        return 'server_error'
     if html:
         body = html[:5000].lower()
         if any(m in body for m in _BLOCKED_BODY_MARKERS):
             return 'blocked'
         if any(m in body for m in _PARKED_BODY_MARKERS):
-            return 'dead_confirmed'
+            return 'parked'
+    if status_code == 404:
+        return 'dead_confirmed'
     return 'connection_failed'
 
 
@@ -107,43 +122,59 @@ def _result_from_response(url: str, resp, latency: float) -> FetchResult:
     if any(m in body for m in _BLOCKED_BODY_MARKERS):
         result.failure_type = 'blocked'
     elif any(m in body for m in _PARKED_BODY_MARKERS):
-        result.failure_type = 'dead_confirmed'
+        result.failure_type = 'parked'
     return result
 
 
-async def fetch(url: str, domain_id: str, timeout_seconds=10, per_domain_delay=2.0, retries=2) -> FetchResult:
-    """Fetch a URL using AsyncFetcher with TLS/browser impersonation."""
-    start = asyncio.get_running_loop().time()
-    try:
-        resp = await AsyncFetcher.get(
-            url,
-            timeout=timeout_seconds,
-            impersonate=IMPERSONATE,
-            stealthy_headers=True,
-            follow_redirects=True,
-            retries=retries,
-        )
-    except Exception as e:
-        # If HTTPS failed (e.g. SSL cert issue, connection refused), try plain HTTP once
-        if url.startswith("https://"):
-            http_url = "http://" + url[8:]
-            try:
-                resp = await AsyncFetcher.get(
-                    http_url,
-                    timeout=timeout_seconds,
-                    impersonate=IMPERSONATE,
-                    stealthy_headers=True,
-                    follow_redirects=True,
-                    retries=1,
-                )
-                latency = asyncio.get_running_loop().time() - start
-                return _result_from_response(http_url, resp, latency)
-            except Exception:
-                pass
+async def fetch(url: str, domain_id: str, timeout_seconds=10, per_domain_delay=2.0, retries=2, server_error_retries=2) -> FetchResult:
+    """Fetch a URL using AsyncFetcher with TLS/browser impersonation.
+
+    A response classified as 'server_error' (5xx) is retried up to
+    `server_error_retries` times with a short backoff before giving up — these are
+    often transient (maintenance/overload), and treating them as permanently dead
+    on the first hit would freeze a possibly-live gambling site into the 'dead'
+    bucket, which is never auto-rechecked.
+    """
+    result = None
+    for attempt in range(server_error_retries + 1):
+        start = asyncio.get_running_loop().time()
+        try:
+            resp = await AsyncFetcher.get(
+                url,
+                timeout=timeout_seconds,
+                impersonate=IMPERSONATE,
+                stealthy_headers=True,
+                follow_redirects=True,
+                retries=retries,
+            )
+        except Exception as e:
+            # If HTTPS failed (e.g. SSL cert issue, connection refused), try plain HTTP once
+            if url.startswith("https://"):
+                http_url = "http://" + url[8:]
+                try:
+                    resp = await AsyncFetcher.get(
+                        http_url,
+                        timeout=timeout_seconds,
+                        impersonate=IMPERSONATE,
+                        stealthy_headers=True,
+                        follow_redirects=True,
+                        retries=1,
+                    )
+                    latency = asyncio.get_running_loop().time() - start
+                    return _result_from_response(http_url, resp, latency)
+                except Exception:
+                    pass
+
+            latency = asyncio.get_running_loop().time() - start
+            return FetchResult(url=url, latency=latency, error=str(e), failure_type='connection_failed')
 
         latency = asyncio.get_running_loop().time() - start
-        return FetchResult(url=url, latency=latency, error=str(e), failure_type='connection_failed')
+        result = _result_from_response(url, resp, latency)
 
-    latency = asyncio.get_running_loop().time() - start
-    return _result_from_response(url, resp, latency)
+        if result.failure_type != 'server_error' or attempt >= server_error_retries:
+            return result
+
+        await asyncio.sleep(per_domain_delay * (attempt + 1))
+
+    return result
 

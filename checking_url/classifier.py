@@ -3,17 +3,64 @@ checking_url/classifier.py — High-Accuracy Heuristic Pre-Classifier.
 
 Rules (Updated Architecture — Triple-Lock):
 - Dead / Blocked -> handle upstream
-- Parked / For-Sale landers -> send to AI with parked flag (no longer auto-reject)
+- Parked / For-Sale landers -> instant "regular" (reachable, not gambling, not dead)
 - Negative Archetypes (Educational, E-Commerce, News/Wiki) -> auto-regular ONLY if >= 4 signals AND 0 keywords
-- Score >= 5.0 (STRONG keywords weighted 2.0, WEAK 1.0) -> "gambling" (confirmed immediately, no AI needed)
-- Score 2.5 to <5.0 -> "needs_ai" (escalated to Ollama AI Challenge Round)
-- Score < 2.5 -> "regular" (no AI needed)
+- Score (STRONG keywords weighted 1.0, WEAK 0.5) >= 4.0 AND a strong/actionable signal is
+  present -> "gambling" (confirmed immediately, no AI needed)
+- Any strong signal present at all (regardless of total score) -> "needs_ai" (escalated to
+  Ollama AI Challenge Round)
+- Hospitality/negative-archetype pages with score < 1.5 and no hard actionable signal ->
+  "regular" (no AI needed)
+- Everything else -> "regular" (no AI needed)
 """
 import json
 from pathlib import Path
 from bs4 import BeautifulSoup
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+_TRUSTED_DOMAINS_CACHE: set | None = None
+
+
+def load_trusted_domains() -> set:
+    """Load the institutional allowlist (trusted_domains.json) — domains that skip
+    classification entirely and are always 'regular', no matter what the heuristics or AI
+    would otherwise say. Reserved for domains you are certain about (major banks,
+    regulators, government bodies) since a match here bypasses every other safety check."""
+    global _TRUSTED_DOMAINS_CACHE
+    if _TRUSTED_DOMAINS_CACHE is not None:
+        return _TRUSTED_DOMAINS_CACHE
+    path = PROJECT_ROOT / "trusted_domains.json"
+    domains = set()
+    if path.exists():
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            domains = set(str(d).strip().lower().removeprefix("www.") for d in data.get("domains", []) if d)
+        except Exception as e:
+            print(f"[classifier WARNING] Failed to load trusted_domains.json: {e}")
+    _TRUSTED_DOMAINS_CACHE = domains
+    return domains
+
+
+def is_trusted_domain(url_or_domain: str) -> bool:
+    """Check the registrable domain (and its parent, for subdomains) against the allowlist."""
+    if not url_or_domain:
+        return False
+    trusted = load_trusted_domains()
+    if not trusted:
+        return False
+    clean = url_or_domain.lower()
+    clean = clean.split("://")[-1].split("/")[0].split(":")[0].removeprefix("www.")
+    if clean in trusted:
+        return True
+    # Allow a matched parent domain to cover subdomains (e.g. netbanking.hdfcbank.com)
+    parts = clean.split(".")
+    for i in range(1, len(parts) - 1):
+        if ".".join(parts[i:]) in trusted:
+            return True
+    return False
+
 
 def _get_keywords_file() -> Path:
     candidates = list(PROJECT_ROOT.glob("gambling_top_*_keywords.json")) + list(PROJECT_ROOT.glob("*keyword*.json"))
@@ -49,11 +96,11 @@ STRONG_GAMBLING_SIGNALS = {
     "satta matka", "satta king", "kalyan matka", "disawar result", "fix satta", "fix matka",
     "online poker", "poker tournament real money", "poker cash game",
     "online blackjack", "play blackjack", "blackjack table", "card counting",
-    "slot machines", "slot games", "video slots", "free spins", "claim free spins",
+    "slot machines", "slot games", "video slots", "claim free spins",
     "online lottery", "lottery result", "lottery prediction", "lucky draw winner",
     "betting id", "demo id", "whatsapp betting", "telegram betting",
     "wagering requirement", "wagering requirements", "bonus wagering",
-    "cashback on losses", "deposit bonus", "no deposit bonus", "no-deposit bonus",
+    "cashback on losses", "no deposit bonus", "no-deposit bonus",
     "casino vip", "vip casino", "live baccarat", "live roulette", "live dealer",
     "crash game", "aviator game", "aviator betting", "aviator crash",
     "teen patti", "andar bahar", "jhandi munda", "dragon tiger", "responsible gambling",
@@ -64,14 +111,28 @@ STRONG_GAMBLING_SIGNALS = {
     "win real money", "real cash games", "play for real money", "real money app",
 }
 
-# Actionable wagering signals — required to override confirmed news/editorial/regulatory sites
-ACTIONABLE_WAGERING_SIGNALS = {
-    "deposit money", "deposit now", "instant deposit", "deposit funds",
-    "withdraw money", "instant withdrawal", "withdrawal request", "cashier",
+# Actionable wagering signals — required to override confirmed news/editorial/regulatory sites.
+# Split into unambiguous phrases (never appear on a legit bank/e-commerce/hospitality site) vs
+# generic finance/retail vocabulary that ALSO needs a co-occurring gambling-context word before
+# it counts — "cashier"/"instant withdrawal"/"deposit now" are completely normal on a bank's
+# net-banking or ATM page and were previously enough, on their own, to null out a verified
+# commercial-banking archetype match and auto-lock a false "gambling" verdict.
+ACTIONABLE_WAGERING_SIGNALS_UNAMBIGUOUS = {
     "play for real money", "win real money", "real cash games", "real money app",
     "claim bonus now", "claim welcome bonus", "wagering requirement", "bonus wagering",
     "betting id", "demo id", "whatsapp betting", "telegram betting", "place bet now",
-    "aviator crash", "dragon tiger live", "teen patti live", "jodi chart", "panel chart"
+    "aviator crash", "dragon tiger live", "teen patti live", "jodi chart", "panel chart",
+}
+ACTIONABLE_WAGERING_SIGNALS_GENERIC = {
+    "deposit money", "deposit now", "instant deposit", "deposit funds",
+    "withdraw money", "instant withdrawal", "withdrawal request", "cashier",
+}
+ACTIONABLE_WAGERING_SIGNALS = ACTIONABLE_WAGERING_SIGNALS_UNAMBIGUOUS | ACTIONABLE_WAGERING_SIGNALS_GENERIC
+
+# Gambling-context words that must co-occur with a GENERIC actionable phrase for it to count
+_ACTIONABLE_SIGNAL_CONTEXT = {
+    "bet", "betting", "casino", "wager", "wagering", "sportsbook", "bookmaker",
+    "satta", "matka", "poker", "rummy", "aviator", "odds", "gambling",
 }
 
 # WEAK / AMBIGUOUS signals — can appear on non-gambling sites too
@@ -131,6 +192,16 @@ def _extract_text(html: str) -> str:
         for meta in soup.find_all('meta', attrs={'name': True, 'content': True}):
             if meta['name'].lower() in ('description', 'keywords', 'og:description', 'og:title'):
                 parts.append(meta['content'])
+        # img alt text is invisible to get_text() (it only returns text NODES, never attribute
+        # values) but carries real content on image-heavy pages — banner carousels, promo
+        # graphics, and jackpot/game artwork routinely carry their marketing copy ONLY as alt
+        # text for SEO/accessibility, with zero corresponding visible text node. A gambling
+        # site whose promotional copy lives entirely in banner alt text was previously
+        # scoring as if that copy didn't exist at all.
+        for img in soup.find_all('img', attrs={'alt': True}):
+            alt_text = img['alt'].strip()
+            if alt_text:
+                parts.append(alt_text)
         return ' '.join(parts).lower()
     except Exception:
         # Fallback fast regex stripper if BeautifulSoup fails
@@ -248,6 +319,23 @@ NEGATIVE_ARCHETYPES = {
         "insurance", "policyholder", "underwriting", "claims", "coverage",
         "life insurance", "health insurance", "property insurance", "casualty",
         "reinsurance", "premium payments", "chubb", "file a claim", "quote"
+    ],
+    # A site that REVIEWS, RANKS, or COMPARES gambling operators (affiliate/SEO content
+    # sites) is, by design, saturated with the exact same STRONG_GAMBLING_SIGNALS phrases
+    # ("online casino", "sports betting", "deposit bonus"...) as a real operator, so it was
+    # previously indistinguishable from one and got auto-locked to "gambling" with zero AI
+    # review via the score>=4.0 + has_strong_signals path. This archetype exists specifically
+    # to route that case to needs_ai instead of an instant unreviewed lock — it does NOT
+    # force "regular" (a review site with a real deposit/betting CTA of its own still needs
+    # scrutiny), it only removes the false certainty of an instant lock.
+    "gambling_review_affiliate": [
+        "editor rating", "editor's pick", "expert review", "in-depth review",
+        "read our review", "read full review", "affiliate disclosure",
+        "we may earn commission", "we may earn a commission", "compare casinos",
+        "casino comparison", "top rated casinos", "casino ranking", "our ranking",
+        "betting site reviews", "sportsbook reviews", "how we rate", "review methodology",
+        "our top picks", "compare bonuses", "bonus comparison", "trusted casino reviews",
+        "independent reviews", "best online casinos", "best betting sites",
     ],
     "commercial_banking": [
         "personal banking", "agri banking", "nri banking", "business banking",
@@ -368,22 +456,27 @@ def is_gambling_domain(url_or_domain: str) -> tuple[bool, str]:
 
     domain_body = clean.split(".")[0]
 
-    # Whitelist check for known non-gambling domains
-    if any(ng in domain_body for ng in NON_GAMBLING_BET_WORDS):
-        return False, ""
-
     # Never anchor domains whose name clearly signals trading/financial services
     if any(tw in domain_body for tw in _TRADING_DOMAIN_WORDS):
         return False, ""
 
-    # Check domain name tokens with hyphen/digit boundaries
+    # Check domain name tokens with hyphen/digit boundaries. The whitelist is applied
+    # PER-TOKEN (not to the whole domain_body) — a domain_body-wide check meant a single
+    # whitelisted false-positive word anywhere in the name (e.g. "window" in
+    # "casino-window.com") silently masked a genuine gambling brand token ("casino") sitting
+    # in a different token of the same domain, since the whole-string check short-circuited
+    # before the token loop ever ran.
     tokens = re.split(r"[-_\d.]+", domain_body)
     for token in tokens:
         if not token:
             continue
+        # A token that IS (or contains) a known non-gambling false-positive word never
+        # counts as a match — but only excludes THIS token, not sibling tokens.
+        if any(ng in token for ng in NON_GAMBLING_BET_WORDS):
+            continue
         for kw in GAMBLING_DOMAIN_KEYWORDS:
             # Require exact token match or clean subtoken boundary to prevent false positives like 'spinach'
-            if kw == token or (len(kw) >= 4 and kw in token and not any(ng in token for ng in NON_GAMBLING_BET_WORDS)):
+            if kw == token or (len(kw) >= 4 and kw in token):
                 return True, f"domain_keyword({kw})"
 
     return False, ""
@@ -408,6 +501,12 @@ def classify(html: str, keywords: set[str] | None = None, url: str | None = None
     if not html and not screenshot_input:
         return "regular", []
 
+    # Institutional allowlist: bypass every downstream check entirely for domains you're
+    # certain about (trusted_domains.json) — zero risk of a heuristic/AI mistake ever
+    # touching your highest-consequence sites.
+    if url and is_trusted_domain(url):
+        return "regular", ["allowlist:trusted_domain"]
+
     # Hard exclusions for official government, academic, and banking TLDs
     if url:
         clean_host = url.lower().split("://")[-1].split("/")[0].split(":")[0].removeprefix("www.")
@@ -426,12 +525,27 @@ def classify(html: str, keywords: set[str] | None = None, url: str | None = None
         except Exception:
             pass
 
-    kw_set = keywords if keywords is not None else load_keywords()
-
     # Check domain parking / for-sale markers first
     is_parked, parked_hits = is_parked_or_for_sale(text, html or "", url or "")
     if is_parked:
         return "regular", []
+
+    # Check Domain Anchor early — cheap (no full ~995-keyword scan) — so a gambling-TLD
+    # match can short-circuit BEFORE doing any of the expensive content analysis below.
+    is_g_domain, domain_signal = is_gambling_domain(url) if url else (False, "")
+
+    # Per explicit instruction: for gambling TLDs (.casino/.bet/.poker/.bingo/.lotto), skip
+    # content classification entirely — liveness is the only bar. By this point the page has
+    # already passed the parked/for-sale gate above and the trusted-allowlist / gov-edu-bank
+    # TLD exclusions earlier in this function, so reaching here already means "reachable, not
+    # parked, not an institutional domain" — sufficient to lock "gambling" regardless of page
+    # content. Returning here also skips the ~995-keyword regex scan, 14-category negative-
+    # archetype check, hospitality check, and actionable-signal check below entirely, since
+    # none of that is needed (or used) for this decision — real, measurable cost at scale.
+    if domain_signal.startswith("gambling_tld("):
+        return "gambling", [domain_signal]
+
+    kw_set = keywords if keywords is not None else load_keywords()
 
     # Match gambling keywords in visible text using strict word boundaries
     matched = [kw for kw in kw_set if re.search(rf"\b{re.escape(kw)}\b", text)]
@@ -445,43 +559,72 @@ def classify(html: str, keywords: set[str] | None = None, url: str | None = None
     # Check hospitality gate (hotel/resort/restaurant amenity pages)
     is_hosp, hosp_hits = is_hospitality_site(text)
 
-    # Hard actionable signals: explicit online real-money deposit / cashout / betting engines
-    has_hard_online_signals = any(re.search(rf"\b{re.escape(kw)}\b", text) for kw in ACTIONABLE_WAGERING_SIGNALS)
+    # Hard actionable signals: explicit online real-money deposit / cashout / betting engines.
+    # Unambiguous phrases always count; generic banking/retail phrases (cashier, instant
+    # withdrawal, deposit now...) only count if gambling-context vocabulary also appears —
+    # otherwise a bank's ATM/net-banking page trips this on a single incidental word.
+    has_hard_online_signals = any(
+        re.search(rf"\b{re.escape(kw)}\b", text) for kw in ACTIONABLE_WAGERING_SIGNALS_UNAMBIGUOUS
+    ) or (
+        any(re.search(rf"\b{re.escape(kw)}\b", text) for kw in ACTIONABLE_WAGERING_SIGNALS_GENERIC)
+        and any(re.search(rf"\b{re.escape(c)}\b", text) for c in _ACTIONABLE_SIGNAL_CONTEXT)
+    )
     has_strong_signals = any(kw in STRONG_GAMBLING_SIGNALS for kw in matched)
 
-    # Check Domain Anchor first (.bet, .casino, or gambling keywords in domain)
-    is_g_domain, domain_signal = is_gambling_domain(url) if url else (False, "")
-
-    # If domain has an explicit gambling anchor (e.g. .bet, .casino, or "poker"/"bet" in name):
+    # If domain has an explicit gambling-KEYWORD anchor (e.g. "poker"/"bet"/"casino" in the
+    # name, but not a gambling TLD — that case already returned above): a domain match alone
+    # is NOT proof — GAMBLING_DOMAIN_KEYWORDS matches substrings (e.g. "stake"/"spin"/
+    # "monopoly"), so it can hit unrelated brands/institutions. Only an unambiguous multi-word
+    # STRONG signal on the live page is trustworthy enough to auto-lock without AI. Anything
+    # murkier (hospitality wording, negative-archetype wording, weak-keyword-only, or zero
+    # keywords on a JS shell) always goes to the AI for a second opinion instead of being
+    # silently decided by heuristics alone in either direction.
     if is_g_domain:
-        if is_hosp and not has_hard_online_signals:
-            return "regular", matched or [domain_signal]
-        # Any keyword hit or strong gambling TLD -> confirmed gambling
-        if matched or any(url.lower().endswith(t) for t in GAMBLING_TLDS):
+        if has_strong_signals:
+            # A review/ranking/affiliate site about gambling is, by design, saturated with
+            # the same strong signal phrases a real operator uses ("online casino", "sports
+            # betting"...) — has_strong_signals alone cannot tell them apart. If the negative
+            # archetype gate also fired and there's no actionable wagering CTA of this site's
+            # own, this needs AI judgment, not an instant lock.
+            if is_neg and not has_hard_online_signals:
+                return "needs_ai", (matched + [domain_signal]) if matched else [domain_signal]
             return "gambling", matched or [domain_signal]
-        # If 0 keywords found in raw HTML (e.g. JS single-page app), send to AI review
-        return "needs_ai", [domain_signal]
+        return "needs_ai", (matched + [domain_signal]) if matched else [domain_signal]
 
     # Absolute Zero False-Positive Gate for Non-Anchored Domains:
-    # If page is confirmed hotel/resort/dining OR a non-gambling archetype and has NO hard online wagering proof -> REGULAR
-    if (is_hosp or is_neg) and not has_hard_online_signals:
+    # If page is confirmed hotel/resort/dining OR a non-gambling archetype, has NO hard online
+    # wagering proof, AND has essentially no gambling-keyword presence at all -> REGULAR.
+    # Disguising a real betting site as a travel/hotel/hospitality front (or padding it with
+    # negative-archetype boilerplate) is a known evasion tactic — requiring score to also be
+    # near-zero means a site that scores even mildly on gambling keywords gets an AI look
+    # instead of being dismissed on hospitality/archetype wording alone.
+    if (is_hosp or is_neg) and not has_hard_online_signals and score < 1.5:
         return "regular", matched
 
     # Standard non-anchored domain logic:
     # 1. High Score (>= 4.0): Require at least ONE strong or actionable signal to auto-lock gambling without AI
     if score >= 4.0:
         if (is_hosp or is_neg) and not has_hard_online_signals:
-            return "regular", matched
+            return "needs_ai", matched
         if has_strong_signals or has_hard_online_signals:
             return "gambling", matched
         # High score consisting purely of weak/promotional terms -> route to AI for verification
         return "needs_ai", matched
 
-    # 2. Medium Score (>= 2.0) with at least 1 strong signal:
-    if score >= 2.0 and has_strong_signals:
+    # 2. Any strong signal at all, regardless of total score: STRONG_GAMBLING_SIGNALS is a
+    # tightly-curated, low-noise phrase list ("responsible gambling", "online casino", "sports
+    # betting"...) specifically because those phrases almost never appear on a non-gambling
+    # site. Previously this required score >= 2.0 in addition, meaning a real operator whose
+    # visible text was thin (e.g. most of the marketing copy living in image alt text, or a
+    # minimal single-page site) with exactly ONE strong-signal hit and nothing else could fall
+    # through to instant "regular" with zero AI review despite unambiguous evidence — this is
+    # what happened live with a genuine UK Gambling Commission-licensed operator whose only
+    # scored hits were "responsible gambling" (strong) + "bet" (weak) = 1.5, just under the old
+    # 2.0 floor. A lone strong signal is reason enough for an AI look by itself.
+    if has_strong_signals:
         return "needs_ai", matched
 
-    # 3. Low Score (< 2.0 or no strong signal): Strictly Regular Website
+    # 3. No strong signal and score too low to be meaningful: Strictly Regular Website
     return "regular", matched
 
 
