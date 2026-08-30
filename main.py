@@ -101,7 +101,8 @@ def ask_checking_mode() -> str | None:
     print("  3. Re-check Unconfirmed Sites  (Re-evaluate pending sites with Ollama AI)")
     print("  4. Re-check Regular Websites   (Re-verify non-gambling sites to detect new gambling content)")
     print("  5. Re-check Dead Sites         (Re-test offline or DNS-failed sites to see if back online)")
-    sub_choice = input("\nEnter choice (0-5) [default: 1]: ").strip()
+    print("  6. Re-check For-Sale Sites     (Re-test parked/registrar landers in case they've gone live)")
+    sub_choice = input("\nEnter choice (0-6) [default: 1]: ").strip()
     if sub_choice in ("0", "b", "back"):
         return None
     if sub_choice == "2":
@@ -112,6 +113,8 @@ def ask_checking_mode() -> str | None:
         return "regular"
     if sub_choice == "5":
         return "dead"
+    if sub_choice == "6":
+        return "for_sale"
     return "new"
 
 
@@ -275,6 +278,29 @@ def run_known_gambling_scan():
 
 
 
+def run_reported_blocked_checker():
+    import checking_url.reported_blocked_checker as rbc
+
+    print("\n--- Recheck Reported/Exported Gambling Domains (ISP/Regulator Block Status) ---")
+    print("    Re-fetches every exported 'gambling' domain to see if it's gone unreachable")
+    print("    since being reported.")
+    print(f"    Needs {rbc.CONFIRM_ATTEMPTS} failed attempts {rbc.CONFIRM_DELAY_SECONDS:.0f}s apart to count as down at all --")
+    print("    rules out a single transient blip. Confirmed down, it's marked")
+    print("    'reported_down'. Found reachable again on a later run, it reverts")
+    print("    back to 'gambling'. Run this whenever you want -- it's on-demand, not automatic.\n")
+
+    confirm = input("[?] Start recheck now? (y/n) [default: y]: ").strip().lower()
+    if confirm in ("n", "no"):
+        print("[+] Cancelled.")
+        return
+
+    concurrency = int(os.getenv("CHECK_CONCURRENCY", os.getenv("MAX_CONCURRENT_FETCHES", 20)))
+    try:
+        asyncio.run(rbc.run(concurrency=concurrency))
+    except KeyboardInterrupt:
+        print("\n[+] Stopped by user. Already-checked domains were saved — run again to continue.")
+
+
 def interactive_menu():
     while True:
         print("\n" + "=" * 65)
@@ -284,10 +310,11 @@ def interactive_menu():
         print("2. checking_url          (Fetch, AI Classify & Screenshot)")
         print("3. export_domains        (Export Reports & Divide into Batches)")
         print("4. known gambling scan   (Import list, Screenshot live, Mark dead)")
+        print("5. recheck reported      (Are exported/reported domains blocked yet?)")
         print("0. Exit")
         print("=" * 65)
 
-        choice = input("Select an option (1-4, 0 to exit): ").strip()
+        choice = input("Select an option (1-5, 0 to exit): ").strip()
 
         if choice == "1":
             run_searxng_search()
@@ -297,11 +324,13 @@ def interactive_menu():
             run_export_domains()
         elif choice == "4":
             run_known_gambling_scan()
+        elif choice == "5":
+            run_reported_blocked_checker()
         elif choice == "0" or choice.lower() in ("exit", "q", "quit"):
             print("Exiting.")
             break
         else:
-            print("[!] Invalid option. Please enter 1-4 or 0 to exit.")
+            print("[!] Invalid option. Please enter 1-5 or 0 to exit.")
 
 
 def shutdown_background_services():

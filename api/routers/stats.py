@@ -52,6 +52,7 @@ def get_stats():
 
         gambling = status_map.get("gambling", 0)
         regular = status_map.get("regular", 0)
+        for_sale = status_map.get("for_sale", 0)
         blocked = status_map.get("blocked", 0)
         dead = status_map.get("dead", 0)
         unconfirmed = status_map.get("unconfirmed", 0)
@@ -152,6 +153,7 @@ def get_stats():
             "total_checked": total_checked,
             "gambling": gambling,
             "regular": regular,
+            "for_sale": for_sale,
             "blocked": blocked,
             "dead": dead,
             "unconfirmed": unconfirmed,

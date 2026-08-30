@@ -571,6 +571,44 @@
   </div>
 </div>
 
+<!-- Domain Detail Split View: live site on the left, info dossier on the right -->
+<div class="modal-overlay hidden" id="domain-detail-modal" onclick="if(event.target === this) closeDomainDetailModal()">
+  <div class="detail-modal-box">
+    <div class="detail-modal-header">
+      <div class="modal-title" id="dd-modal-title">🌐 Domain Inspector</div>
+      <div class="detail-search-box">
+        <input type="text" id="dd-search-input" placeholder="🔍 Search another domain (e.g. bet365.com)" onkeydown="if(event.key==='Enter') searchDomainInDetailModal()">
+        <button class="btn btn-ghost btn-sm" onclick="searchDomainInDetailModal()">Go</button>
+      </div>
+      <button class="btn btn-ghost btn-sm" onclick="closeDomainDetailModal()">✕ Close</button>
+    </div>
+    <div class="detail-modal-body">
+      <!-- Left: live site, embedded inline instead of a new tab -->
+      <div class="detail-live-pane">
+        <div class="detail-live-toolbar">
+          <span class="mono muted" style="font-size:12px" id="dd-live-url">https://example.com</span>
+          <div style="display:flex;gap:8px;align-items:center">
+            <label class="toggle-control" style="gap:6px" title="Served through our own proxy so it renders even if the site blocks embedding. Sandboxed — can't read this dashboard's data, open popups, submit forms, or navigate away. On by default; turn off for a script-free static snapshot instead.">
+              <input type="checkbox" id="dd-enable-js" checked onchange="reloadDomainDetailFrame()">
+              <span class="toggle-switch"></span>
+              <span class="toggle-text" style="font-size:11px">JS Preview (on)</span>
+            </label>
+            <a id="dd-open-new-tab" href="#" target="_blank" rel="noopener noreferrer" class="btn btn-ghost btn-xs" title="Open in a new tab instead">↗ New Tab</a>
+          </div>
+        </div>
+        <div class="detail-live-frame-wrap">
+          <iframe id="dd-live-iframe" src="about:blank" sandbox="allow-scripts" referrerpolicy="no-referrer"></iframe>
+        </div>
+      </div>
+
+      <!-- Right: compact info dossier -->
+      <div class="detail-info-pane" id="dd-info-pane">
+        <!-- populated by JS -->
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- Generic Confirmation Modal -->
 <div class="modal-overlay hidden" id="confirm-modal">
   <div class="modal-box">

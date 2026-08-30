@@ -14,18 +14,22 @@ An enterprise-grade, high-performance Python pipeline for discovering, classifyi
 ## 1. PROJECT OVERVIEW
 
 ### Elevator Pitch
-**gamblingwebfind** is an end-to-end automated intelligence platform designed to discover online gambling and wagering portals across both live web search indices and historical web archives. By combining high-speed TLS-impersonating fetchers, a 988-keyword heuristic engine, a two-stage local LLM challenge system (Ollama `qwen2.5:3b`), and headless browser screenshot validation, the platform detects illegal betting operators with high accuracy, zero false-positive locks, and automated generation of PDF and Excel compliance reports.
+**gamblingwebfind** is an end-to-end automated intelligence platform designed to discover online gambling and wagering portals across both live web search indices and historical web archives. By combining high-speed TLS-impersonating fetchers, a 1,000+ term keyword heuristic engine, a dual-model + tiebreaker local LLM challenge system (Ollama, built from `qwen2.5:3b`/`qwen2.5:7b-instruct`), non-English page translation, headless browser screenshot validation, and an independent OCR + vision-model visual audit layer, the platform detects illegal betting operators with high recall, bounded false-positive risk, and automated generation of PDF/Excel compliance reports plus a live web dashboard.
 
 ### Key Capabilities
-- **Multi-Source Domain Discovery**: Mined via SearXNG meta-search queries (Stage 0) and Common Crawl parquet datasets (Stage 1).
+- **Multi-Source Domain Discovery**: Mined via SearXNG meta-search queries (Stage 0), Common Crawl parquet datasets (Stage 1), and manual CSV/known-gambling-list imports.
 - **TLS-Impersonating HTTP Engine**: Uses `Scrapling` with `curl_cffi` Chrome fingerprinting to bypass standard network blocks and anti-bot measures.
+- **Non-English Page Translation**: Pages that fail an offline `langdetect` English check are translated via the local LLM before classification — the English-only keyword list and AI prompts would otherwise be blind to a gambling site written in Russian, Chinese, Portuguese, etc.
 - **Triple-Lock Classification**:
-  1. *988-Keyword Weighted Pre-Screen*: Instant fast-path categorization for high-confidence targets.
-  2. *Dual-Round Local AI Challenge*: Ollama-based Analyst & Validator challenge rounds for ambiguous sites ($2.5 \le \text{Score} < 5.0$).
+  1. *Keyword-Weighted Pre-Screen*: Instant fast-path categorization for high-confidence targets ($\text{Score} \ge 4.0$ + strong signal), or a domain-anchor/gambling-TLD lock.
+  2. *Dual-Round Local AI Challenge*: Ollama-based Analyst & Validator challenge rounds for ambiguous sites (any strong signal, at any score), with a `qwen2.5:7b-instruct` tiebreaker model arbitrating genuine Analyst/Validator disagreement, and a small vision model (`moondream`) as a last resort for canvas/WebGL-rendered pages with zero readable text.
   3. *Proof-Required Visual Capture*: Playwright headless screenshotting to visually confirm gambling portals before generating reports.
-- **Dynamic Failure Classification**: Categorizes non-responsive domains into `blocked` (WAF/Cloudflare 403), `dead` (404/DNS failure), or `unconfirmed` (network timeout/Ollama offline) to prevent infinite re-processing loops.
+- **Independent Screenshot Visual Audit**: A second opinion on top of the text-based verdict — OCR + a vision-model read of the already-captured screenshot itself, for domains already marked `gambling`. Never overturns a verdict on its own; a mismatch is flagged into the human review queue instead.
+- **Reported-Blocked Confirmation**: For domains already exported/reported for blocking, an on-demand recheck marks a `gambling` domain `reported_down` once confirmed unreachable (multiple spaced-out attempts rule out a transient blip) — the expected outcome once an ISP/regulator acts on the report. Reachable again later, it reverts straight back to `gambling`.
+- **Dynamic Failure Classification**: Categorizes non-responsive domains into `blocked` (WAF/Cloudflare 403), `dead` (404/DNS failure), `for_sale` (parked/registrar lander), or `unconfirmed` (network timeout/Ollama offline) — with a bounded retry-count cap and an AI circuit breaker so a stuck domain stops cycling forever without ever being silently dropped from review.
 - **Audit-Ready Reporting & Batch Splitting**: Generates Word (`.docx`), PDF (`.pdf`), and Excel (`.xlsx`) report bundles with clickable hyperlinks, auto-split into target size bounds ($\le 24\text{ MB}$ or $1,000$ links) using `PyMuPDF`.
-- **REST API & Interactive CLI**: Dual control interfaces — FastAPI REST server for programmatic pipelines and an interactive terminal menu (`main.py`).
+- **Live Web Dashboard**: A FastAPI-served dashboard (`web/`) with a full-screen domain inspector — the live site embedded inline via a server-side rendering proxy (works even when a site blocks direct iframe embedding), a domain-search box, and a side panel showing every field the pipeline recorded (IP, ASN, matched keywords, AI confidence/category, reason).
+- **REST API & Interactive CLI**: Dual control interfaces — FastAPI REST server (`api/`) for the dashboard and programmatic access, and an interactive terminal menu (`main.py`).
 
 ### Target Users & Use Cases
 - **Regulatory Authorities & Compliance Officers**: Monitor illegal wagering operations, unlicensed sportsbooks, and unapproved betting syndicates.
@@ -85,15 +89,22 @@ An enterprise-grade, high-performance Python pipeline for discovering, classifyi
 2. **`find_gambling.py` & `historical_common_crawl.py` (Stage 1)**: Queries AWS Common Crawl columnar parquet indexes to discover historical gambling landers.
 3. **`db/mongo_client.py` (Data Persistence Layer)**: Manages MongoDB connections, domain normalization (using `.removeprefix("www.")`), state tracking (`active`, `processed`, `status`), and retry policies.
 4. **`checking_url/` (Stage 2 Verification Engine)**:
-   - `fetcher.py`: Asynchronously fetches target pages while impersonating browser TLS fingerprints; classifies network failures (`blocked`, `dead`, `connection_failed`).
-   - `classifier.py`: Evaluates HTML against 988 keywords and regex signals, applying negative archetype gates (education, news, hospital) to suppress false positives.
-   - `ai_classifier.py`: Drives local Ollama LLM (`qwen2.5:3b`) using Analyst and Validator models to resolve ambiguous sites.
-   - `runner.py`: Orchestrates parallel async task queues, progress reporting (`tqdm`), and immediate visual proof capture via `BrowserPool`.
+   - `fetcher.py`: Asynchronously fetches target pages while impersonating browser TLS fingerprints; classifies network failures (`blocked`, `dead`, `connection_failed`, `server_error`, `parked`).
+   - `classifier.py`: Evaluates HTML against 1,000+ keywords/phrases and regex signals, applying negative archetype gates (education, news, hospitality, banking) to suppress false positives.
+   - `ai_classifier.py`: Drives local Ollama LLMs — `gambling-analyst`/`gambling-validator` (built from `qwen2.5:3b`) for the two-round challenge, `qwen2.5:7b-instruct` as a tiebreaker on genuine disagreement, `moondream` as a vision-model last resort, plus `translate_to_english_if_needed()` for non-English pages.
+   - `runner.py`: Orchestrates parallel async task queues, progress reporting (`tqdm`), immediate visual proof capture via `BrowserPool`, an AI circuit breaker (skips waiting out another Ollama timeout once recent calls are mostly failing), and per-domain `unconfirmed` retry-count tracking.
+   - `known_gambling_runner.py`: Liveness-only recheck for an imported list of already-known gambling domains (no content classification, just alive/dead + screenshot).
+   - `reported_blocked_checker.py`: On-demand recheck for exported domains, confirming ISP/regulator blocking (`gambling` <-> `reported_down`).
+   - `screenshot_visual_audit.py` (menu option 6) / `screenshot_folder_sorter.py` (CLI-only, `python -m checking_url.screenshot_folder_sorter`): OCR + vision-model cross-check of captured screenshots — the audit annotates DB records for gambling domains; the sorter moves confirmed-gambling images out of any folder you point it at (never the permanent archive).
+   - `review_queue.py`: Tiered human-review queue generator, prioritizing the verdicts most likely to be wrong (thin heuristic evidence, low AI confidence, validator/tiebreaker arbitration, or a visual-audit mismatch).
+   - `ocr_extractor.py`: RapidOCR-based text extraction from screenshots, used by the classifier's screenshot fallback and the visual audit.
+   - `build_eval_set.py` / `score_eval_set.py`: Stratified real-world accuracy measurement workflow (see "Measuring Real-World Accuracy" below).
 5. **`export_domains/` (Stage 3 Reporting Engine)**:
-   - `exporter.py`: Compiles verified gambling results into Word documents, screen-optimized PDFs, and Excel spreadsheets.
-   - `screenshot.py`: Manages Playwright browser instances for capturing full-page screenshots.
+   - `exporter.py`: Compiles verified gambling results into Word documents, screen-optimized PDFs, and Excel spreadsheets (copies screenshots into the export — never moves/deletes the source).
+   - `screenshot.py`: Manages Playwright browser instances for capturing full-page screenshots; `find_screenshot_path()` resolves a domain to its file on disk (including a legacy `New folder` fallback location).
    - `batch_splitter.py`: Splits large PDF and Excel export packages into compliant sub-24MB batches.
-6. **`api/` (API Service)**: Exposes RESTful endpoints (`FastAPI`) for remote pipeline execution, domain ingestion, status monitoring, and report downloads.
+6. **`api/` (API Service)**: FastAPI routers — `domains.py` (list/search/detail/screenshot/**live-embed proxy**/save/backup), `reports.py` (list & download generated reports), `stats.py` (dashboard counters), `settings.py`. Serves the static `web/` dashboard.
+7. **`web/` (Dashboard Frontend)**: Vanilla HTML/CSS/JS dashboard — domain table with filters, a full-screen split-view domain inspector (live site embedded via the proxy endpoint + an info panel with every recorded field), and a quick single-URL sandbox tester.
 
 ### Data Flow
 1. Domain candidates are discovered (Stage 0/1) or imported via CSV/API into MongoDB collection `domain_Listed` (`processed: false`).
@@ -107,10 +118,13 @@ An enterprise-grade, high-performance Python pipeline for discovering, classifyi
 |:---|:---|:---|
 | **Language** | Python 3.11+ | Unmatched ecosystem for web crawling, async I/O (`asyncio`), data analysis, and AI integrations. |
 | **HTTP Engine** | `Scrapling` + `curl_cffi` | Provides browser TLS fingerprint impersonation to bypass Cloudflare and WAF protections. |
-| **Local LLM** | Ollama (`qwen2.5:3b`) | Eliminates external API costs and data privacy concerns while offering high-speed local inference. |
+| **Local LLM** | Ollama (`qwen2.5:3b` Analyst/Validator, `qwen2.5:7b-instruct` tiebreaker) | Eliminates external API costs and data privacy concerns while offering high-speed local inference; a bigger model is only spent on the small slice of genuine disagreements. |
+| **Vision Model** | Ollama `moondream` | Lightweight, purpose-built image classifier for canvas/WebGL-rendered UIs with zero readable DOM/OCR text, and for the independent screenshot visual audit. |
+| **OCR Engine** | `rapidocr-onnxruntime` | Reads on-screen text from a screenshot (banner alt-text-free promo graphics, terse nav-tab labels) that the raw HTML never exposes. |
+| **Language Detection** | `langdetect` | Cheap offline gate before spending an LLM call translating a page — only non-English pages pay the translation cost. |
 | **Browser Engine** | Playwright (Chromium) | Reliable headless browser automation for JavaScript rendering and full-page visual capture. |
 | **Database** | MongoDB | Flexible schema-less JSON storage ideal for varying HTTP metadata, headers, and classification logs. |
-| **API Framework** | FastAPI + Uvicorn | Asynchronous Python REST framework with automatic OpenAPI documentation and high request throughput. |
+| **API Framework** | FastAPI + Uvicorn | Asynchronous Python REST framework with automatic OpenAPI documentation and high request throughput; also serves the `web/` dashboard. |
 
 ---
 
@@ -150,9 +164,9 @@ flowchart TD
     FET -- "HTTP HTML Body" --> CLA
     FET -- "Network Failure (403/404/Refused)" --> RUN
 
-    CLA -- "Score >= 5.0" --> PWB
-    CLA -- "Score < 2.5" --> RUN
-    CLA -- "Score 2.5 - 5.0" --> AI
+    CLA -- "Score >= 4.0 + strong signal" --> PWB
+    CLA -- "Score < 1.5, no strong signal" --> RUN
+    CLA -- "needs_ai: 1.5<=Score<4.0, or any strong signal" --> AI
     AI -- "Confirmed Gambling" --> PWB
     AI -- "Regular / Offline" --> RUN
 
@@ -229,13 +243,13 @@ sequenceDiagram
             Runner->>Heuristic: classify(html, keywords)
             Heuristic-->>Runner: Score & Matched Keywords
 
-            alt Score >= 5.0 (Instant Gambling)
+            alt Score >= 4.0 + strong signal (Instant Gambling)
                 Runner->>Browser: capture_url(url)
                 Browser-->>Runner: screenshot.jpg
                 Runner->>DB: write_result(status='gambling', screenshot_taken=True)
-            else Score < 2.5 (Instant Regular)
+            else Score < 1.5, no strong signal (Instant Regular)
                 Runner->>DB: write_result(status='regular', screenshot_taken=False)
-            else Score 2.5 - 5.0 (Needs AI)
+            else needs_ai: 1.5<=Score<4.0, or any strong signal (Needs AI)
                 Runner->>LLM: classify_with_challenge(html, keywords)
                 LLM-->>Runner: Verdict (gambling/regular/unconfirmed)
                 
@@ -270,30 +284,49 @@ sequenceDiagram
 - **Failure Risk**: HTTP 403 WAF blocks, HTTP 404 dead sites, or connection drops; handled by `_classify_failure` which tags `blocked`, `dead`, or `connection_failed`.
 
 #### Step 3: Heuristic Pre-Screening
-- **Action**: Received HTML is evaluated against a 988-keyword dictionary (`gambling_top_988_keywords.json`).
+- **Action**: Received HTML is evaluated against the keyword dictionary (`gambling_top_944_keywords.json`, ~1,000 phrases plus a small set of hand-curated bare category words — see `classifier.py`'s `STRONG_GAMBLING_SIGNALS`/`WEAK_GAMBLING_SIGNALS`).
 - **Handling Component**: `checking_url/classifier.py` (`classify`).
-- **Scoring Logic**:
-  - `STRONG` signals (e.g., *satta matka*, *casino live*, *betting id*) weighted at 2.0.
-  - `WEAK` signals weighted at 1.0.
-  - Hospitality, education, news, and e-commerce archetype filters subtract score weight to prevent false positives.
-- **Decision Outcomes**:
-  - $\text{Score} \ge 5.0 \implies \text{Fast-path gambling}$ (bypasses LLM).
-  - $\text{Score} < 2.5 \implies \text{Instant regular}$ (bypasses LLM).
-  - $2.5 \le \text{Score} < 5.0 \implies \text{Needs AI}$ (escalated to Stage 4).
+- **Scoring Logic** (corrected 2026-08-24 -- see `checking_url/classifier.py`'s own
+  module docstring for the authoritative, always-current version; this section had
+  drifted out of sync with the real code and previously misstated both the weights
+  and the thresholds below):
+  - `WEAK` signals (a 14-term set: rebate, free spins, bonus, odds, prize, win, stake,
+    bet, jackpot, etc.) weighted at **0.5**. Every other matched keyword (including the
+    `STRONG` set) is weighted at **1.0** -- there is no separate 2.0-weight tier.
+    `STRONG` is tracked separately as a boolean flag, not an extra score weight.
+  - Hospitality/education/news/e-commerce/banking/etc. "negative archetype" hits do
+    **not** subtract from the numeric score. They set a boolean gate that suppresses
+    an instant-gambling lock when the score alone would otherwise trigger one, and
+    require ≥2 archetype-keyword hits (≥3 for banking/fintech) to activate.
+- **Decision Outcomes** (actual gates in `classifier.py`, not a flat threshold band):
+  - $\text{Score} \ge 4.0$ **and** a strong/hard-evidence signal is present $\implies$
+    fast-path gambling (bypasses LLM).
+  - Any strong signal present at all, **regardless of score** $\implies$ needs AI
+    (escalated to Stage 4).
+  - Hospitality/negative-archetype page, $\text{Score} < 1.5$, no hard actionable
+    signal $\implies$ instant regular (bypasses LLM).
+  - Everything else $\implies$ regular.
 
 #### Step 4: Local AI Challenge Round
-- **Action**: Escalated sites are sent to local Ollama LLM (`qwen2.5:3b`).
+- **Action**: Non-English pages are translated first (`translate_to_english_if_needed`); escalated sites are then sent to local Ollama LLMs.
 - **Handling Component**: `checking_url/ai_classifier.py` (`classify_with_challenge`).
-- **Two-Round Validation**:
-  - *Round 1 (Analyst)*: Evaluates title, meta descriptions, and visible text.
-  - *Round 2 (Validator)*: Challenges positive verdicts to verify presence of actual wagering features vs. news articles or hospitality mentions.
-- **Failure Risk**: Ollama offline or high response latency; mitigated by dynamic exponential moving average (`EMA`) timeout control, falling back safely to `status="unconfirmed"` for later retry.
+- **Multi-Round Validation**:
+  - *Round 1 (Analyst, `gambling-analyst`)*: Evaluates title, meta descriptions, and visible text.
+  - *Round 2 (Validator, `gambling-validator`)*: Challenges positive verdicts to verify presence of actual wagering features vs. news articles or hospitality mentions.
+  - *Tiebreaker (`qwen2.5:7b-instruct`)*: Arbitrates when Analyst and Validator genuinely disagree — a bigger model, only spent on this narrow slice.
+- **Failure Risk**: Ollama offline or high response latency; mitigated by a dynamic exponential moving average (`EMA`) timeout window, a circuit breaker that skips waiting out another timeout once recent calls are mostly failing, and a bounded per-domain retry-count cap (`UNCONFIRMED_RETRY_CAP`) so a stuck domain drops out of the "new domains" queue without ever being silently excluded from `--mode unconfirmed` retries. Falls back safely to `status="unconfirmed"` either way — never a guessed verdict.
 
 #### Step 5: Visual Evidence Capture
 - **Action**: Domains classified as `gambling` are passed to headless Playwright browser workers.
 - **Handling Component**: `export_domains/screenshot.py` (`BrowserPool.capture_url`).
-- **Execution**: Full-page render, automated scrolling to trigger lazy-loaded images, network-idle waiting, and save to `output/screenshots/<domain_hash>.jpg`.
-- **Validation**: `is_valid_screenshot()` verifies file existence, size ($>500\text{ bytes}$), and image header integrity.
+- **Execution**: Full-page render, automated scrolling to trigger lazy-loaded images, network-idle waiting, and save to `output/screenshots/<domain>_<hash>.jpg` — filename is anchored to the *domain*, not wherever it redirects to, so two domains that redirect to the same mirror/affiliate page still each get their own screenshot.
+- **Validation**: `is_valid_screenshot()` verifies file existence, size, and image header integrity (rejects blank/loader-spinner captures too).
+- **Permanence**: `output/screenshots/` is a permanent, append-only archive — nothing in the codebase ever moves or deletes a file from it (`delete_screenshot()` only removes an invalid/failed capture attempt, never a valid one belonging to a different domain).
+
+#### Step 5b: Independent Visual Audit (On-Demand)
+- **Action**: For already-`gambling` domains, re-reads the captured screenshot itself — OCR text plus a vision-model verdict — and checks whether the image actually backs up the text-based classification.
+- **Handling Component**: `checking_url/screenshot_visual_audit.py`.
+- **Outcome**: Never changes `status` by itself. Writes `visual_confirmed`/`visual_confidence`/`visual_evidence` onto the record; a mismatch surfaces as Tier 1 in `review_queue.py` for a human to look at.
 
 #### Step 6: MongoDB Result Sync
 - **Action**: Verification results are synced to MongoDB.
@@ -314,50 +347,58 @@ sequenceDiagram
 
 ```
 gamblingwebfind/
-├── api/                        # FastAPI REST Server
+├── api/                         # FastAPI REST Server
 │   ├── routers/
-│   │   └── pipeline.py         # REST Endpoints for ingestion, pipeline control & exports
-│   └── main.py                 # FastAPI Application Initialization
-├── checking_url/               # Stage 2: URL Verification Engine
+│   │   ├── domains.py           # List/search/detail/screenshot/live-embed-proxy/save/backup
+│   │   ├── reports.py           # List & download generated export reports
+│   │   ├── settings.py          # Dashboard settings endpoint
+│   │   └── stats.py             # Dashboard counter/summary endpoint
+│   └── main.py                  # FastAPI app init; serves web/ as static files
+├── web/                         # Dashboard Frontend (served by api/main.py)
+│   ├── index.html               # Overview / Domains table / Sandbox tabs + inspector modal
+│   ├── app.js                   # Dashboard logic (filters, domain inspector, proxy embed)
+│   └── style.css
+├── checking_url/                # Stage 2: URL Verification Engine
 │   ├── __init__.py
-│   ├── ai_classifier.py        # Ollama LLM Dual-Round Challenge Classifier
-│   ├── classifier.py           # 988-Keyword Heuristic Pre-Classifier & Archetype Filters
-│   ├── fetcher.py              # TLS-Impersonating HTTP Engine & Failure Classifier
-│   └── runner.py               # Async Pipeline Conductor & Worker Pool Manager
-├── db/                         # Data Access Layer
+│   ├── ai_classifier.py         # Ollama Analyst/Validator/Tiebreaker/Vision + translation
+│   ├── classifier.py            # Keyword Heuristic Pre-Classifier & Archetype Filters
+│   ├── fetcher.py               # TLS-Impersonating HTTP Engine & Failure Classifier
+│   ├── runner.py                # Async Pipeline Conductor, Circuit Breaker & Retry Cap
+│   ├── known_gambling_runner.py # Liveness-only recheck for an imported known-gambling list
+│   ├── reported_blocked_checker.py # Two-strike recheck: is a reported domain blocked yet?
+│   ├── screenshot_visual_audit.py  # OCR + vision-model cross-check of gambling screenshots
+│   ├── screenshot_folder_sorter.py # Sorts any folder of screenshots by the same check
+│   ├── review_queue.py          # Tiered human-review queue generator
+│   ├── ocr_extractor.py         # RapidOCR text extraction from screenshots
+│   ├── build_eval_set.py        # Stratified sample for real-world accuracy labeling
+│   └── score_eval_set.py        # Scores pipeline verdicts against human labels
+├── db/                          # Data Access Layer
 │   ├── __init__.py
-│   └── mongo_client.py         # MongoDB Client, Schema Normalization & Atomic Updates
-├── export_domains/             # Stage 3: Compliance Exporter & Reporting Engine
+│   └── mongo_client.py          # MongoDB Client, Schema Normalization & Atomic Updates
+├── export_domains/              # Stage 3: Compliance Exporter & Reporting Engine
 │   ├── __init__.py
-│   ├── batch_splitter.py       # PyMuPDF Size-Bounded PDF/Excel Batch Splitter
-│   ├── exporter.py             # Word, PDF & Excel Report Generator
-│   └── screenshot.py           # Playwright Async BrowserPool Screenshot Manager
-├── logs/                       # Test & Runtime Logs
-│   └── test_run.log            # Automated Pytest Run Audit Log
-├── output/                     # Generated Artifacts & Screenshots (Ignored by Git)
-│   ├── Batches/                # Split PDF/Excel Compliance Bundles
-│   └── screenshots/            # Verified Gambling Site Screenshots (.jpg)
-├── project_sup/                # Supporting Scripts & Helpers
-│   └── searxng_search.py       # Stage 0: SearXNG Search Query Generator & Crawler
-├── tests/                      # Automated Pytest Suite (100% Pass Rate)
-│   ├── conftest.py             # Pytest Fixtures, Mocking & Automated Teardown
-│   ├── test_api.py             # FastAPI Endpoint Integration Tests
-│   ├── test_end_to_end.py      # End-to-End Pipeline Execution Tests
-│   ├── test_helpers_and_import.py # Utility & Helper Unit Tests
-│   ├── test_stage0_keywordssearch.py # SearXNG & Query Builder Tests
-│   ├── test_stage1_domain_fetch.py   # Common Crawl Parquet Parser Tests
-│   ├── test_stage2_checking_url.py   # Heuristic, AI & Fetcher Tests
-│   └── test_stage3_export_domains.py # Exporter & Batch Splitter Tests
-├── .env.example                # Configuration Environment Variable Template
-├── .gitignore                  # Git Ignore Rules
-├── find_gambling.py            # Stage 1: Common Crawl Discovery Script
-├── gambling_top_944_keywords.json # Master 988-Keyword JSON Dictionary
-├── main.py                     # Interactive CLI Terminal Menu
-├── Modelfile                   # Ollama Analyst Model System Prompt & Parameters
-├── Modelfile.validator         # Ollama Validator Model System Prompt & Parameters
-├── pytest.ini                  # Pytest Configuration
-├── README.md                   # Project Documentation
-└── requirements.txt            # Python Package Dependencies
+│   ├── batch_splitter.py        # PyMuPDF Size-Bounded PDF/Excel Batch Splitter
+│   ├── exporter.py              # Word, PDF & Excel Report Generator (copies, never moves)
+│   └── screenshot.py            # Playwright BrowserPool + find_screenshot_path() resolver
+├── output/                      # Generated Artifacts & Screenshots (Ignored by Git)
+│   ├── Batches/                 # Split PDF/Excel Compliance Bundles
+│   └── screenshots/             # Permanent, append-only screenshot archive (.jpg)
+├── project_sup/                 # Supporting / one-off maintenance scripts
+│   └── screenshot_audit.py      # Cross-checks DB screenshot_taken flags against disk
+├── tests/                       # Automated Pytest Suite
+│   ├── test_classifier_accuracy.py       # Heuristic regression suite (real past incidents)
+│   ├── test_parked_domain_status.py      # Parked/for-sale lander classification
+│   ├── test_reported_blocked_checker.py  # Two-strike confirmation logic
+│   └── test_screenshot_visual_audit.py   # OCR+vision combine logic
+├── .env.example                 # Configuration Environment Variable Template
+├── .gitignore                   # Git Ignore Rules
+├── gambling_top_944_keywords.json # Base keyword phrase list (unioned with curated sets in classifier.py)
+├── main.py                      # Interactive CLI Terminal Menu (also starts the web dashboard)
+├── Modelfile                    # Ollama Analyst Model System Prompt & Parameters
+├── Modelfile.validator          # Ollama Validator Model System Prompt & Parameters
+├── pytest.ini                   # Pytest Configuration
+├── README.md                    # Project Documentation
+└── requirements.txt             # Python Package Dependencies
 ```
 
 ---
@@ -413,23 +454,46 @@ copy .env.example .env
 cp .env.example .env
 ```
 
-Review `.env` settings:
+Review `.env` settings — the ones that most affect accuracy/throughput:
 ```env
 MONGO_URI=mongodb://localhost:27017/
 MONGO_DB_NAME=gamblingsites
-MAX_CONCURRENT_FETCHES=20
+MAX_CONCURRENT_FETCHES=20     # website-fetch concurrency -- separate from AI_CONCURRENCY,
+                              # lowering this does NOT reduce Ollama load
 FETCH_TIMEOUT=10
-OLLAMA_HOST=http://localhost:11434
-OLLAMA_MODEL=qwen2.5:3b
+OLLAMA_BASE_URL=http://127.0.0.1:11434
+OLLAMA_MODEL=gambling-analyst
+OLLAMA_VALIDATOR_MODEL=gambling-validator   # must be a DIFFERENT model from OLLAMA_MODEL
+OLLAMA_TIEBREAKER_MODEL=qwen2.5:7b-instruct-q4_K_M
+OLLAMA_VISION_MODEL=moondream
+AI_CONCURRENCY=2              # max parallel Ollama calls -- keep low on a single local
+                              # instance with no GPU; this is the actual AI-load knob
+AI_TIMEOUT_MIN=15.0           # ai_classifier.py only reads MIN/MAX/BASE, never a plain
+AI_TIMEOUT_MAX=90.0           # AI_TIMEOUT var -- that key is silently ignored if set
+AI_TIMEOUT_BASE=25.0
+UNCONFIRMED_RETRY_CAP=5       # consecutive "unconfirmed" failures before a domain stops
+                              # being re-surfaced by "Check New Domains" (still retried
+                              # forever via "Re-check Unconfirmed" though)
 ```
+`.env.example` ships broader defaults for every stage (SearXNG, Common Crawl tuning,
+export batching, etc.) — treat the block above as the subset worth reviewing first, not
+the full set.
 
 #### 6. Initialize Ollama Models
 Ensure Ollama is running, then pull and create custom model instances:
 ```bash
 ollama pull qwen2.5:3b
-ollama create qwen2.5:3b -f Modelfile
-ollama create qwen2.5:3b-validator -f Modelfile.validator
+ollama create gambling-analyst -f Modelfile
+ollama create gambling-validator -f Modelfile.validator
+
+# Tiebreaker (Analyst/Validator disagreement) and vision-model last resort
+ollama pull qwen2.5:7b-instruct-q4_K_M
+ollama pull moondream
 ```
+Confirm all four are built/pulled with `ollama list`, and that `OLLAMA_MODEL=gambling-analyst`
+/ `OLLAMA_VALIDATOR_MODEL=gambling-validator` in your `.env` -- these must point at
+two distinct models, not the same one twice, or the Validator round degenerates
+into the Analyst re-confirming itself.
 
 ---
 
@@ -441,18 +505,20 @@ Launch the CLI interface to run any pipeline stage interactively:
 python main.py
 ```
 ```
-============================================================
-              GAMBLING WEB FIND - CONTROL MENU             
-============================================================
-  0. Stage 0: Search Web via SearXNG (Live Web)
-  1. Stage 1: Find Domains via Common Crawl (Historical)
-  2. Stage 2: Check URLs & Capture Screenshots
-  3. Stage 3: Export Domain Reports & Split Batches
-  4. Run Full Pipeline (Stages 0 -> 1 -> 2 -> 3)
-  5. Seed Database from CSV / Excel File
-  6. Exit
-============================================================
+=================================================================
+              GAMBLINGWEBFIND PROCESS MENU
+=================================================================
+1. keywordssearch        (SearXNG / Multi-Engine Search)
+2. checking_url          (Fetch, AI Classify & Screenshot)
+3. export_domains        (Export Reports & Divide into Batches)
+4. known gambling scan   (Import list, Screenshot live, Mark dead)
+5. recheck reported      (Are exported/reported domains blocked yet?)
+6. visual audit          (OCR + vision-model cross-check on screenshots)
+0. Exit
+=================================================================
 ```
+Also starts the web dashboard automatically at `http://127.0.0.1:8081` (configurable via
+`DASHBOARD_HOST`/`DASHBOARD_PORT`, or skip it with `python main.py --no-ui`).
 
 #### Option B: REST API Server
 Start the FastAPI server:
@@ -464,91 +530,85 @@ Access interactive API documentation at: [http://localhost:8000/docs](http://loc
 ---
 
 ### Running Automated Tests
-Run the complete Pytest suite (54 tests):
+Run the complete Pytest suite (32 tests — regression checks for real past incidents, not a coverage target):
 ```bash
 python -m pytest
 ```
-> **Note**: Automated test execution automatically snapshots the filesystem, drops temporary test databases in MongoDB (`gamblingsites_test`), wipes test artifacts from `output/`, and writes execution summaries to `logs/test_run.log`.
+> **Note**: These are pure-function regression tests (heuristic classifier, reported-blocked confirmation logic, OCR+vision combine logic) — no MongoDB, Ollama, or Playwright required to run them.
+
+---
+
+### Measuring Real-World Accuracy (Eval Set)
+`pytest` only proves known synthetic edge cases still behave as expected after a code
+change — it is not a measured accuracy number on real domains. For that, use the eval-set
+workflow, which samples real `checked_domains` records (stratified across every decision
+path: heuristic lock, domain anchor, AI round 1, validator override, tiebreaker, etc.) for
+a human to label against, then scores the pipeline against those labels.
+
+```bash
+# 1. Sample a fresh, stratified batch of real domains to label (excludes pre-labeled
+#    blocklist imports so the measurement isn't circular). Refuses to overwrite a CSV
+#    that already has labels filled in — use --force or a different --out to bypass.
+python -m checking_url.build_eval_set --per-bucket 20 --out eval_set.csv
+
+# 2. Open eval_set.csv and fill in `human_label` per row (gambling / regular / unsure),
+#    visiting each domain in a disposable/sandboxed browser — many are live gambling sites.
+
+# 3. Score the pipeline's own verdicts against your labels — real accuracy/precision/
+#    recall/F1, broken down per decision-path bucket so you can see exactly which stage
+#    is weakest.
+python -m checking_url.score_eval_set --in eval_set.csv --by-bucket
+```
+Re-run this periodically (e.g. after any classifier change, or on a schedule) to catch
+accuracy drift that the synthetic pytest suite can't see.
 
 ---
 
 ## 7. API / MODULE REFERENCE
 
-### Key API Endpoints (`FastAPI`)
+### Key API Endpoints (`FastAPI`, all under `/api`)
 
-#### 1. Pipeline Execution
-`POST /api/v1/pipeline/run`
-- **Description**: Triggers asynchronous pipeline stage execution.
-- **Request Body**:
-  ```json
-  {
-    "stage": 2,
-    "concurrency": 20,
-    "limit": 100,
-    "mode": "new"
-  }
-  ```
-- **Response**:
-  ```json
-  {
-    "status": "success",
-    "message": "Stage 2 execution completed.",
-    "stats": {
-      "gambling": 14,
-      "regular": 78,
-      "blocked": 3,
-      "dead": 5,
-      "screenshots_taken": 14
-    }
-  }
-  ```
+This is the real, current endpoint surface (`api/routers/domains.py` / `reports.py` /
+`stats.py` / `settings.py`) — an earlier draft of this document described a
+`/api/v1/pipeline/*` REST surface that was never built; pipeline runs are driven from
+`main.py`'s CLI menu, not the API.
 
-#### 2. Domain Seeding
-`POST /api/v1/pipeline/seed`
-- **Description**: Ingests candidate domains into `domain_Listed`.
-- **Request Body**:
-  ```json
-  {
-    "domains": ["win88casino.com", "bet365.com", "example-news.com"],
-    "source": "manual_api"
-  }
-  ```
-- **Response**:
-  ```json
-  {
-    "status": "success",
-    "inserted": 3,
-    "reset": 0
-  }
-  ```
+#### Domains (`api/routers/domains.py`)
+| Endpoint | Description |
+|---|---|
+| `GET /api/domains` | Paginated, filterable domain list (`status`, `q`, `ip`, `screenshot`, `exported`, `source`, date range). Used by the dashboard's Domains tab. |
+| `GET /api/domains/{domain}` | Full raw `checked_domains` record for one domain. |
+| `GET /api/domains/{domain}/screenshot` | Serves the captured screenshot file (resolved via `find_screenshot_path`). |
+| `GET /api/domains/{domain}/proxy` | **Live-embed proxy**: server-side fetches the domain's real page and re-serves it from our own origin (no `X-Frame-Options`/CSP forwarded, `<base href>` injected) so the dashboard's inspector can embed it inline even when the site blocks direct iframe embedding. Only ever fetches a URL already on file for a known domain — never an arbitrary caller-supplied URL. |
+| `POST /api/test-url` | Sandbox tester: live fetch + heuristic + AI challenge + optional screenshot for one ad-hoc URL, without touching the DB. |
+| `POST /api/save-domain` | Upserts a manually-tested/-corrected domain into `checked_domains`. |
+| `POST /api/backup` | Triggers a MongoDB JSON backup. |
 
-#### 3. Trigger Export
-`POST /api/v1/pipeline/export`
-- **Description**: Compiles unexported gambling domains into report packages and batch splits them.
-- **Response**:
-  ```json
-  {
-    "status": "success",
-    "exported_count": 14,
-    "batches_created": 1,
-    "output_dir": "output/Batches/20260819_040000"
-  }
-  ```
+#### Reports & Stats
+| Endpoint | Description |
+|---|---|
+| `GET /api/reports` | Lists generated export report bundles. |
+| `GET /api/reports/download/{path}` | Downloads a specific report file. |
+| `GET /api/stats` | Dashboard summary counters (per-status counts, screenshot/export progress). |
+| `GET /api/settings` | Dashboard settings. |
 
 ---
 
 ### Key Python Module Functions
 
-#### `checking_url.classifier.classify(html: str, url: str, keywords: set) -> tuple[str, list[str]]`
-- **Inputs**: HTML document body string, URL string, set of gambling keywords.
-- **Outputs**: Tuple of `(decision, matched_keywords)` where decision is `"gambling"`, `"regular"`, or `"needs_ai"`.
+#### `checking_url.classifier.classify(html: str, keywords: set, url: str, screenshot_input=None) -> tuple[str, list[str]]`
+- **Outputs**: `(decision, matched_keywords)` where decision is `"gambling"`, `"regular"`, or `"needs_ai"`. `screenshot_input` (a screenshot path) feeds an OCR pass into the same keyword scan for JS-rendered pages with near-empty raw HTML.
 
 #### `checking_url.ai_classifier.classify_with_challenge(html: str, url: str, matched_keywords: list, fast_mode: bool) -> dict`
-- **Inputs**: HTML text, domain URL, pre-matched keyword list, fast-mode flag.
-- **Outputs**: Verdict dictionary `{"verdict": "gambling"|"regular"|"unconfirmed", "reason": "...", "confidence": 0.95}`.
+- **Outputs**: `{"verdict": "gambling"|"regular"|"unconfirmed", "reason": "...", "confidence": 0.0-1.0, "category": "...", "challenge_override": bool}`.
+
+#### `checking_url.ai_classifier.translate_to_english_if_needed(html: str, url: str) -> tuple[str, bool]`
+- **Outputs**: `(text_for_classification, was_translated)` — original `html` unchanged for English/short/failed-detection content; a translated flat-text blob otherwise.
+
+#### `export_domains.screenshot.find_screenshot_path(url: str, domain: str, output_dir=None) -> str | None`
+- Resolves a domain to its actual screenshot file on disk, including a fallback check for the legacy `New folder` location.
 
 #### `export_domains.batch_splitter.create_batches(pdf_path: str, excel_path: str, output_dir: str) -> list[str]`
-- **Inputs**: Absolute paths to compiled PDF and Excel reports, destination batch folder.
 - **Outputs**: List of created batch file paths bounded by $\le 24\text{ MB}$ or $1,000$ links per file.
 
 ---
@@ -575,13 +635,22 @@ erDiagram
         string _id "Primary Key (Domain Name)"
         string domain "Normalized Domain"
         string url "Full Target URL (https://...)"
-        string status "gambling | regular | blocked | dead | unconfirmed"
+        string status "gambling | regular | blocked | dead | for_sale | unconfirmed | reported_down"
         string reason "Detailed Classification Reason"
+        list matched_keywords "Actual heuristic keyword/signal list (not just the count)"
+        float confidence "AI's self-reported confidence, when AI-decided"
+        string category "AI category, e.g. sports_betting, tiebreaker_resolved"
+        string decided_by "Which stage decided: heuristic_score | domain_anchor_strong | ai_round1 | ai_round2_challenge | validator_confirmed | validator_override | tiebreaker_resolved"
+        string ip "Resolved IP(s)"
+        string asn "Resolved hosting ASN"
+        int unconfirmed_count "Consecutive unconfirmed streak (resets on any real verdict)"
         boolean screenshot_taken "True if visual proof captured"
         string screenshot_failed_reason "Error detail if screenshot failed"
+        boolean visual_confirmed "Independent OCR+vision audit result, if run"
+        float visual_confidence
+        string visual_evidence
         boolean exported "True if included in exported report"
         string exported_at "Export Timestamp"
-        string checked_at "Verification Timestamp"
     }
 ```
 
@@ -608,14 +677,26 @@ Stores final verified classification details, AI evaluation notes, and screensho
   "domain": "win88casino.com",
   "url": "https://win88casino.com",
   "status": "gambling",
-  "reason": "14 keywords matched; AI Analyst & Validator confirmed live wagering portal",
+  "reason": "Tie-breaker (qwen2.5:7b-instruct-q4_K_M) resolved dispute: ...",
+  "matched_keywords": ["casino", "online casino", "sports betting"],
+  "confidence": 0.85,
+  "category": "tiebreaker_resolved",
+  "decided_by": "tiebreaker_resolved",
+  "ip": ["104.21.20.242", "172.67.194.225"],
+  "asn": "AS13335",
+  "unconfirmed_count": 0,
   "screenshot_taken": true,
   "screenshot_failed_reason": null,
+  "visual_confirmed": true,
+  "visual_confidence": 0.0,
+  "visual_evidence": "ocr_keyword: casino",
   "exported": true,
-  "exported_at": "2026-08-19T04:00:00+05:30",
-  "checked_at": "2026-08-19T03:55:12+05:30"
+  "exported_at": "2026-08-19T04:00:00+05:30"
 }
 ```
+Not every field is present on every record — most are only written by the stage that
+actually produced them (e.g. `confidence`/`category` only exist for AI-decided verdicts,
+`visual_*` only after running the visual audit).
 
 ---
 

@@ -394,7 +394,7 @@ async def run(
             if mode == _MODE_SS_ONLY:
                 # Already confirmed gambling — only need to capture screenshot
                 ss_path, ss_status, ss_reason = await browser_pool.capture_url(
-                    url, screenshot_dir, retries=2, keywords=None
+                    url, screenshot_dir, retries=2, keywords=None, domain=domain
                 )
                 if ss_path and is_valid_screenshot(ss_path):
                     await asyncio.to_thread(_write_gambling_active, domain, url, True, import_tag)
@@ -443,7 +443,7 @@ async def run(
 
                 # Site is alive! Promote to gambling + screenshot
                 ss_path, ss_status, ss_reason = await browser_pool.capture_url(
-                    url, screenshot_dir, retries=2, keywords=None
+                    url, screenshot_dir, retries=2, keywords=None, domain=domain
                 )
                 if ss_path and is_valid_screenshot(ss_path):
                     await asyncio.to_thread(_write_gambling_active, domain, url, True, import_tag)
@@ -511,7 +511,7 @@ async def run(
 
             # ── Step 2: Screenshot on fully loaded page ───────────────────
             ss_path, ss_status, ss_reason = await browser_pool.capture_url(
-                url, screenshot_dir, retries=2, keywords=None
+                url, screenshot_dir, retries=2, keywords=None, domain=domain
             )
 
             if ss_path and is_valid_screenshot(ss_path):

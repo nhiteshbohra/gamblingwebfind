@@ -1,12 +1,13 @@
 import os
+import re
 import asyncio
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 
 from db.mongo_client import checked_domains as _cd, source_domains as _sd, resolve_ip, write_result
-from export_domains.screenshot import _url_to_filename, is_valid_screenshot, all_filename_candidates
+from export_domains.screenshot import find_screenshot_path
 
 router = APIRouter(prefix="/api")
 SCREENSHOTS_DIR = os.getenv("SCREENSHOT_DIR", os.path.join("output", "screenshots"))
@@ -77,12 +78,7 @@ def list_domains(
     for d in docs:
         domain = d.get("domain") or d.get("_id")
         url = d.get("url") or f"https://{domain}"
-        has_shot = False
-        for cand in all_filename_candidates(url, domain):
-            p = os.path.join(screenshots_dir, cand)
-            if os.path.exists(p) and is_valid_screenshot(p):
-                has_shot = True
-                break
+        has_shot = find_screenshot_path(url, domain, screenshots_dir) is not None
         results.append({
             "_id": d.get("_id"),
             "domain": domain,
@@ -95,6 +91,11 @@ def list_domains(
             "has_screenshot_file": has_shot,
             "added_date": d.get("added_date"),
             "ip": d.get("ip"),
+            "asn": d.get("asn"),
+            "confidence": d.get("confidence"),
+            "category": d.get("category"),
+            "decided_by": d.get("decided_by"),
+            "matched_keywords": d.get("matched_keywords"),
             "exported": d.get("exported", False),
             "exported_at": d.get("exported_at"),
             "source": d.get("source"),
@@ -161,11 +162,14 @@ async def test_single_url(req: TestUrlRequest):
             classify, load_keywords, WEAK_GAMBLING_SIGNALS,
             detect_negative_archetype, _extract_text
         )
+        from checking_url.ai_classifier import translate_to_english_if_needed
         kw_set = load_keywords()
+        classify_html = html_content  # safe fallback if translation raises before reassigning
         if html_content:
-            heuristic_verdict, matched_keywords = classify(html_content, url=raw_url, keywords=kw_set)
+            classify_html, _ = await translate_to_english_if_needed(html_content, url=raw_url)
+            heuristic_verdict, matched_keywords = classify(classify_html, url=raw_url, keywords=kw_set)
             heuristic_score = sum(0.5 if kw in WEAK_GAMBLING_SIGNALS else 1.0 for kw in matched_keywords)
-            text_content = _extract_text(html_content)
+            text_content = _extract_text(classify_html)
             is_neg, neg_reason = detect_negative_archetype(text_content)
             if is_neg and neg_reason:
                 negative_signals = [neg_reason]
@@ -192,7 +196,7 @@ async def test_single_url(req: TestUrlRequest):
         try:
             from checking_url.ai_classifier import classify_with_challenge
             ai_eval = await classify_with_challenge(
-                html=html_content,
+                html=classify_html,
                 url=raw_url,
                 matched_keywords=matched_keywords,
                 fast_mode=False
@@ -221,7 +225,7 @@ async def test_single_url(req: TestUrlRequest):
             await pool.start()
             screenshots_dir = os.getenv("SCREENSHOT_DIR", SCREENSHOTS_DIR)
             os.makedirs(screenshots_dir, exist_ok=True)
-            shot_path, shot_status, _ = await pool.capture_url(raw_url, screenshots_dir)
+            shot_path, shot_status, _ = await pool.capture_url(raw_url, screenshots_dir, domain=domain)
             await pool.close()
             if shot_path and os.path.exists(shot_path):
                 screenshot_taken = True
@@ -282,11 +286,60 @@ def get_screenshot(domain: str):
     d = _cd().find_one({"_id": domain}, {"url": 1})
     url = (d.get("url") if d else None) or f"https://{domain}"
     screenshots_dir = os.getenv("SCREENSHOT_DIR", SCREENSHOTS_DIR)
-    for cand in all_filename_candidates(url, domain):
-        p = os.path.join(screenshots_dir, cand)
-        if os.path.exists(p) and is_valid_screenshot(p):
-            return FileResponse(p, media_type="image/jpeg")
+    p = find_screenshot_path(url, domain, screenshots_dir)
+    if p:
+        return FileResponse(p, media_type="image/jpeg")
     raise HTTPException(404, "screenshot not found")
+
+
+_CSP_OR_FRAME_META = re.compile(
+    r'<meta[^>]+http-equiv=["\']?(?:content-security-policy|x-frame-options)["\']?[^>]*>',
+    re.IGNORECASE,
+)
+_HEAD_OPEN_TAG = re.compile(r'<head[^>]*>', re.IGNORECASE)
+
+
+@router.get("/domains/{domain}/proxy", response_class=HTMLResponse)
+async def proxy_domain_page(domain: str):
+    """Server-side fetch so the dashboard can embed this domain inline even when the site
+    sends X-Frame-Options/CSP headers blocking iframe embedding -- those only govern the
+    ORIGINAL response; this serves our own fresh response instead, which sets neither.
+
+    Only ever fetches the URL already on file for a known domain record in MongoDB, never
+    an arbitrary caller-supplied URL -- keeps this from becoming an open SSRF relay.
+
+    A <base href> is injected so relative CSS/JS/image URLs resolve against the real site
+    and load directly from it (X-Frame-Options only restricts document-level framing, not
+    sub-resource loads, so this doesn't need to proxy every asset too). The page's own
+    CSP/X-Frame-Options <meta> tags are stripped so they can't re-block rendering inside
+    our copy. The iframe embedding this response MUST use sandbox="allow-scripts" (script
+    execution allowed) WITHOUT "allow-same-origin" -- since this response is served from
+    OUR OWN origin, combining the two would let the target's script read this dashboard's
+    cookies/localStorage and call its APIs. Without allow-same-origin the frame gets an
+    opaque, isolated origin instead, so scripts run but can't touch anything of ours.
+    """
+    d = _cd().find_one({"_id": domain}, {"url": 1})
+    if not d:
+        raise HTTPException(404, "domain not found")
+    url = d.get("url") or f"https://{domain}"
+
+    from checking_url.fetcher import fetch
+    result = await fetch(url, domain, timeout_seconds=15, per_domain_delay=0.0)
+    if not result.html:
+        return HTMLResponse(
+            f"<html><body style='font-family:sans-serif;padding:40px;color:#888;background:#111'>"
+            f"Could not load {domain} ({result.failure_type or 'no response'}).</body></html>",
+            status_code=502,
+        )
+
+    html = _CSP_OR_FRAME_META.sub("", result.html)
+    base_url = result.final_url or url
+    base_tag = f'<base href="{base_url}">'
+    html = _HEAD_OPEN_TAG.sub(lambda m: m.group(0) + base_tag, html, count=1) if _HEAD_OPEN_TAG.search(html) else base_tag + html
+
+    resp = HTMLResponse(html)
+    resp.headers["X-Frame-Options"] = "SAMEORIGIN"  # only our own dashboard may frame this
+    return resp
 
 
 @router.post("/backup")

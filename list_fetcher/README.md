@@ -1,4 +1,4 @@
-# Blocklist Fetcher (`blocklist_fetcher`)
+# List Fetcher (`list_fetcher`)
 
 Automated high-performance parser and bulk importer for curated gambling and illegal site blocklists into MongoDB (`checked_domains` & `domain_Listed`).
 
@@ -42,35 +42,35 @@ The pipeline ensures **zero duplicate domains** through 3 layers:
 
 ### 1. Fetch & Import All Sources into MongoDB (Zero Duplicates)
 ```bash
-python blocklist_fetcher/keysfetch_from_txt.py
+python list_fetcher/keysfetch_from_txt.py
 ```
 
 ### 2. Dry Run Preview (Count fresh vs duplicate domains without writing)
 ```bash
-python blocklist_fetcher/keysfetch_from_txt.py --dry-run
+python list_fetcher/keysfetch_from_txt.py --dry-run
 ```
 
 ### 3. Import Specific Sources Only
 ```bash
 # Import Estonia and ACMA lists:
-python blocklist_fetcher/keysfetch_from_txt.py --sources estonia_gambling acma_gambling
+python list_fetcher/keysfetch_from_txt.py --sources estonia_gambling acma_gambling
 
 # Import Hagezi lists:
-python blocklist_fetcher/keysfetch_from_txt.py --sources hagezi_gambling_onlydomains hagezi_adblock_gambling
+python list_fetcher/keysfetch_from_txt.py --sources hagezi_gambling_onlydomains hagezi_adblock_gambling
 ```
 
 ### 4. Import from a Custom URL or Local Text File
 ```bash
 # Custom GitHub URL (both web /blob/ or raw.githubusercontent.com work)
-python blocklist_fetcher/keysfetch_from_txt.py --custom-url https://github.com/user/repo/blob/main/blocklist.txt
+python list_fetcher/keysfetch_from_txt.py --custom-url https://github.com/user/repo/blob/main/blocklist.txt
 
 # Custom local text / CSV / Excel file
-python blocklist_fetcher/keysfetch_from_txt.py --custom-file path/to/my_domains.txt
+python list_fetcher/keysfetch_from_txt.py --custom-file path/to/my_domains.txt
 ```
 
 ### 5. Check Current Database Stats
 ```bash
-python blocklist_fetcher/keysfetch_from_txt.py --stats
+python list_fetcher/keysfetch_from_txt.py --stats
 ```
 
 ---
@@ -94,11 +94,11 @@ Each domain is upserted with `_id = domain` into **`checked_domains`**:
 And synced to **`domain_Listed`**:
 ```json
 {
-  "_id": "example-casino.com",
-  "domain": "example-casino.com",
+  "_id": "live-crazytime.com",
+  "domain": "live-crazytime.com",
+  "added_date": "24-08-2026",
   "active": true,
-  "processed": true,
-  "source": "blocklist:<source_id>",
-  "added_date": "2026-08-24"
+  "source": "GITHUB FETCH 24-08-2026",
+  "processed": false
 }
 ```

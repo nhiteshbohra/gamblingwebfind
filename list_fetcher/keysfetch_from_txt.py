@@ -1,5 +1,5 @@
 """
-blocklist_fetcher/keysfetch_from_txt.py
+list_fetcher/keysfetch_from_txt.py
 ───────────────────────────────────────
 Fetches, cleans, normalizes, and imports gambling/cheating blocklists from GitHub
 and external text files into MongoDB (checked_domains & domain_Listed).
@@ -55,140 +55,65 @@ from db.mongo_client import (
     IST,
 )
 
-# ── Default Blocklist Source Definitions ─────────────────────────────────────
-BLOCKLIST_SOURCES = [
-    # ── Curated Registries & Community Blocklists
-    {
-        "id": "estonia_gambling",
-        "name": "Estonia Blocked Gambling Websites",
-        "url": "https://github.com/elliotwutingfeng/Estonia-Blocked-Gambling-Websites/blob/main/blocklist.txt",
-        "category": "gambling",
-        "status": "gambling",
-        "reason_prefix": "Estonia Blocked Gambling Registry",
-    },
-    {
-        "id": "teqsa_cheating",
-        "name": "TEQSA Illegal Cheating Websites",
-        "url": "https://github.com/elliotwutingfeng/TEQSA-illegal-cheating-websites/blob/main/urls.txt",
-        "category": "cheating_academic",
-        "status": "gambling",  # saved under standard blocked/gambling tracking
-        "reason_prefix": "TEQSA Blocked Illegal Website",
-    },
-    {
-        "id": "acma_gambling",
-        "name": "ACMA Blocked Gambling Websites",
-        "url": "https://github.com/elliotwutingfeng/ACMA-blocked-gambling-websites/blob/main/urls.txt",
-        "category": "gambling",
-        "status": "gambling",
-        "reason_prefix": "ACMA Blocked Gambling Registry",
-    },
-    {
-        "id": "arkynx_gambling",
-        "name": "Arkynx Gambling Blocklist",
-        "url": "https://github.com/arkynx/blocklists/blob/main/gambling-domains.txt",
-        "category": "gambling",
-        "status": "gambling",
-        "reason_prefix": "Arkynx Gambling Blocklist",
-    },
-    {
-        "id": "adguard_gambling",
-        "name": "AdGuardHome Gambling Filter",
-        "url": "https://github.com/alexsannikov/adguardhome-filters/blob/master/gambling.txt",
-        "category": "gambling",
-        "status": "gambling",
-        "reason_prefix": "AdGuard Gambling Filter",
-    },
-    {
-        "id": "ph00lt0_gambling",
-        "name": "ph00lt0 Blocklist Domains",
-        "url": "https://github.com/ph00lt0/blocklist/blob/master/domains.txt",
-        "category": "gambling",
-        "status": "gambling",
-        "reason_prefix": "ph00lt0 Domain Blocklist",
-    },
-    {
-        "id": "eimji_hosts",
-        "name": "Eimji Gambling Hosts",
-        "url": "https://github.com/Eimji/hosts/blob/master/gambling_hosts.txt",
-        "category": "gambling",
-        "status": "gambling",
-        "reason_prefix": "Eimji Hosts Gambling Filter",
-    },
-    {
-        "id": "blocklistproject_gambling",
-        "name": "BlocklistProject Gambling",
-        "url": "https://raw.githubusercontent.com/blocklistproject/Lists/refs/heads/main/gambling.txt",
-        "category": "gambling",
-        "status": "gambling",
-        "reason_prefix": "BlocklistProject Gambling List",
-    },
+_SOURCES_FILE = Path(__file__).resolve().parent / "sources.txt"
 
-    # ── Hagezi DNS Gambling Blocklists (Various formats & sizes)
-    {
-        "id": "hagezi_gambling_onlydomains",
-        "name": "Hagezi Gambling (Only Domains)",
-        "url": "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/gambling-onlydomains.txt",
-        "category": "gambling",
-        "status": "gambling",
-        "reason_prefix": "Hagezi DNS Gambling (Full)",
-    },
-    {
-        "id": "hagezi_gambling_medium_onlydomains",
-        "name": "Hagezi Gambling Medium (Only Domains)",
-        "url": "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/gambling.medium-onlydomains.txt",
-        "category": "gambling",
-        "status": "gambling",
-        "reason_prefix": "Hagezi DNS Gambling (Medium)",
-    },
-    {
-        "id": "hagezi_gambling_mini_onlydomains",
-        "name": "Hagezi Gambling Mini (Only Domains)",
-        "url": "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/gambling.mini-onlydomains.txt",
-        "category": "gambling",
-        "status": "gambling",
-        "reason_prefix": "Hagezi DNS Gambling (Mini)",
-    },
-    {
-        "id": "hagezi_domains_gambling",
-        "name": "Hagezi Domains Gambling",
-        "url": "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/domains/gambling.txt",
-        "category": "gambling",
-        "status": "gambling",
-        "reason_prefix": "Hagezi Domains Gambling",
-    },
-    {
-        "id": "hagezi_rpz_gambling",
-        "name": "Hagezi RPZ Gambling",
-        "url": "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/rpz/gambling.txt",
-        "category": "gambling",
-        "status": "gambling",
-        "reason_prefix": "Hagezi RPZ Gambling",
-    },
-    {
-        "id": "hagezi_adblock_gambling",
-        "name": "Hagezi AdBlock Gambling",
-        "url": "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/gambling.txt",
-        "category": "gambling",
-        "status": "gambling",
-        "reason_prefix": "Hagezi AdBlock Gambling",
-    },
-    {
-        "id": "hagezi_dnsmasq_gambling",
-        "name": "Hagezi Dnsmasq Gambling",
-        "url": "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/dnsmasq/gambling.txt",
-        "category": "gambling",
-        "status": "gambling",
-        "reason_prefix": "Hagezi Dnsmasq Gambling",
-    },
-    {
-        "id": "hagezi_hosts_gambling",
-        "name": "Hagezi Hosts Gambling",
-        "url": "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/hosts/gambling.txt",
-        "category": "gambling",
-        "status": "gambling",
-        "reason_prefix": "Hagezi Hosts Gambling",
-    },
-]
+
+def load_sources_from_file(path: Path = _SOURCES_FILE) -> List[dict]:
+    """Load blocklist sources from sources.txt.
+
+    sources.txt is the single source of truth — all URLs live there.
+    Edit that file to add, remove, or change sources; no code changes needed.
+
+    Format (one per line):
+        id | Name | URL_or_local_path
+
+    Lines starting with # or blank lines are ignored.
+    Raises FileNotFoundError if sources.txt is missing.
+    """
+    if not path.exists():
+        raise FileNotFoundError(
+            f"sources.txt not found at {path}\n"
+            "Create it with lines in the format:  id | Name | URL_or_local_path"
+        )
+
+    sources = []
+    seen_ids = set()
+
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except Exception as e:
+        raise RuntimeError(f"[sources.txt] Could not read {path}: {e}")
+
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = [p.strip() for p in line.split("|", 2)]
+        if len(parts) < 3:
+            print(f"[sources.txt] Skipping malformed line (need id | Name | URL): {raw_line!r}")
+            continue
+        sid, name, url = parts
+        if not sid or not url:
+            continue
+        if sid in seen_ids:
+            print(f"[sources.txt] Duplicate id '{sid}' — keeping first occurrence, skipping repeat")
+            continue
+        seen_ids.add(sid)
+        sources.append({
+            "id": sid,
+            "name": name,
+            "url": url,
+            "category": "gambling",
+            "status": "gambling",
+            "reason_prefix": name,
+        })
+
+    if not sources:
+        raise ValueError(f"[sources.txt] No valid sources found in {path}")
+
+    return sources
+
+
 
 
 def github_blob_to_raw_url(url: str) -> str:
@@ -205,6 +130,7 @@ def github_blob_to_raw_url(url: str) -> str:
         raw = raw.replace("/blob/", "/")
         return raw
     return url
+
 
 
 # Custom pre-compiled regex patterns for speed
@@ -378,7 +304,7 @@ def import_blocklists_to_mongo(
       2. Inter-source deduplication (dedup across all blocklist sources in run)
       3. Database deduplication (skip domains already existing in checked_domains)
     """
-    today_date = datetime.now(IST).strftime("%Y-%m-%d")
+    today_date = datetime.now(IST).strftime("%d-%m-%Y")
     stats = {
         "sources_processed": 0,
         "raw_lines_read": 0,
@@ -391,7 +317,8 @@ def import_blocklists_to_mongo(
         "errors": [],
     }
 
-    all_sources = list(sources) if sources is not None else list(BLOCKLIST_SOURCES)
+    all_sources = list(sources) if sources is not None else load_sources_from_file()
+
 
     # Append any custom URLs provided
     if custom_urls:
@@ -485,7 +412,7 @@ def import_blocklists_to_mongo(
             domains_to_write = chunk
             if skip_existing:
                 existing_in_db = set(
-                    doc["_id"] for doc in checked_col.find(
+                    doc["_id"] for doc in source_col.find(
                         {"_id": {"$in": chunk}},
                         {"_id": 1}
                     )
@@ -540,7 +467,8 @@ def import_blocklists_to_mongo(
                     )
                 )
 
-                # Sync to domain_Listed
+                # Sync to domain_Listed with strict schema:
+                # { _id, domain, added_date, active: True, source: "GITHUB FETCH <date>", processed: False }
                 source_ops.append(
                     UpdateOne(
                         {"_id": d},
@@ -548,8 +476,8 @@ def import_blocklists_to_mongo(
                             "$set": {
                                 "domain": d,
                                 "active": True,
-                                "processed": True,
-                                "source": f"blocklist:{src_id}",
+                                "processed": False,
+                                "source": f"GITHUB FETCH {today_date}",
                             },
                             "$setOnInsert": {"added_date": today_date},
                         },
@@ -627,23 +555,23 @@ def main():
         epilog="""
 Examples:
   # Import all default 8 blocklists directly into MongoDB (Fast mode)
-  python -m blocklist_fetcher.keysfetch_from_txt
+  python -m list_fetcher.keysfetch_from_txt
 
   # Dry run preview with domain counts
-  python -m blocklist_fetcher.keysfetch_from_txt --dry-run
+  python -m list_fetcher.keysfetch_from_txt --dry-run
 
   # Import with DNS IP and ASN resolution
-  python -m blocklist_fetcher.keysfetch_from_txt --resolve-dns
+  python -m list_fetcher.keysfetch_from_txt --resolve-dns
 
   # Import only specific sources by index or ID (e.g. source 1, 3, 5)
-  python -m blocklist_fetcher.keysfetch_from_txt --sources estonia_gambling acma_gambling
+  python -m list_fetcher.keysfetch_from_txt --sources estonia_gambling acma_gambling
 
   # Import from a custom URL or local text file
-  python -m blocklist_fetcher.keysfetch_from_txt --custom-url https://example.com/blocklist.txt
-  python -m blocklist_fetcher.keysfetch_from_txt --custom-file path/to/my_domains.txt
+  python -m list_fetcher.keysfetch_from_txt --custom-url https://example.com/blocklist.txt
+  python -m list_fetcher.keysfetch_from_txt --custom-file path/to/my_domains.txt
 
   # Show database stats
-  python -m blocklist_fetcher.keysfetch_from_txt --stats
+  python -m list_fetcher.keysfetch_from_txt --stats
         """,
     )
 

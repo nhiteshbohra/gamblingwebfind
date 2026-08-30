@@ -35,6 +35,90 @@ except ImportError:
 
 IMPERSONATE = "chrome"
 
+# Borrowed from PySecAuditWebScanner (a third-party security-scanner project reviewed
+# for this codebase) -- it detects gambling-content cloaking by diffing what a normal
+# browser-looking fetch sees vs. what a generic/bot-like fetch sees. fetch() above only
+# ever uses a single Chrome-impersonation profile, so a site that deliberately serves
+# clean content to that exact fingerprint while showing gambling content to ordinary
+# visitors (or vice versa) previously had zero chance of being caught. This is a
+# best-effort SUPPLEMENTARY signal only -- see its call site in runner.py, which never
+# lets this override a verdict by itself, only flags it for human review. Added 2026-08-24.
+_BOT_LIKE_UA = "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
+
+
+async def check_cloaking(url: str, timeout_seconds: int = 10, gambling_keywords=None) -> dict:
+    """Fetch `url` twice with two different request signatures -- once matching this
+    pipeline's normal browser-impersonating fetch, once with a generic/bot-like User-Agent
+    and no stealthy-header spoofing -- and compare the results for gambling-keyword
+    presence and gross content-length divergence.
+
+    Never raises: any fetch failure just means cloaking is undetermined, since this is a
+    corroborating signal, not a primary classification path. Callers should treat a
+    True `cloaking_suspected` as "worth a human look", never as proof by itself.
+    """
+    gambling_keywords = gambling_keywords or set()
+
+    async def _fetch_as(bot_like: bool):
+        kwargs = dict(
+            timeout=timeout_seconds,
+            impersonate=IMPERSONATE,
+            stealthy_headers=(not bot_like),
+            follow_redirects=True,
+            retries=1,
+        )
+        if bot_like:
+            kwargs["headers"] = {"User-Agent": _BOT_LIKE_UA}
+        try:
+            resp = await AsyncFetcher.get(url, **kwargs)
+        except TypeError:
+            # Older/incompatible Scrapling version without a `headers` kwarg -- fall back
+            # to disabling stealthy_headers as the only available differentiator.
+            kwargs.pop("headers", None)
+            kwargs["stealthy_headers"] = False
+            try:
+                resp = await AsyncFetcher.get(url, **kwargs)
+            except Exception:
+                return None
+        except Exception:
+            return None
+        raw_body = getattr(resp, "body", None) if resp is not None else None
+        if isinstance(raw_body, bytes):
+            return raw_body.decode(getattr(resp, "encoding", "utf-8") or "utf-8", errors="ignore")
+        return raw_body if isinstance(raw_body, str) else ""
+
+    browser_html = await _fetch_as(bot_like=False)
+    bot_html = await _fetch_as(bot_like=True)
+
+    if browser_html is None or bot_html is None:
+        return {
+            "cloaking_suspected": False,
+            "browser_len": len(browser_html or ""),
+            "bot_len": len(bot_html or ""),
+            "note": "one or both fetches failed; cloaking undetermined",
+        }
+
+    b_low, o_low = browser_html.lower(), bot_html.lower()
+    b_has_kw = any(kw in b_low for kw in gambling_keywords)
+    o_has_kw = any(kw in o_low for kw in gambling_keywords)
+    longer = max(len(browser_html), len(bot_html))
+    len_ratio = (min(len(browser_html), len(bot_html)) / longer) if longer else 1.0
+
+    suspected = False
+    note = "no significant difference between browser and bot-like fetch"
+    if gambling_keywords and (b_has_kw != o_has_kw):
+        suspected = True
+        note = f"gambling keyword presence differs: browser={b_has_kw}, bot-like={o_has_kw}"
+    elif len_ratio < 0.5:
+        suspected = True
+        note = f"content length differs sharply between fetches (ratio={len_ratio:.2f})"
+
+    return {
+        "cloaking_suspected": suspected,
+        "browser_len": len(browser_html),
+        "bot_len": len(bot_html),
+        "note": note,
+    }
+
 _BLOCKED_BODY_MARKERS = [
     "checking your browser", "cf-challenge", "captcha", "just a moment",
     "enable javascript and cookies", "cf_chl_opt", "ray id",

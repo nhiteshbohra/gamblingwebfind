@@ -19,7 +19,7 @@ from typing import Any
 import socket
 import tldextract
 from dotenv import load_dotenv
-from pymongo import MongoClient
+from pymongo import MongoClient, ReturnDocument
 from pymongo.collection import Collection
 
 # Load root .env
@@ -380,6 +380,41 @@ def find_dead_domains(limit: int = 0, min_age_days: int = 0):
                     return
 
 
+def find_for_sale_domains(limit: int = 0):
+    """Yield domains previously marked as for_sale (parked/registrar lander) in
+    checked_domains -- a parked domain can get bought and turned into a live site
+    (gambling or otherwise) later, so it's worth periodic recheck same as dead/blocked."""
+    flt = {"status": "for_sale"}
+    cur = checked_domains().find(flt)
+    if limit:
+        cur = cur.limit(limit)
+    for doc in cur:
+        domain = doc.get("domain") or doc.get("_id")
+        if domain:
+            yield {"domain": domain, "_id": domain, "url": doc.get("url", f"https://{domain}")}
+
+
+def find_exported_gambling_domains(limit: int = 0):
+    """Yield exported (reported for blocking) domains worth re-checking -- either still
+    'gambling' (never found down yet) or already 'reported_down' (re-checked in
+    case it's come back online, in which case it reverts to 'gambling') -- the candidate
+    set for reported_blocked_checker.py."""
+    flt = {"status": {"$in": ["gambling", "reported_down"]}, "exported": True}
+    cur = checked_domains().find(flt)
+    if limit:
+        cur = cur.limit(limit)
+    for doc in cur:
+        domain = doc.get("domain") or doc.get("_id")
+        if domain:
+            yield {
+                "domain": domain,
+                "_id": domain,
+                "url": doc.get("url", f"https://{domain}"),
+                "ip": doc.get("ip"),
+                "status": doc.get("status"),
+            }
+
+
 # ── Result writer ─────────────────────────────────────────────────────────────
 
 def write_result(
@@ -396,6 +431,7 @@ def write_result(
     category: str | None = None,
     decided_by: str | None = None,
     ai_context: dict | None = None,
+    matched_keywords: list | None = None,
 ):
     """Upsert a classification result into checked_domains AND sync active/processed
     in domain_Listed.
@@ -406,9 +442,16 @@ def write_result(
       - 'unconfirmed': Ollama offline/timeout or network error (processed=False to re-run!)
       - 'blocked': 403 / Cloudflare WAF
       - 'dead': 404 confirmed / Connection failed (no live content, no parking lander)
-      - 'regular' also covers: domain-for-sale / registrar parking landers — reachable
-        and rendering real content, just not gambling and not dead, so these are
-        classified as 'regular' rather than 'dead'.
+      - 'for_sale': domain-for-sale / registrar parking lander — reachable and rendering
+        real content, just not gambling and not dead, and not a real site of its own
+        either, so it gets its own status distinct from both 'regular' and 'dead'.
+      - 'reported_down': an exported/reported 'gambling' domain that
+        reported_blocked_checker.py found unreachable — the expected outcome once an
+        ISP/regulator acts on the report. Kept distinct from 'dead' (which means something
+        unrelated: never-was-reachable) so a reported-and-now-down domain stays
+        identifiable. Found reachable again on a later recheck, it reverts straight back to
+        'gambling'. Its screenshot is untouched either way — see delete_screenshot()'s
+        docstring for why.
 
     confidence/category/decided_by persist the AI's own self-reported certainty and which
     pipeline stage produced the verdict (e.g. "heuristic_score", "domain_anchor_strong",
@@ -418,6 +461,10 @@ def write_result(
     computed by classify_with_challenge() but discarded at write time — with a 1M-domain
     irreversible-ban pipeline, throwing away the model's own certainty made it impossible to
     triage which verdicts most need a human's eyes before acting on them.
+
+    matched_keywords persists the actual heuristic keyword/signal list (not just its count,
+    which was already folded into `reason`'s text) so the dashboard's domain inspector can
+    show exactly which terms triggered a verdict, not just how many.
     """
     today_date = datetime.now(IST).strftime("%Y-%m-%d")
 
@@ -462,12 +509,27 @@ def write_result(
         set_fields["decided_by"] = decided_by
     if ai_context is not None:
         set_fields["ai_context"] = ai_context
+    if matched_keywords is not None:
+        set_fields["matched_keywords"] = [str(k) for k in matched_keywords]
+    if status != "unconfirmed":
+        set_fields["unconfirmed_count"] = 0  # any real verdict clears the streak
 
-    # screenshot_taken and screenshot_date are strictly for gambling status only
-    if status == "gambling":
+    # screenshot_taken and screenshot_date are strictly for gambling status only. Only
+    # touched when the caller passes an explicit True/False -- leaving screenshot_taken=None
+    # (the default) means "don't know/don't care," not "no screenshot", so it must never
+    # silently overwrite real, already-captured evidence to False. Every runner.py call site
+    # already passes an explicit bool; this only protects a caller (e.g.
+    # reported_blocked_checker.py reverting a domain back to "gambling") that doesn't.
+    if status == "gambling" and screenshot_taken is not None:
         set_fields["screenshot_taken"] = bool(screenshot_taken)
         if screenshot_taken:
             set_fields["screenshot_date"] = today_date
+            set_fields["screenshot_failed_reason"] = None
+        elif screenshot_failed_reason is not None:
+            # Bug fixed 2026-08-30: this parameter was accepted and displayed by the
+            # dashboard/API but never actually written here -- every screenshot failure
+            # reason runner.py passed in was silently dropped.
+            set_fields["screenshot_failed_reason"] = screenshot_failed_reason
 
     update = {
         "$set": set_fields,
@@ -486,15 +548,31 @@ def write_result(
 
             # Sync status in source domain_Listed (strictly: _id, domain, active, processed, added_date, source)
             if status == "unconfirmed":
+                # Track consecutive unconfirmed streaks. Past UNCONFIRMED_RETRY_CAP failures
+                # in a row, stop letting --mode new re-pick this up as if it were a fresh
+                # domain (it was just cluttering that queue with the same stuck domains
+                # every run) -- but checked_domains.status stays "unconfirmed" regardless,
+                # so --mode unconfirmed (the dedicated recheck queue, see
+                # find_unconfirmed_domains -- it queries status directly, not this flag)
+                # keeps finding and retrying it forever. Never hides a domain from review,
+                # just stops double-counting it against the new-domains queue.
+                updated = checked_domains().find_one_and_update(
+                    {"_id": domain},
+                    {"$inc": {"unconfirmed_count": 1}},
+                    upsert=True,
+                    return_document=ReturnDocument.AFTER,
+                )
+                cap = int(os.getenv("UNCONFIRMED_RETRY_CAP", 5))
+                give_up_on_new_queue = (updated or {}).get("unconfirmed_count", 0) >= cap
                 source_domains().update_one(
                     {"_id": domain},
                     {
-                        "$set": {"domain": domain, "processed": False, "active": True},
+                        "$set": {"domain": domain, "processed": give_up_on_new_queue, "active": True},
                         "$setOnInsert": {"added_date": today_date, "source": "searxng_search"},
                     },
                     upsert=True,
                 )
-            elif status in ("blocked", "dead"):
+            elif status in ("blocked", "dead", "reported_down"):
                 source_domains().update_one(
                     {"_id": domain},
                     {
@@ -503,7 +581,7 @@ def write_result(
                     },
                     upsert=True,
                 )
-            else:  # gambling or regular
+            else:  # gambling, regular, or for_sale
                 source_domains().update_one(
                     {"_id": domain},
                     {

@@ -13,6 +13,7 @@ let _searchDebounceTimer = null;
 let _ipDebounceTimer = null;
 let _confirmResolve = null;
 let _lastSandboxResult = null;
+let _domainsCache = {}; // domain -> row data from the last loadDomains() page, for the detail modal
 
 // ── Toast Notifications ──────────────────────────────────────────────────────
 function toast(msg, duration = 3500) {
@@ -363,6 +364,105 @@ function closeScreenshotModal() {
   modal.classList.add("hidden");
 }
 
+// ── Domain Detail Split View (live site + info dossier, inline — no new tab) ──
+const STATUS_LABELS = {
+  gambling: "🎰 Confirmed Gambling",
+  regular: "🏢 Regular Website",
+  blocked: "🛡️ Blocked / 403 WAF",
+  dead: "💀 Dead / Unreachable",
+  unconfirmed: "⏳ Unconfirmed (AI Queue)",
+  for_sale: "🏷️ For Sale / Parked",
+  reported_down: "✅ Reported & Down",
+};
+
+function openDomainDetailModal(domain) {
+  const d = _domainsCache[domain] || { domain, url: `https://${domain}` };
+  const targetUrl = d.url || `https://${domain}`;
+
+  document.getElementById("dd-modal-title").textContent = `🌐 ${domain}`;
+  document.getElementById("dd-live-url").textContent = targetUrl;
+  document.getElementById("dd-open-new-tab").href = targetUrl;
+  document.getElementById("dd-enable-js").checked = true; // on by default so sites actually render
+
+  const ipText = Array.isArray(d.ip) ? d.ip.join(", ") : (d.ip || "—");
+  const statusLabel = STATUS_LABELS[d.status] || d.status || "unknown";
+  const kwList = Array.isArray(d.matched_keywords) ? d.matched_keywords : [];
+  const kwPills = kwList.length
+    ? kwList.map(kw => `<span class="keyword-pill">${kw}</span>`).join(" ")
+    : `<span class="muted" style="font-size:12px">Not recorded for this record</span>`;
+
+  document.getElementById("dd-info-pane").innerHTML = `
+    <div class="metric-row"><span class="metric-label">Domain</span><span class="metric-value mono">${domain}</span></div>
+    <div class="metric-row"><span class="metric-label">Status</span><span class="metric-value"><span class="badge badge-${d.status || 'dead'}">${statusLabel}</span></span></div>
+    <div class="metric-row"><span class="metric-label">IP Address</span><span class="metric-value mono" style="color:var(--cyan)">${ipText}</span></div>
+    <div class="metric-row"><span class="metric-label">ASN (Hosting)</span><span class="metric-value mono">${d.asn || '—'}</span></div>
+    <div class="metric-row"><span class="metric-label">Added Date</span><span class="metric-value">${d.added_date || '—'}</span></div>
+    <div class="metric-row"><span class="metric-label">Decided By</span><span class="metric-value">${d.decided_by || '—'}</span></div>
+    <div class="metric-row"><span class="metric-label">AI Category</span><span class="metric-value">${d.category || '—'}</span></div>
+    <div class="metric-row"><span class="metric-label">AI Confidence</span><span class="metric-value">${d.confidence != null ? d.confidence : '—'}</span></div>
+    <div class="metric-row"><span class="metric-label">Screenshot</span><span class="metric-value">${(d.has_screenshot_file || d.screenshot_taken) ? '📸 Captured' : '— None'}</span></div>
+    <div class="metric-row"><span class="metric-label">Exported</span><span class="metric-value">${d.exported ? `📦 Yes (${d.exported_at || ''})` : '⏳ Not yet'}</span></div>
+
+    <div style="margin-top:14px">
+      <div style="font-size:11px;font-weight:700;text-transform:uppercase;color:var(--purple);margin-bottom:4px">Matched Keywords (${kwList.length})</div>
+      <div class="keywords-pills-container">${kwPills}</div>
+    </div>
+
+    <div style="margin-top:14px">
+      <div style="font-size:11px;font-weight:700;text-transform:uppercase;color:var(--purple);margin-bottom:4px">Reason / Suspicious Signals</div>
+      <div style="font-size:13px;line-height:1.6;color:var(--text)">${d.reason || '—'}</div>
+    </div>
+    <div style="display:flex;gap:8px;margin-top:16px;flex-wrap:wrap">
+      ${(d.has_screenshot_file || d.screenshot_taken) ? `<button class="btn btn-ghost btn-sm" onclick="openScreenshotModal('${domain}', '${targetUrl}')">📸 View Screenshot</button>` : ''}
+      <button class="btn btn-ghost btn-sm" onclick="inspectInSandbox('${targetUrl}')">⚡ Full Sandbox Inspect</button>
+    </div>
+  `;
+
+  document.getElementById("domain-detail-modal").dataset.domain = domain;
+  reloadDomainDetailFrame();
+  document.getElementById("domain-detail-modal").classList.remove("hidden");
+}
+
+async function searchDomainInDetailModal() {
+  const raw = document.getElementById("dd-search-input").value.trim();
+  if (!raw) return;
+  // Accept a bare domain or a pasted full URL -- normalize down to the bare domain either way.
+  const domain = raw.replace(/^https?:\/\//i, "").replace(/^www\./i, "").split("/")[0].toLowerCase();
+
+  try {
+    const res = await fetch(`${API}/api/domains/${encodeURIComponent(domain)}`);
+    if (res.status === 404) {
+      toast(`"${domain}" isn't in the database yet.`);
+      return;
+    }
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const d = await res.json();
+    _domainsCache[domain] = d; // raw doc already uses the same field names the info panel reads
+    document.getElementById("dd-search-input").value = "";
+    openDomainDetailModal(domain);
+  } catch (err) {
+    toast(`Search failed: ${err.message}`);
+  }
+}
+
+function reloadDomainDetailFrame() {
+  const domain = document.getElementById("domain-detail-modal").dataset.domain;
+  if (!domain) return;
+  const iframe = document.getElementById("dd-live-iframe");
+  const jsEnabled = document.getElementById("dd-enable-js").checked;
+  // Served from OUR OWN origin (the proxy), so allow-same-origin must NEVER be combined
+  // with allow-scripts here -- that combo would let the framed page's script read this
+  // dashboard's cookies/localStorage and call its APIs. Scripts-only keeps it isolated to
+  // an opaque origin: it runs, but can't touch anything of ours.
+  iframe.sandbox = jsEnabled ? "allow-scripts" : "";
+  iframe.src = `${API}/api/domains/${encodeURIComponent(domain)}/proxy?t=${Date.now()}`;
+}
+
+function closeDomainDetailModal() {
+  document.getElementById("domain-detail-modal").classList.add("hidden");
+  document.getElementById("dd-live-iframe").src = "about:blank"; // stop the embedded page (audio/video/scripts) once closed
+}
+
 // ── 1. Overview & Stats Loader ───────────────────────────────────────────────
 async function loadOverview() {
   const errBanner = document.getElementById("global-error-banner");
@@ -511,6 +611,7 @@ async function loadDomains(page = 1) {
       return;
     }
 
+    results.forEach(d => { _domainsCache[d.domain] = d; });
     tbody.innerHTML = results.map(renderDomainFullRow).join("");
   } catch (err) {
     tbody.innerHTML = `
@@ -546,8 +647,7 @@ function renderDomainFullRow(d) {
   return `
     <tr>
       <td>
-        <span style="font-weight:700;color:#fff">${d.domain}</span>
-        <a href="${targetUrl}" target="_blank" rel="noopener noreferrer" style="margin-left:6px;color:var(--accent-light);font-size:11px" title="Visit website">↗</a>
+        <span style="font-weight:700;color:#fff;cursor:pointer;text-decoration:underline;text-decoration-style:dotted" onclick="openDomainDetailModal('${d.domain}')" title="Inspect inline — live site + full details, no new tab">${d.domain}</span>
       </td>
       <td>${ipDisplay}</td>
       <td><span class="badge badge-${d.status || 'dead'}">${d.status || 'unknown'}</span></td>

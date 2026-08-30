@@ -6,6 +6,11 @@ from PIL import Image, ImageStat
 from playwright.async_api import async_playwright, Browser, Playwright
 import hashlib
 
+# Reuse the same Cloudflare-interstitial markers fetcher.py already checks at the raw-HTTP
+# layer, so a temporary "checking your browser" JS challenge is recognized consistently
+# instead of Playwright treating every 403 as a permanent block.
+from checking_url.fetcher import _BLOCKED_BODY_MARKERS as _CF_CHALLENGE_MARKERS
+
 def _url_to_filename(url: str) -> str:
     """Generate a clean, filesystem-safe unique filename from a URL."""
     parsed = urllib.parse.urlparse(url)
@@ -29,6 +34,29 @@ def all_filename_candidates(url: str, domain: str) -> list[str]:
         _url_to_filename(f"https://www.{clean_dom}"),
         _url_to_filename(f"http://www.{clean_dom}"),
     ]))
+
+
+def find_screenshot_path(url: str, domain: str, output_dir: str = None) -> str | None:
+    """Resolve a domain's screenshot to an actual file on disk, if one exists.
+
+    output/screenshots/ is meant to stay flat (every capture writes straight into
+    output_dir, never a subfolder), but a subfolder named "New folder" was manually
+    created inside it at some point (outside this codebase's control -- nothing here
+    ever creates subdirectories) and ~16k existing screenshots ended up moved into it,
+    which broke every flat-directory lookup. Per the "never move/delete a screenshot"
+    policy, this doesn't touch those files to fix that -- it just also checks that one
+    known subfolder as a fallback after the normal flat location. Extend SEARCH_SUBDIRS
+    if screenshots ever end up relocated somewhere else again.
+    """
+    if output_dir is None:
+        output_dir = os.getenv("SCREENSHOT_DIR", os.path.join("output", "screenshots"))
+    SEARCH_SUBDIRS = ("", "New folder")
+    for cand in all_filename_candidates(url, domain):
+        for subdir in SEARCH_SUBDIRS:
+            p = os.path.join(output_dir, subdir, cand) if subdir else os.path.join(output_dir, cand)
+            if is_valid_screenshot(p):
+                return p
+    return None
 
 
 def is_valid_screenshot(filepath: str, min_size_bytes: int = 4000) -> bool:
@@ -62,7 +90,14 @@ def is_valid_screenshot(filepath: str, min_size_bytes: int = 4000) -> bool:
 
 
 def delete_screenshot(url_or_domain: str, output_dir: str = None) -> bool:
-    """Delete screenshot file(s) for a given domain/URL if found on disk."""
+    """Delete screenshot file(s) for a given domain/URL if found on disk.
+
+    output/screenshots/ is otherwise a permanent archive — nothing else in the pipeline
+    moves or deletes from it. This function is the one deliberate exception: every caller
+    site only reaches it at the moment a domain's status is changing AWAY from gambling
+    (or a just-attempted capture failed validation), so a stale screenshot never survives
+    under a wrong/non-gambling status tag. See runner.py's downgrade branches for the
+    call sites this scopes to."""
     if not url_or_domain:
         return False
     if output_dir is None:
@@ -147,14 +182,22 @@ class BrowserPool:
                     pass
                 self.playwright = None
 
-    async def capture_url(self, url: str, output_dir: str, retries: int = 2, keywords: set = None) -> tuple[str | None, str, list | str]:
+    async def capture_url(self, url: str, output_dir: str, retries: int = 2, keywords: set = None, domain: str | None = None) -> tuple[str | None, str, list | str]:
         """
         Direct capture function:
           - If the website responds / opens: take screenshot immediately.
           - If the website cannot be reached / times out after 15-20s / connection refused / DNS failed: mark as dead.
+
+        `domain`, when given, is used for the FILENAME instead of `url` — `url` may already
+        be a post-redirect destination (e.g. runner.py's eval_url), and multiple distinct
+        source domains that happen to redirect to the same mirror/affiliate landing page
+        would otherwise collide on one shared filename and only one of them would ever get
+        its own screenshot. Each domain record must have its own separate file regardless of
+        where it redirects to, so naming is always anchored to the domain identity, not
+        wherever the browser ends up navigating.
         """
         os.makedirs(output_dir, exist_ok=True)
-        filename = _url_to_filename(url)
+        filename = _url_to_filename(f"https://{domain}") if domain else _url_to_filename(url)
         filepath = os.path.join(output_dir, filename)
 
         # Re-use an existing valid screenshot if already on disk
@@ -214,10 +257,38 @@ class BrowserPool:
                         delete_screenshot(clean_dom, os.path.dirname(filepath))
                         return None, "dead", f"Dead: HTTP {http_status} Server Error in Playwright"
                     elif http_status == 403:
-                        await context.close()
-                        context = None
-                        delete_screenshot(clean_dom, os.path.dirname(filepath))
-                        return None, "blocked", "Blocked: HTTP 403 Forbidden in Playwright"
+                        # A 403 on first response is often Cloudflare's "checking your
+                        # browser" / "just a moment" JS interstitial, not a real block — it
+                        # auto-resolves to the real page (with a 200) in a few seconds once
+                        # its JS challenge runs, same distinction fetcher.py's own
+                        # _BLOCKED_BODY_MARKERS check already makes at the raw-HTTP layer.
+                        # Bailing out on the raw 403 immediately (as this used to) meant a
+                        # real live gambling site could permanently fail its evidentiary
+                        # screenshot just for sitting behind Cloudflare, which is extremely
+                        # common. Give the challenge a chance to clear before giving up.
+                        try:
+                            body_lower = (await page.content()).lower()
+                        except Exception:
+                            body_lower = ""
+                        if any(m in body_lower for m in _CF_CHALLENGE_MARKERS):
+                            try:
+                                await page.wait_for_load_state("networkidle", timeout=8000)
+                            except Exception:
+                                await asyncio.sleep(5.0)
+                            try:
+                                still_challenged = any(
+                                    m in (await page.content()).lower() for m in _CF_CHALLENGE_MARKERS
+                                )
+                            except Exception:
+                                still_challenged = True
+                        else:
+                            still_challenged = False
+                        if still_challenged:
+                            await context.close()
+                            context = None
+                            delete_screenshot(clean_dom, os.path.dirname(filepath))
+                            return None, "blocked", "Blocked: HTTP 403 Forbidden in Playwright"
+                        # Challenge cleared — fall through and capture the real page below.
                     elif http_status in (404, 410):
                         await context.close()
                         context = None

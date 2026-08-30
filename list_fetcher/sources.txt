@@ -1,0 +1,68 @@
+# ══════════════════════════════════════════════════════════════════════════════
+#  list_fetcher/sources.txt  —  Blocklist Sources Configuration
+# ══════════════════════════════════════════════════════════════════════════════
+#
+#  HOW TO ADD A NEW SOURCE:
+#  ────────────────────────
+#  Each non-comment line follows this format:
+#
+#    id | Name | URL_or_local_path
+#
+#  Fields:
+#    id   — short unique identifier (letters, numbers, underscores only)
+#    Name — human-readable label shown in logs and MongoDB reason field
+#    URL  — GitHub /blob/ URL, raw URL, or a local file path (.txt/.csv/.xlsx)
+#
+#  TIPS:
+#    - Lines starting with # are comments and are ignored
+#    - Blank lines are ignored
+#    - Both GitHub /blob/ URLs and raw.githubusercontent.com URLs work
+#    - Local file paths (absolute or relative to project root) also work
+#    - All formats auto-detected: Hosts, AdBlock, RPZ, Dnsmasq, Wildcard, plain domain list
+#    - Duplicate domains across sources are automatically de-duplicated
+#
+#  EXAMPLE — Add a custom source:
+#    my_list | My Custom Gambling List | https://example.com/my_domains.txt
+#    local_list | My Local Import | C:\Users\me\Downloads\gambling_sites.txt
+#
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── Group 1: Curated Government & Official Registries ─────────────────────────
+
+estonia_gambling      | Estonia Blocked Gambling Websites   | https://github.com/elliotwutingfeng/Estonia-Blocked-Gambling-Websites/blob/main/blocklist.txt
+teqsa_cheating        | TEQSA Illegal Cheating Websites      | https://github.com/elliotwutingfeng/TEQSA-illegal-cheating-websites/blob/main/urls.txt
+acma_gambling         | ACMA Blocked Gambling Websites       | https://github.com/elliotwutingfeng/ACMA-blocked-gambling-websites/blob/main/urls.txt
+
+# ── Group 2: Community Curated Blocklists ─────────────────────────────────────
+
+arkynx_gambling           | Arkynx Gambling Blocklist        | https://github.com/arkynx/blocklists/blob/main/gambling-domains.txt
+adguard_gambling          | AdGuardHome Gambling Filter      | https://github.com/alexsannikov/adguardhome-filters/blob/master/gambling.txt
+ph00lt0_gambling          | ph00lt0 Blocklist Domains        | https://github.com/ph00lt0/blocklist/blob/master/domains.txt
+eimji_hosts               | Eimji Gambling Hosts             | https://github.com/Eimji/hosts/blob/master/gambling_hosts.txt
+blocklistproject_gambling | BlocklistProject Gambling List   | https://raw.githubusercontent.com/blocklistproject/Lists/refs/heads/main/gambling.txt
+
+# ── Group 3: Hagezi DNS Gambling Blocklists (multiple formats, all deduplicated) ──
+# NOTE: These all come from hagezi/dns-blocklists and overlap heavily.
+# You can comment out formats you don't need to speed up imports.
+
+hagezi_gambling_onlydomains        | Hagezi Gambling (Full, Wildcard)    | https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/gambling-onlydomains.txt
+hagezi_gambling_medium_onlydomains | Hagezi Gambling (Medium, Wildcard)  | https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/gambling.medium-onlydomains.txt
+hagezi_gambling_mini_onlydomains   | Hagezi Gambling (Mini, Wildcard)    | https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/gambling.mini-onlydomains.txt
+hagezi_domains_gambling            | Hagezi Gambling (Domains format)    | https://raw.githubusercontent.com/hagezi/dns-blocklists/main/domains/gambling.txt
+hagezi_rpz_gambling                | Hagezi Gambling (RPZ format)        | https://raw.githubusercontent.com/hagezi/dns-blocklists/main/rpz/gambling.txt
+hagezi_adblock_gambling            | Hagezi Gambling (AdBlock format)    | https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/gambling.txt
+hagezi_dnsmasq_gambling            | Hagezi Gambling (Dnsmasq format)    | https://raw.githubusercontent.com/hagezi/dns-blocklists/main/dnsmasq/gambling.txt
+hagezi_hosts_gambling              | Hagezi Gambling (Hosts format)      | https://raw.githubusercontent.com/hagezi/dns-blocklists/main/hosts/gambling.txt
+
+# ── Group 4: Your Custom Sources ──────────────────────────────────────────────
+
+sefinek_gambling_hosts      | Sefinek Gambling Hosts (v1)          | https://github.com/sefinek/Sefinek-Blocklist-Collection/blob/main/lists/gambling/sefinek.hosts.txt
+sefinek_gambling_hosts2     | Sefinek Gambling Hosts (v2)          | https://github.com/sefinek/Sefinek-Blocklist-Collection/blob/main/lists/gambling/sefinek.hosts2.txt
+durablenapkin_scam          | DurableNapkin Scam Blocklist         | https://github.com/durablenapkin/scamblocklist/blob/master/hosts.txt
+shadowwhisperer_gambling_raw  | ShadowWhisperer Gambling (RAW)     | https://github.com/ShadowWhisperer/BlockLists/blob/master/RAW/Gambling
+shadowwhisperer_gambling_list | ShadowWhisperer Gambling (Lists)   | https://github.com/ShadowWhisperer/BlockLists/blob/master/Lists/Gambling
+sefinek_gambling_cdn        | Sefinek Gambling (Direct CDN)        | https://blocklist.sefinek.net/generated/v1/0.0.0.0/gambling/sefinek.hosts.txt
+blocklistproject_gambling_gh  | BlocklistProject Gambling (GH Pages) | https://blocklistproject.github.io/Lists/gambling.txt
+majkit_polish_gambling      | MajkiIT Polish Gambling Filter       | https://raw.githubusercontent.com/MajkiIT/polish-ads-filter/master/polish-pihole-filters/gambling-hosts.txt
+
+# Add more sources below — one per line, format: id | Name | URL_or_local_path

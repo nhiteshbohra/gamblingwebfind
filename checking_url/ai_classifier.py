@@ -17,6 +17,7 @@ import re
 import asyncio
 import base64
 import logging
+from collections import deque
 from pathlib import Path
 from bs4 import BeautifulSoup
 import aiohttp
@@ -65,6 +66,26 @@ except ImportError:
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gambling-analyst")
 OLLAMA_VALIDATOR_MODEL = os.getenv("OLLAMA_VALIDATOR_MODEL", "gambling-validator")
+
+# ── Ollama Validator Config Guard ───────────────────────────────────────────
+# Fixed 2026-08-21 (see ARCHITECTURE.md): production .env once had
+# OLLAMA_VALIDATOR_MODEL == OLLAMA_MODEL, and gambling-validator had never
+# been built, so every "independent skeptic" Validator round was silently
+# just the Analyst model re-confirming its own verdict. That degraded the
+# whole two-round challenge system to a single round with no one actually
+# checking it, with no error or warning anywhere. Refuse to import this
+# module in that state so the same misconfiguration can never again fail
+# silently -- set ALLOW_SAME_OLLAMA_VALIDATOR_MODEL=true in .env only for
+# deliberate single-model local testing.
+if OLLAMA_MODEL == OLLAMA_VALIDATOR_MODEL and os.getenv("ALLOW_SAME_OLLAMA_VALIDATOR_MODEL", "false").lower() != "true":
+    raise RuntimeError(
+        f"OLLAMA_MODEL and OLLAMA_VALIDATOR_MODEL are both '{OLLAMA_MODEL}' -- the "
+        "Validator round would just be the Analyst model validating itself, silently "
+        "defeating the two-round challenge system (this is the exact bug fixed on "
+        "2026-08-21). Set OLLAMA_VALIDATOR_MODEL to a distinct model in your .env "
+        "(e.g. OLLAMA_MODEL=gambling-analyst / OLLAMA_VALIDATOR_MODEL=gambling-validator), "
+        "or set ALLOW_SAME_OLLAMA_VALIDATOR_MODEL=true if this is intentional for local testing."
+    )
 # Tie-breaker: only invoked for the small slice of disputed/uncertain cases (validator says
 # "uncertain", or both validator model attempts fail) — a bigger model is affordable there
 # since it's a tiny fraction of total volume, unlike running it on every domain. Default is
@@ -108,6 +129,7 @@ class DynamicTimeoutManager:
         self._total_calls: int = 0
         self._total_timeouts: int = 0
         self._lock = asyncio.Lock()
+        self._recent_outcomes: deque = deque(maxlen=10)  # True = timed out, for recent_timeout_rate()
 
     def compute_timeout(self, prompt_chars: int) -> float:
         """
@@ -125,6 +147,7 @@ class DynamicTimeoutManager:
         """Update EMA with a successful response time."""
         async with self._lock:
             self._total_calls += 1
+            self._recent_outcomes.append(False)
             # EMA update: new_ema = alpha * latest + (1 - alpha) * old_ema
             self._ema_response_time = (
                 self.EMA_ALPHA * elapsed
@@ -136,11 +159,23 @@ class DynamicTimeoutManager:
         async with self._lock:
             self._total_calls += 1
             self._total_timeouts += 1
+            self._recent_outcomes.append(True)
             # Conservative 5% bump instead of 20% to prevent runaway 60s timeout freezes
             self._ema_response_time = min(
                 AI_TIMEOUT_MAX / self.SAFETY_MULTIPLIER,
                 self._ema_response_time * 1.05
             )
+
+    def recent_timeout_rate(self) -> float:
+        """Fraction of the last 10 calls that timed out. Used to fail fast (skip waiting
+        out another timeout) when Ollama is clearly struggling right now -- NEVER to
+        decide a verdict on its own. A high rate only ever means 'ask again later'
+        (status stays 'unconfirmed'), same outcome an actual timeout would produce, just
+        without burning the wait. Deciding gambling/regular from heuristics alone here
+        would bypass the AI review this whole pipeline exists to provide."""
+        if not self._recent_outcomes:
+            return 0.0
+        return sum(self._recent_outcomes) / len(self._recent_outcomes)
 
     async def reset_ema(self):
         """Reset EMA to base seed — call at start of a new batch to clear inflated timeouts from prior run."""
@@ -148,6 +183,7 @@ class DynamicTimeoutManager:
             self._ema_response_time = AI_TIMEOUT_BASE
             self._total_calls = 0
             self._total_timeouts = 0
+            self._recent_outcomes.clear()
 
     def stats(self) -> str:
         timeout_rate = (
@@ -530,6 +566,66 @@ def _evaluate_regular_evidence(reason: str, evidence: str, body_text: str, html:
     return False, "AI claimed non-gambling features that do not exist in page HTML (hallucination rejected)"
 
 
+async def translate_to_english_if_needed(html: str, url: str = "") -> tuple[str, bool]:
+    """Detect a non-English page and translate its visible text to English before
+    classification. Both the heuristic keyword scanner (English keyword list) and the
+    gambling-analyst prompt (English-only guardrails) are effectively blind to a page in
+    Chinese/Russian/Portuguese/etc. -- a real false-negative class for gambling sites
+    targeting non-English markets. A cheap offline langdetect check gates this so the
+    Ollama round-trip only happens for the rare actually-non-English page.
+
+    Returns (text_for_classification, was_translated). On English content, missing/too-
+    short text, or any failure, returns the original html unchanged so callers can use it
+    exactly as before.
+    """
+    if not html:
+        return html, False
+    from checking_url.classifier import _extract_text
+    text = _extract_text(html)
+    if len(text) < 200:
+        return html, False
+    try:
+        from langdetect import detect
+        lang = detect(text[:2000])
+    except Exception:
+        return html, False
+    if lang == "en":
+        return html, False
+
+    prompt = (
+        "Translate the following webpage text into English. Output ONLY the translated "
+        "text with no commentary, no markdown, no notes -- preserve the original meaning "
+        f"exactly:\n\n{text[:6000]}"
+    )
+    payload = {
+        "model": "qwen2.5:3b",  # plain base model -- no gambling-analyst persona/system
+        # prompt baked in, so it won't bias a translation task.
+        "prompt": prompt,
+        "stream": False,
+        "options": {"temperature": 0.1, "num_ctx": 4096},
+    }
+    sem = get_semaphore()
+    async with sem:
+        try:
+            session = await get_session()
+            async with session.post(
+                f"{OLLAMA_BASE_URL}/api/generate",
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=45),
+            ) as resp:
+                if resp.status == 200:
+                    result = await resp.json()
+                    translated = (result.get("response") or "").strip()
+                    if translated:
+                        logger.info(
+                            f"[translate] {url} | {lang}->en | {len(text)}->{len(translated)} chars"
+                        )
+                        return translated, True
+        except Exception as e:
+            logger.warning(f"[translate] Failed for {url} (lang={lang}): {e}")
+    return html, False
+
+
 async def _call_ollama(prompt: str, url: str = "") -> dict | None:
     """
     Make a single Ollama API call with DYNAMIC per-request timeout.
@@ -591,21 +687,12 @@ async def _call_ollama(prompt: str, url: str = "") -> dict | None:
     return None
 
 
-async def classify_screenshot_vision(image_path: str, url: str = "") -> dict | None:
-    """
-    Vision-model last resort for canvas/WebGL-rendered gambling UIs (slot reels, live-dealer
-    video feeds, bet-slip panels, roulette wheels) that render entirely inside a <canvas> or
-    WebGL context — these ship ZERO DOM text (the keyword classifier sees nothing) and often
-    zero printed banner text either (OCR sees nothing, since there's no static text to read,
-    just animated game graphics). Only call this on pages that already look empty everywhere
-    else (see runner.py) — it's a targeted patch for one specific blind spot, not a general
-    replacement for the text pipeline.
-
-    Uses a small, purpose-built vision model (default: moondream, ~1.7GB) rather than a large
-    general VLM — this is a fast binary "does this look like a casino/betting UI" check, not
-    open-ended image reasoning, so a lightweight model is the right fit for a 16GB-RAM box
-    that's also holding Ollama's text model, MongoDB, and a Playwright browser pool in memory.
-    """
+async def _call_vision_model(image_path: str, prompt: str, log_ctx: str = "") -> dict | None:
+    """Shared Ollama vision-model call: reads the image, sends it + prompt, parses the JSON
+    response. Uses a small, purpose-built vision model (default: moondream, ~1.7GB) rather
+    than a large general VLM -- a fast targeted image-read, not open-ended reasoning, so a
+    lightweight model is the right fit for a 16GB-RAM box also holding Ollama's text model,
+    MongoDB, and a Playwright browser pool in memory."""
     if not image_path or not os.path.exists(image_path):
         return None
     try:
@@ -615,25 +702,6 @@ async def classify_screenshot_vision(image_path: str, url: str = "") -> dict | N
         logger.warning(f"[vision] Could not read screenshot {image_path}: {e}")
         return None
 
-    prompt = f"""You are looking at a screenshot of the website {url}.
-
-Does this image show an online casino, sports betting, slot machine, live dealer game, poker
-table, betting odds / bet-slip interface, or lottery / crash-game UI?
-
-Look specifically for: slot machine reels, casino chips or playing cards, a roulette wheel,
-a bet-amount input with "Bet"/"Spin"/"Deposit" buttons, sports odds tables, a live dealer
-video feed, jackpot/prize displays, or crash-game multiplier graphics (e.g. Aviator).
-
-A generic business/app homepage, login screen, article, or product page with none of these
-elements is NOT gambling, even if the color scheme is flashy.
-
-Respond ONLY in valid JSON:
-{{
-  "verdict": "gambling" or "regular",
-  "confidence": 0.0 to 1.0,
-  "visual_evidence": "what you actually see in the image that supports this"
-}}
-"""
     payload = {
         "model": OLLAMA_VISION_MODEL,
         "prompt": prompt,
@@ -661,12 +729,79 @@ Respond ONLY in valid JSON:
                         f"run: ollama pull {OLLAMA_VISION_MODEL}"
                     )
         except (aiohttp.ClientConnectorError, aiohttp.ServerDisconnectedError):
-            logger.warning(f"[vision] Ollama server offline for {url}")
+            logger.warning(f"[vision] Ollama server offline for {log_ctx}")
         except asyncio.TimeoutError:
-            logger.warning(f"[vision] Timeout classifying screenshot for {url}")
+            logger.warning(f"[vision] Timeout classifying screenshot for {log_ctx}")
         except Exception as e:
-            logger.warning(f"[vision] Screenshot classification failed for {url}: {e}")
+            logger.warning(f"[vision] Screenshot classification failed for {log_ctx}: {e}")
     return None
+
+
+async def classify_screenshot_vision(image_path: str, url: str = "") -> dict | None:
+    """
+    Vision-model last resort for canvas/WebGL-rendered gambling UIs (slot reels, live-dealer
+    video feeds, bet-slip panels, roulette wheels) that render entirely inside a <canvas> or
+    WebGL context — these ship ZERO DOM text (the keyword classifier sees nothing) and often
+    zero printed banner text either (OCR sees nothing, since there's no static text to read,
+    just animated game graphics). Only call this on pages that already look empty everywhere
+    else (see runner.py) — it's a targeted patch for one specific blind spot, not a general
+    replacement for the text pipeline.
+    """
+    prompt = f"""You are looking at a screenshot of the website {url}.
+
+Does this image show an online casino, sports betting, slot machine, live dealer game, poker
+table, betting odds / bet-slip interface, or lottery / crash-game UI?
+
+Look specifically for: slot machine reels, casino chips or playing cards, a roulette wheel,
+a bet-amount input with "Bet"/"Spin"/"Deposit" buttons, sports odds tables, a live dealer
+video feed, jackpot/prize displays, or crash-game multiplier graphics (e.g. Aviator).
+
+A generic business/app homepage, login screen, article, or product page with none of these
+elements is NOT gambling, even if the color scheme is flashy.
+
+Respond ONLY in valid JSON:
+{{
+  "verdict": "gambling" or "regular",
+  "confidence": 0.0 to 1.0,
+  "visual_evidence": "what you actually see in the image that supports this"
+}}
+"""
+    return await _call_vision_model(image_path, prompt, log_ctx=url)
+
+
+async def classify_screenshot_for_sorting(image_path: str, label: str = "") -> dict | None:
+    """
+    Vision check for checking_url/screenshot_folder_sorter.py: sorting a folder of arbitrary
+    screenshots into gambling / not-gambling. Unlike classify_screenshot_vision() (a narrow
+    canvas/WebGL fallback for the main pipeline), this is the PRIMARY signal for that tool, so
+    it explicitly asks about -- and forces "false" for -- hotels/resorts, restaurants,
+    schools/colleges, and banks, even when the image itself shows a casino: a resort's own
+    gaming floor or a bank's "jackpot rewards" ad is real gambling-adjacent imagery on a site
+    that isn't an online gambling operator, exactly the false-positive class this project has
+    hit repeatedly on the text side (see classifier.py's hospitality/banking archetype gates).
+    """
+    prompt = f"""You are looking at a screenshot of a website{f' ({label})' if label else ''}.
+
+Determine whether this is an ONLINE GAMBLING operator's own site: a casino, sportsbook, slot
+game, poker room, or lottery platform where a visitor can register and wager real money on
+THIS site.
+
+CRITICAL: If the image shows a hotel/resort, restaurant, school/college/university, or
+bank/financial institution, answer "is_gambling": false and "is_institutional": true —
+REGARDLESS of any casino, slot machine, or gambling-themed imagery visible (e.g. a resort's
+own casino floor, a bank ad using the word "jackpot"). These are real businesses that may
+have a physical gaming amenity or gambling-themed marketing, not an online gambling operator,
+and must never be counted as gambling here.
+
+Respond ONLY in valid JSON:
+{{
+  "is_gambling": true or false,
+  "is_institutional": true or false,
+  "category": "online_casino" | "sports_betting" | "poker" | "lottery" | "hotel_resort" | "school_education" | "bank_financial" | "other_regular",
+  "visual_evidence": "what you actually see in the image that supports this"
+}}
+"""
+    return await _call_vision_model(image_path, prompt, log_ctx=label)
 
 
 async def check_ollama_status() -> tuple[bool, str]:
@@ -781,12 +916,22 @@ async def _call_tiebreaker(url: str, title: str, body_text: str, analyst_verdict
     gives disputed cases a real decisive look instead of an automatic requeue.
     """
     key_triggers = analyst_verdict.get("key_triggers", [])
+    # NOTE: unlike the Analyst/Validator rounds, this call has no custom Ollama model with a
+    # baked-in SYSTEM prompt behind it -- it hits the raw base model directly via /api/generate
+    # with no "system" field in the payload below. That means every guardrail the tiebreaker
+    # will ever see has to live in THIS prompt. Because this is also the round consulted for the
+    # single hardest slice of cases (the ones two prior models couldn't resolve), it previously
+    # carried the thinnest rule set and the smallest page-text window (1500 chars vs 2000-2500
+    # for the Analyst/Validator) of the three AI stages -- backwards for the hardest cases.
+    # Widened to 2500 chars (matching clean_page_text's own extraction budget) and given the same
+    # false-positive guardrails as the Analyst/Validator Modelfiles, condensed for a single-shot
+    # prompt (2026-08-24).
     prompt = f"""You are the final decisive reviewer. Two prior AI passes could not agree on
 this website. Make a clear, final call.
 
 URL: {url}
 Title: {title}
-Page Content: {body_text[:1500]}
+Page Content: {body_text[:2500]}
 
 First model said: verdict={analyst_verdict.get('verdict')}, confidence={analyst_verdict.get('confidence')}, reason="{analyst_verdict.get('reason', '')}"
 Second model (validator) could not decide: "{dispute_reason}"
@@ -797,12 +942,29 @@ Rules:
   'deposit', 'bonus', 'win', or 'stake' appear in a non-gambling context.
 - Real-money online casinos, sportsbooks, poker/rummy/teen patti platforms, betting exchanges,
   crash games (Aviator), and lottery/satta-matka sites are GAMBLING.
+- A site that REVIEWS, RANKS, or COMPARES gambling operators (affiliate/SEO content: "editor
+  rating", "our review", "affiliate disclosure", "we may earn commission", multiple third-party
+  brand names being compared, links sending visitors OUT to a different brand's site to
+  register/play) is REGULAR — a media/affiliate site, not an operator — no matter how much
+  gambling vocabulary appears, AS LONG AS it has no Login/Register-to-play or deposit-to-wager
+  system of its OWN for this exact brand.
+- The regulator or independent testing lab ITSELF (e.g. eCOGRA, Gaming Laboratories
+  International, BMM Testlabs, a government Gambling/Gaming Commission's own official site) is
+  REGULAR, not an operator — such pages legitimately discuss "gambling commission" or "gaming
+  authority" about THEMSELVES; that is not operator evidence by itself.
+- A domain/business name merely containing a gambling-sounding fragment (e.g. "spin" in a
+  spinal clinic, "stake" in a stakeholder-relations page, "monopoly" in an antitrust watchdog
+  site) is NEVER evidence by itself — judge only the actual page content and purpose.
 - If the page states it is "licensed and regulated" by a gambling regulator, cites a gambling
   license/account number, or links to self-exclusion/problem-gambling support bodies (GamStop,
-  GamCare, BeGambleAware, or similar) — this is standard, legally required self-description for
-  a real licensed gambling operator. Do NOT treat "responsible gambling" language as evidence
-  the site is a support/advocacy site rather than an operator; it is the opposite. The bet-slip
-  or game grid is often hidden behind login and will not appear in this text — do not require it.
+  GamCare, BeGambleAware, or similar) AND it has its own Login/Register-to-play system for this
+  exact brand — this is standard, legally required self-description for a real licensed
+  gambling operator. Do NOT treat "responsible gambling" language as evidence the site is a
+  support/advocacy site rather than an operator; it is the opposite. The bet-slip or game grid
+  is often hidden behind login and will not appear in this text — do not require it.
+- If the page mixes hospitality/travel/lifestyle wording WITH a genuine betting mechanism (live
+  odds, a place-bet button, a betting-ID funnel, a deposit-to-wager flow) on the same page, the
+  betting evidence wins — this is a known evasion tactic and must still be called gambling.
 - You must pick "gambling" or "regular" — do not say unconfirmed/uncertain.
 
 Respond ONLY in valid JSON:

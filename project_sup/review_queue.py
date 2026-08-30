@@ -1,5 +1,11 @@
 """
-checking_url/review_queue.py — Prioritized human-review queue generator.
+project_sup/review_queue.py — Prioritized human-review queue generator.
+
+Moved here from checking_url/ -- it's a standalone analysis/support tool (no other module
+imports it, not wired into main.py's menu), same category as build_eval_set.py/
+score_eval_set.py/mine_keyword_candidates.py. checking_url/ is reserved for the live
+per-domain pipeline stages this ranks results FROM, not for tooling that reads them after
+the fact.
 
 At 18,000+ domains, checking every result by hand isn't viable, and it isn't necessary: the
 verdicts most likely to be wrong are a small, identifiable slice — the ones decided with the
@@ -23,16 +29,15 @@ usually a small list). For Tiers 2-3, a random 5-10% sample is normally enough t
 systemic problem without hand-checking thousands of individually low-risk verdicts.
 
 Usage:
-    python -m checking_url.review_queue                       # print summary counts
-    python -m checking_url.review_queue --direction gambling --tier 1 --limit 50
-    python -m checking_url.review_queue --export review.csv    # export everything, all tiers
+    python -m project_sup.review_queue                       # print summary counts
+    python -m project_sup.review_queue --direction gambling --tier 1 --limit 50
+    python -m project_sup.review_queue --export review.csv    # export everything, all tiers
 """
 import argparse
 import csv
 import os
 import re
 import sys
-from datetime import datetime
 from pathlib import Path
 
 _ROOT = str(Path(__file__).resolve().parent.parent)
@@ -42,8 +47,8 @@ if _ROOT not in sys.path:
 from dotenv import load_dotenv
 load_dotenv(dotenv_path=Path(_ROOT) / ".env")
 
-from db.mongo_client import get_db, checked_domains, IST
-from export_domains.screenshot import all_filename_candidates
+from db.mongo_client import get_db, checked_domains
+from export_domains.screenshot import find_screenshot_path
 
 GAMBLING_TLDS = (".bet", ".casino", ".poker", ".bingo", ".lotto")
 
@@ -62,6 +67,12 @@ def _tier_gambling(doc: dict) -> int | None:
     category = doc.get("category", "")
     kw_count = _keyword_count_from_reason(doc.get("reason", ""))
 
+    # Strongest signal of all: an independent second look at the actual screenshot (OCR +
+    # vision model, see screenshot_visual_audit.py) found no gambling evidence in the
+    # image itself. Two disagreeing evidence sources on the same page is worth a human's
+    # eyes before either the text verdict or the image.
+    if doc.get("visual_confirmed") is False:
+        return 1
     if decided_by == "heuristic_score" and kw_count is not None and kw_count <= 2:
         return 1
     if confidence is not None and confidence < 0.7:
@@ -86,7 +97,7 @@ def _tier_regular(doc: dict) -> int | None:
     return None
 
 
-def build_review_queue(direction: str = "both", tier: int | None = None, limit: int = 0, include_reviewed: bool = False) -> list[dict]:
+def build_review_queue(direction: str = "both", tier: int | None = None, limit: int = 0) -> list[dict]:
     """direction: 'gambling', 'regular', or 'both'."""
     rows = []
     statuses = []
@@ -96,8 +107,6 @@ def build_review_queue(direction: str = "both", tier: int | None = None, limit: 
         statuses.append("regular")
 
     query = {"status": {"$in": statuses}}
-    if not include_reviewed:
-        query["human_reviewed"] = {"$ne": True}
 
     for doc in checked_domains().find(query):
         t = _tier_gambling(doc) if doc.get("status") == "gambling" else _tier_regular(doc)
@@ -114,6 +123,8 @@ def build_review_queue(direction: str = "both", tier: int | None = None, limit: 
             "category": doc.get("category"),
             "decided_by": doc.get("decided_by"),
             "reason": doc.get("reason", ""),
+            "visual_confirmed": doc.get("visual_confirmed"),
+            "visual_evidence": doc.get("visual_evidence"),
         })
 
     rows.sort(key=lambda r: (r["tier"], r["confidence"] if r["confidence"] is not None else 1.0))
@@ -125,13 +136,7 @@ def build_review_queue(direction: str = "both", tier: int | None = None, limit: 
 def find_screenshot(domain: str, url: str) -> str | None:
     """Locate the already-captured screenshot for this domain on disk, if any."""
     screenshot_dir = os.getenv("SCREENSHOT_DIR", os.path.join("output", "screenshots"))
-    if not os.path.isdir(screenshot_dir):
-        return None
-    for candidate in all_filename_candidates(url or f"https://{domain}", domain):
-        candidate_path = os.path.join(screenshot_dir, candidate)
-        if os.path.exists(candidate_path):
-            return candidate_path
-    return None
+    return find_screenshot_path(url or f"https://{domain}", domain, screenshot_dir)
 
 
 def show_evidence(domain: str):
@@ -157,6 +162,11 @@ def show_evidence(domain: str):
     print(f"IP / ASN:     {doc.get('ip')} / {doc.get('asn')}")
     print(f"\nAI's stated reason:\n  {doc.get('reason')}")
 
+    if "visual_confirmed" in doc:
+        print(f"\nScreenshot visual audit: confirmed={doc.get('visual_confirmed')} "
+              f"(confidence={doc.get('visual_confidence')}, checked {doc.get('visual_checked_at')})")
+        print(f"  Evidence: {doc.get('visual_evidence')}")
+
     ctx = doc.get("ai_context")
     if ctx:
         print(f"\n--- What the AI actually read from the live page ---")
@@ -168,52 +178,17 @@ def show_evidence(domain: str):
     else:
         print("\n(No ai_context saved — this domain was decided by the heuristic layer alone, never sent to AI.)")
 
-    if doc.get("human_reviewed"):
-        print(f"\n--- Already human-reviewed ---")
-        print(f"Verdict: {doc.get('human_verdict')} | Note: {doc.get('human_note')} | At: {doc.get('human_reviewed_at')}")
-
     shot = find_screenshot(domain, doc.get("url", ""))
     print(f"\nScreenshot on disk: {shot or '(none found — status may not be gambling, or capture failed)'}")
     print("=" * 70 + "\n")
 
 
-def confirm_domain(domain: str, verdict: str, note: str = ""):
-    """Permanently record a human's decision on this domain so it never reappears in future
-    review-queue runs. This is what makes the workflow actually converge instead of asking
-    you to re-judge the same domains every batch: once reviewed, it's reviewed."""
-    doc = checked_domains().find_one({"_id": domain}) or checked_domains().find_one({"domain": domain})
-    if not doc:
-        print(f"'{domain}' not found in checked_domains.")
-        return
-    real_id = doc.get("_id")
-    checked_domains().update_one(
-        {"_id": real_id},
-        {"$set": {
-            "human_reviewed": True,
-            "human_verdict": verdict,
-            "human_note": note,
-            "human_reviewed_at": datetime.now(IST).strftime("%Y-%m-%d %H:%M"),
-        }},
-    )
-    print(f"Recorded: {real_id} -> human_verdict={verdict!r}" + (f" ({note})" if note else ""))
-    if verdict == "overturned":
-        print(
-            "NOTE: this only records your decision — it does NOT change the domain's status field. "
-            "If you're overturning gambling->regular or regular->gambling, update status yourself "
-            "(or re-run that single domain through the pipeline) so downstream exports/bans reflect it."
-        )
-
-
 def print_summary():
     counts = {"gambling": {1: 0, 2: 0, 3: 0}, "regular": {1: 0, 2: 0, 3: 0}}
     totals = {"gambling": 0, "regular": 0}
-    reviewed = {"gambling": 0, "regular": 0}
-    for doc in checked_domains().find({"status": {"$in": ["gambling", "regular"]}}, {"status": 1, "decided_by": 1, "confidence": 1, "category": 1, "reason": 1, "domain": 1, "human_reviewed": 1}):
+    for doc in checked_domains().find({"status": {"$in": ["gambling", "regular"]}}, {"status": 1, "decided_by": 1, "confidence": 1, "category": 1, "reason": 1, "domain": 1}):
         status = doc.get("status")
         totals[status] = totals.get(status, 0) + 1
-        if doc.get("human_reviewed"):
-            reviewed[status] += 1
-            continue
         t = _tier_gambling(doc) if status == "gambling" else _tier_regular(doc)
         if t is not None:
             counts[status][t] += 1
@@ -223,11 +198,11 @@ def print_summary():
     print("=" * 60)
     for status in ("gambling", "regular"):
         flagged = sum(counts[status].values())
-        print(f"\n{status.upper()} — {totals.get(status, 0)} total, {reviewed[status]} already human-reviewed, {flagged} flagged for review ({100*flagged/max(1,totals.get(status,1)):.1f}%)")
+        print(f"\n{status.upper()} — {totals.get(status, 0)} total, {flagged} flagged for review ({100*flagged/max(1,totals.get(status,1)):.1f}%)")
         for t in (1, 2, 3):
             print(f"  Tier {t}: {counts[status][t]}")
     print("\nRun with --direction/--tier/--limit to list specific rows, --evidence DOMAIN to inspect one,")
-    print("--confirm DOMAIN --verdict confirmed|overturned to record a decision, or --export to write a CSV.")
+    print("or --export to write a CSV.")
     print("=" * 60 + "\n")
 
 
@@ -243,33 +218,24 @@ def export_csv(rows: list[dict], path: str):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Prioritized human-review queue for checked_domains")
+    parser = argparse.ArgumentParser(description="Prioritized review queue for checked_domains")
     parser.add_argument("--direction", choices=["gambling", "regular", "both"], default="both")
     parser.add_argument("--tier", type=int, choices=[1, 2, 3], default=None)
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--export", type=str, default=None, help="Write results to this CSV path instead of printing")
-    parser.add_argument("--include-reviewed", action="store_true", help="Show domains already marked human_reviewed too")
     parser.add_argument("--evidence", type=str, default=None, metavar="DOMAIN", help="Show the full evidence package for one domain")
-    parser.add_argument("--confirm", type=str, default=None, metavar="DOMAIN", help="Record a human decision for one domain")
-    parser.add_argument("--verdict", choices=["confirmed", "overturned"], default=None, help="Required with --confirm")
-    parser.add_argument("--note", type=str, default="", help="Optional note to attach with --confirm")
     args = parser.parse_args()
 
     get_db()
 
     if args.evidence:
         show_evidence(args.evidence)
-    elif args.confirm:
-        if not args.verdict:
-            print("--confirm requires --verdict confirmed|overturned")
-            sys.exit(1)
-        confirm_domain(args.confirm, args.verdict, args.note)
     elif args.export:
-        rows = build_review_queue(direction=args.direction, tier=args.tier, limit=args.limit, include_reviewed=args.include_reviewed)
+        rows = build_review_queue(direction=args.direction, tier=args.tier, limit=args.limit)
         export_csv(rows, args.export)
-    elif args.direction == "both" and args.tier is None and args.limit == 0 and not args.include_reviewed:
+    elif args.direction == "both" and args.tier is None and args.limit == 0:
         print_summary()
     else:
-        rows = build_review_queue(direction=args.direction, tier=args.tier, limit=args.limit or 50, include_reviewed=args.include_reviewed)
+        rows = build_review_queue(direction=args.direction, tier=args.tier, limit=args.limit or 50)
         for r in rows:
             print(f"[T{r['tier']}] {r['status']:9s} conf={r['confidence']!s:5s} {r['domain']:35s} {r['reason'][:80]}")

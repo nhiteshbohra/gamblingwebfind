@@ -339,11 +339,13 @@ def run_export(domain_ids: list = None, limit: int = 0) -> dict:
             try:
                 if os.path.exists(dest) and os.path.abspath(src) != os.path.abspath(dest):
                     os.remove(dest)
-                shutil.move(src, dest)
+                # Copy, never move — output/screenshots/ is a permanent archive, exports
+                # get their own copy but the original must never be moved or deleted.
+                shutil.copy2(src, dest)
                 entry_item["screenshot_path"] = dest
                 entries.append(entry_item)
             except Exception as e:
-                print(f"  [export] Move failed for {domain}: {e} — using source path")
+                print(f"  [export] Copy failed for {domain}: {e} — using source path")
                 entry_item["screenshot_path"] = src
                 entries.append(entry_item)
         else:
