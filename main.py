@@ -301,6 +301,24 @@ def run_reported_blocked_checker():
         print("\n[+] Stopped by user. Already-checked domains were saved — run again to continue.")
 
 
+def run_list_fetcher():
+    from list_fetcher.keysfetch_from_txt import import_blocklists_to_mongo
+    print("\n--- list_fetcher (Import Blocklists into domain_Listed Queue) ---")
+    print("    Fetches curated external gambling blocklists from sources.txt")
+    print("    and queues them into MongoDB collection domain_Listed.")
+    print("    After importing, select Option 2 (checking_url) to verify and screenshot them.\n")
+
+    confirm = input("[?] Start blocklist import now? (y/n) [default: y]: ").strip().lower()
+    if confirm in ("n", "no"):
+        print("[+] Cancelled.")
+        return
+
+    try:
+        import_blocklists_to_mongo()
+    except KeyboardInterrupt:
+        print("\n[+] Stopped by user.")
+
+
 def interactive_menu():
     while True:
         print("\n" + "=" * 65)
@@ -311,10 +329,11 @@ def interactive_menu():
         print("3. export_domains        (Export Reports & Divide into Batches)")
         print("4. known gambling scan   (Import list, Screenshot live, Mark dead)")
         print("5. recheck reported      (Are exported/reported domains blocked yet?)")
+        print("6. list_fetcher          (Import Blocklists into domain_Listed Queue)")
         print("0. Exit")
         print("=" * 65)
 
-        choice = input("Select an option (1-5, 0 to exit): ").strip()
+        choice = input("Select an option (1-6, 0 to exit): ").strip()
 
         if choice == "1":
             run_searxng_search()
@@ -326,11 +345,13 @@ def interactive_menu():
             run_known_gambling_scan()
         elif choice == "5":
             run_reported_blocked_checker()
+        elif choice == "6":
+            run_list_fetcher()
         elif choice == "0" or choice.lower() in ("exit", "q", "quit"):
             print("Exiting.")
             break
         else:
-            print("[!] Invalid option. Please enter 1-5 or 0 to exit.")
+            print("[!] Invalid option. Please enter 1-6 or 0 to exit.")
 
 
 def shutdown_background_services():
@@ -351,6 +372,7 @@ def shutdown_background_services():
 def main():
     parser = argparse.ArgumentParser(description="gamblingwebfind entry point")
     parser.add_argument("--seed", metavar="CSV", help="Import domains from CSV into domain_Listed and exit")
+    parser.add_argument("--fetch-blocklists", action="store_true", help="Fetch and queue blocklists into domain_Listed and exit")
     parser.add_argument("--no-ui", action="store_true", help="Do not start or open the web dashboard")
     parser.add_argument("--port", type=int, default=int(os.getenv("DASHBOARD_PORT") or os.getenv("PORT") or 8081), help="Web dashboard port")
     parser.add_argument("--host", default=os.getenv("DASHBOARD_HOST") or os.getenv("HOST") or "127.0.0.1", help="Web dashboard host")
@@ -361,14 +383,21 @@ def main():
         seed_from_csv(args.seed)
         return
 
+    if args.fetch_blocklists:
+        from list_fetcher.keysfetch_from_txt import import_blocklists_to_mongo
+        import_blocklists_to_mongo()
+        return
+
     from pymongo.errors import ServerSelectionTimeoutError
-    db_name = os.getenv("MONGO_DB_NAME", "gamblingsites")
+    db = get_db()
+    db_name = db.name if db is not None else os.getenv("MONGO_DB_NAME", "")
+    target_uri = os.getenv("MONGO_URI", "mongodb://localhost:27017/")
     try:
-        get_db().command("ping")
+        db.command("ping")
         print(f"[+] MongoDB: Connected (Database: '{db_name}')")
     except ServerSelectionTimeoutError:
         print(f"[!] Cannot connect to MongoDB — please start MongoDB and try again.")
-        print("    Default URI: mongodb://localhost:27017/")
+        print(f"    Target URI: {target_uri}")
         sys.exit(1)
     except Exception as e:
         print(f"[!] MongoDB error: {e}")

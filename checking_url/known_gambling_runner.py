@@ -278,14 +278,15 @@ _MODE_RECHECK    = "recheck"       # Exists as non-gambling: fetch liveness, pro
 _MODE_SKIP       = "skip"          # Fully done (gambling + screenshot + exported): skip
 
 
-def _decide_mode(domain: str) -> str:
+def _decide_mode(domain: str, screenshot_dir: str | None = None) -> str:
     """
-    Examine MongoDB state and decide how to handle this domain:
+    Examine MongoDB state and disk screenshot presence:
 
-    • status='gambling', screenshot_taken=True, exported=True  → SKIP
-    • status='gambling', screenshot or export incomplete        → SS_ONLY (screenshot only)
-    • status in (regular, unconfirmed, blocked, dead)          → RECHECK (liveness + promote if alive)
-    • Not in DB at all                                         → FULL
+    • status='gambling' & screenshot file missing on disk      → SS_ONLY (capture screenshot)
+    • status='gambling' & screenshot file exists & exported   → SKIP
+    • status='gambling' & screenshot or export incomplete     → SS_ONLY
+    • status in (regular, unconfirmed, blocked, dead)         → RECHECK (liveness + promote if alive)
+    • Not in DB at all                                        → FULL
     """
     doc = _existing_db_state(domain)
     if doc is None:
@@ -294,9 +295,14 @@ def _decide_mode(domain: str) -> str:
     status = doc.get("status", "")
 
     if status == "gambling":
+        from export_domains.screenshot import find_screenshot_path
+        has_file = bool(find_screenshot_path(f"https://{domain}", domain, screenshot_dir))
+        if not has_file:
+            return _MODE_SS_ONLY       # Physical image file missing on disk -> must capture it
+
         ss_done = bool(doc.get("screenshot_taken"))
         exported = bool(doc.get("exported"))
-        if ss_done and exported:
+        if ss_done and exported and has_file:
             return _MODE_SKIP          # Fully processed — nothing to do
         return _MODE_SS_ONLY           # Needs screenshot or re-export
 
@@ -383,7 +389,7 @@ async def run(
 
         try:
             # ── Step 0: Smart pre-check against MongoDB ───────────────────
-            mode = await asyncio.to_thread(_decide_mode, domain)
+            mode = await asyncio.to_thread(_decide_mode, domain, screenshot_dir)
 
             if mode == _MODE_SKIP:
                 # Already fully processed: gambling + screenshot + exported
@@ -605,3 +611,39 @@ def _print_summary(stats: dict, total: int):
     print(f"  ├─ Dead / Unreachable          : {stats.get('dead', 0):,}")
     print(f"  └─ Kept existing status        : {stats.get('kept_status', 0):,}  (dead/blocked, still offline)")
     print("=" * 65 + "\n")
+
+
+def main():
+    import argparse
+    parser = argparse.ArgumentParser(
+        description="Import/check known gambling domains (.xlsx, .csv, .txt) and capture missing screenshots.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("file", nargs="?", default=None, help="Path to Excel/CSV/TXT file of domains")
+    parser.add_argument("--file", "-f", dest="file_opt", default=None, help="Alternative flag for domains file")
+    parser.add_argument("--concurrency", "-c", type=int, default=DEFAULT_CONCURRENCY, help=f"Browser/fetch concurrency (default: {DEFAULT_CONCURRENCY})")
+    parser.add_argument("--checkpoint", default=DEFAULT_CHECKPOINT, help=f"Checkpoint file path (default: {DEFAULT_CHECKPOINT})")
+    parser.add_argument("--reset-checkpoint", action="store_true", help="Start fresh without loading existing checkpoint")
+    args = parser.parse_args()
+
+    target_file = args.file or args.file_opt
+    if not target_file:
+        target_file = input("Enter path to domains file (.xlsx / .csv / .txt): ").strip().strip('"').strip("'")
+
+    if not target_file or not os.path.exists(target_file):
+        print(f"[!] Error: File not found: '{target_file}'")
+        sys.exit(1)
+
+    cp_path = args.checkpoint
+    if args.reset_checkpoint and os.path.exists(cp_path):
+        try:
+            os.remove(cp_path)
+            print(f"[+] Reset checkpoint file: {cp_path}")
+        except Exception as e:
+            print(f"[!] Could not remove checkpoint: {e}")
+
+    asyncio.run(run(domains_file=target_file, concurrency=args.concurrency, checkpoint_path=cp_path))
+
+
+if __name__ == "__main__":
+    main()

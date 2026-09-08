@@ -62,14 +62,40 @@ from db.mongo_client import (
     resolve_asn,
     write_result,
     get_db,
+    replay_pending_writes,
+    record_redirect,
 )
 from checking_url.fetcher import fetch, check_cloaking
 from checking_url.classifier import load_keywords, classify, is_gambling_domain, is_parked_or_for_sale, _extract_text
-from checking_url.ai_classifier import classify_with_challenge, close_ai_session, _timeout_mgr, classify_screenshot_vision, clean_page_text, translate_to_english_if_needed
+from checking_url.ai_classifier import classify_with_challenge, close_ai_session, _timeout_mgr, classify_screenshot_vision, clean_page_text, translate_to_english_if_needed, translate_preflight
 from checking_url.ocr_extractor import extract_ocr_text
 from export_domains.screenshot import BrowserPool, is_valid_screenshot, delete_screenshot, all_filename_candidates
 
 OUTPUT_SCREENSHOT_DIR = os.getenv("SCREENSHOT_DIR", os.path.join("output", "screenshots"))
+
+
+def _prevent_sleep():
+    """Stop Windows sleeping/hibernating during a multi-hour batch. A 3000-domain
+    run is ~8h; if the machine sleeps, MongoDB + Ollama connections die and every
+    write_result starts failing with 'target machine actively refused it'. No-op off
+    Windows / on failure."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        ctypes.windll.kernel32.SetThreadExecutionState(0x80000000 | 0x00000001)  # CONTINUOUS|SYSTEM_REQUIRED
+    except Exception:
+        pass
+
+
+def _restore_sleep():
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        ctypes.windll.kernel32.SetThreadExecutionState(0x80000000)  # CONTINUOUS only -> normal power policy
+    except Exception:
+        pass
 
 
 async def async_write_result(*args, **kwargs):
@@ -77,7 +103,13 @@ async def async_write_result(*args, **kwargs):
 
 
 async def run(concurrency: int = None, limit: int = 0, mode: str = "new", min_age_days: int = 0, full_recheck: bool = False):
+    _prevent_sleep()
     get_db()
+    # Flush any verdicts a previous run couldn't save (MongoDB was down mid-run).
+    try:
+        replay_pending_writes()
+    except Exception as e:
+        print(f"[check] pending-write replay skipped: {e}")
     output_screenshot_dir = os.getenv("SCREENSHOT_DIR", OUTPUT_SCREENSHOT_DIR)
     os.makedirs(output_screenshot_dir, exist_ok=True)
     concurrency = concurrency or int(os.getenv("MAX_CONCURRENT_FETCHES", 20))
@@ -85,6 +117,14 @@ async def run(concurrency: int = None, limit: int = 0, mode: str = "new", min_ag
     delay = float(os.getenv("PER_DOMAIN_DELAY", 2.0))
 
     keywords = load_keywords()
+
+    # One quick translation probe: if Ollama can't translate now (model not pulled /
+    # thrashing on a memory-tight box), disable translation for this whole run up front
+    # instead of dribbling out a timeout per non-English domain.
+    try:
+        await translate_preflight()
+    except Exception:
+        pass
 
     # Reset the dynamic timeout EMA so a prior crashed/saturated run's inflated
     # timeouts don't carry over and slow down this fresh batch.
@@ -176,14 +216,20 @@ async def run(concurrency: int = None, limit: int = 0, mode: str = "new", min_ag
             eval_url = result.final_url or url
             fallback_ss_path = None
 
-            # Non-English pages read as gibberish to the English keyword list and the
-            # English-only AI prompt -- translate once here and use `classify_html` for
-            # every classification step below. Cheap langdetect gate inside means this is
-            # a no-op (returns result.html unchanged) for the overwhelming English-majority case.
-            classify_html, _ = await translate_to_english_if_needed(result.html or "", url=eval_url)
+            # Cross-domain redirect: operators point throwaway "link" domains at the live
+            # casino. Seed the destination as its own unprocessed domain so the next
+            # --mode new run classifies it independently, and stamp redirected_to on this
+            # row. No-op for same-site / search-engine / CDN / parking redirects.
+            if getattr(result, "redirected", False):
+                try:
+                    tgt = await asyncio.to_thread(record_redirect, domain, eval_url)
+                    if tgt:
+                        run_stats["redirect_targets_seeded"] = run_stats.get("redirect_targets_seeded", 0) + 1
+                except Exception:
+                    pass
 
             # Immediate check for confirmed parked/for-sale landers before running heavy Playwright
-            # fallback. A parked-for-sale domain is reachable and rendering real content — it's
+            # fallback or AI translation. A parked-for-sale domain is reachable and rendering real content — it's
             # just not gambling and not dead, but it's also not a "regular" website with its own
             # content, so it gets its own status instead of being lumped into 'regular'.
             is_parked, parked_hits = is_parked_or_for_sale(result.html or "", html=result.html or "", url=eval_url)
@@ -211,6 +257,10 @@ async def run(concurrency: int = None, limit: int = 0, mode: str = "new", min_ag
                 )
                 run_stats["dead"] += 1
                 return
+
+            # Non-English pages: if TRANSLATE_MODEL is set in .env, translates visible text.
+            # Otherwise no-op (cheap langdetect or empty TRANSLATE_MODEL returns result.html unchanged).
+            classify_html, _ = await translate_to_english_if_needed(result.html or "", url=eval_url)
 
             # Playwright JS Rendering & OCR Fallback for blocked, thin-DOM, or image-poster sites.
             # Raw HTML length alone misses JS-SPA gambling sites: a React/Vue shell can ship
@@ -286,6 +336,18 @@ async def run(concurrency: int = None, limit: int = 0, mode: str = "new", min_ag
             final_ip = None
             final_asn = None
             final_ai_context = None
+
+            # Persist the page text for EVERY terminal verdict, not just the needs_ai
+            # branch, so the ml_text_model corpus grows on ordinary runs -- the 'regular'
+            # bulk is the scarce training class. needs_ai rebuilds this with more detail.
+            try:
+                _pt, _pm, _pc, _pb = clean_page_text(classify_html, max_chars=2500)
+                final_ai_context = {
+                    "title": _pt, "meta_description": _pm, "cta_buttons": _pc,
+                    "body_excerpt": _pb[:1200], "screenshot_used": bool(fallback_ss_path),
+                }
+            except Exception:
+                final_ai_context = None
 
             if decision == "gambling":
                 # Keyword / Anchor Triggered Gambling
@@ -530,6 +592,7 @@ async def run(concurrency: int = None, limit: int = 0, mode: str = "new", min_ag
         await browser_pool.close()
         await close_ai_session()
         pbar.close()
+        _restore_sleep()
 
     print("\n" + "=" * 65)
     summary_title = "BLOCKED RE-CHECK SUMMARY" if mode == "blocked" else "TRIPLE-LOCK AI CAPTURE SUMMARY"
@@ -548,6 +611,8 @@ async def run(concurrency: int = None, limit: int = 0, mode: str = "new", min_ag
     blocked_label = "Still Blocked (403 / WAF)" if mode == "blocked" else "Blocked (403 / WAF)"
     print(f"  * {blocked_label:<31}: {run_stats['blocked']:,}")
     print(f"  * Dead / Unreachable             : {run_stats['dead']:,}")
+    if run_stats.get("redirect_targets_seeded"):
+        print(f"  * Redirect targets queued        : {run_stats['redirect_targets_seeded']:,}  (run --mode new again to classify them)")
     print("=" * 65 + "\n")
 
     return run_stats

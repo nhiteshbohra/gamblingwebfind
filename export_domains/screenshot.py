@@ -27,13 +27,24 @@ def _url_to_filename(url: str) -> str:
 def all_filename_candidates(url: str, domain: str) -> list[str]:
     """Every filename a screenshot for this domain could have been saved under."""
     clean_dom = domain.removeprefix("www.")
-    return list(dict.fromkeys([
-        _url_to_filename(url),
+    cands = []
+    if url:
+        cands.append(_url_to_filename(url))
+        if url.endswith("/"):
+            cands.append(_url_to_filename(url[:-1]))
+        else:
+            cands.append(_url_to_filename(url + "/"))
+    cands.extend([
         _url_to_filename(f"https://{clean_dom}"),
+        _url_to_filename(f"https://{clean_dom}/"),
         _url_to_filename(f"http://{clean_dom}"),
+        _url_to_filename(f"http://{clean_dom}/"),
         _url_to_filename(f"https://www.{clean_dom}"),
+        _url_to_filename(f"https://www.{clean_dom}/"),
         _url_to_filename(f"http://www.{clean_dom}"),
-    ]))
+        _url_to_filename(f"http://www.{clean_dom}/"),
+    ])
+    return list(dict.fromkeys(cands))
 
 
 def find_screenshot_path(url: str, domain: str, output_dir: str = None) -> str | None:

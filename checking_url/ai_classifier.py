@@ -17,11 +17,14 @@ import re
 import asyncio
 import base64
 import logging
+import warnings
 from collections import deque
 from pathlib import Path
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, MarkupResemblesLocatorWarning
 import aiohttp
 from dotenv import load_dotenv
+
+warnings.filterwarnings("ignore", category=MarkupResemblesLocatorWarning)
 
 # Load root .env
 load_dotenv(dotenv_path=Path(__file__).resolve().parent.parent / ".env")
@@ -284,6 +287,44 @@ def detect_licensed_operator_signals(text: str) -> list[str]:
     return [s for s in LICENSED_OPERATOR_SIGNALS if s in text_lower]
 
 
+# Phrases the VALIDATOR itself writes when it is describing a gambling operator while
+# still rejecting the "gambling" verdict -- a self-contradiction. Non-English operator
+# pages (Russian/Vietnamese/Chinese 1xbet/1win/PG88 mirrors) trigger this constantly
+# because detect_licensed_operator_signals only matches English page text, so the
+# body_text-based hard-evidence check never fires and the wrong rejection is trusted.
+# When the validator's OWN reasoning contains one of these, don't trust it -> tie-break.
+_VALIDATOR_OPERATOR_TELLS = (
+    "reputable online casino", "an online casino", "is a casino", "online gambling platform",
+    "is a gambling site", "which is a gambling site", "is a gambling platform", "a gambling site,",
+    "sports betting platform", "sports betting site", "is a bookmaker", "is a betting platform",
+    "describes 1xbet", "describes 1win", "1xbet", "1win", "melbet", "parimatch", "dafabet",
+    "pg88", "nohu", "slot gacor", "poker slot machines", "symbols on reels", "crash game",
+    "casino brand", "aviator game", "teen patti", "satta matka", "sportsbook", "toto site",
+    "judol", "gambling regulator", "gambling commission", "gaming authority",
+    "gaming licence", "gaming license", "malta gaming", "curacao",
+)
+_VALIDATOR_NEGATION_RE = re.compile(r"(?:\bnot\b|n't|\bno\b|resembl|domain name only|only the name)\s+(?:\w+\s+){0,3}$")
+
+
+def validator_reject_self_contradicts(val_result: dict) -> list[str]:
+    """Operator language in the validator's own rejection/final/evidence text that a
+    genuine clean rejection would not contain. Negated mentions ('not a gambling site',
+    'only resembling a gambling term') are skipped."""
+    blob = " ".join(str(val_result.get(k, "") or "") for k in
+                     ("rejection_reason", "final_reason", "evidence_check")).lower()
+    if not blob:
+        return []
+    hits = []
+    for tell in _VALIDATOR_OPERATOR_TELLS:
+        i = blob.find(tell)
+        if i == -1:
+            continue
+        if _VALIDATOR_NEGATION_RE.search(blob[max(0, i - 40):i]):
+            continue
+        hits.append(tell)
+    return hits
+
+
 # Gambling-specific CTA button text (deliberately excludes generic account-system terms like
 # bare "login"/"deposit"/"withdraw" that also appear on banks/e-commerce/forums) — these are
 # the subset of clean_page_text()'s cta_patterns that essentially only belong to a gambling
@@ -439,6 +480,8 @@ def clean_page_text(html: str, max_chars: int = 2500) -> tuple[str, str, list[st
         return "", "", [], ""
 
     truncated_html = html[:350000]
+    if "<" not in truncated_html:
+        return "", "", [], truncated_html[:max_chars].strip()
 
     try:
         soup = BeautifulSoup(truncated_html, "html.parser")
@@ -566,6 +609,84 @@ def _evaluate_regular_evidence(reason: str, evidence: str, body_text: str, html:
     return False, "AI claimed non-gambling features that do not exist in page HTML (hallucination rejected)"
 
 
+# ── Translation circuit breaker ──────────────────────────────────────────────
+# On a memory-tight box, translation adds a 4th resident Ollama model
+# (TRANSLATE_MODEL) on top of analyst + validator + tiebreaker + vision. When Ollama
+# can't keep it warm, every non-English page eats a full timeout and is then classified
+# untranslated anyway -- on a big multilingual dataset that's hours of pure waste.
+#
+# Breaker is RATE-based, not consecutive-count: on a mixed dataset, non-English pages
+# are interleaved with English ones (which don't touch the counter), and Ollama
+# occasionally serves one fast -- so a "5 in a row" counter with reset-on-success
+# never trips even when 90% of attempts are timing out (observed live). Instead: once
+# TRANSLATE_MIN_SAMPLE attempts have happened and the failure rate over the last
+# TRANSLATE_WINDOW of them is >= TRANSLATE_FAIL_RATE, translation is OFF for the rest
+# of the process. Set TRANSLATE_MODEL="" to skip translation entirely from the start.
+# By default, TRANSLATE_MODEL is empty ("") because gambling-analyst (built on qwen2.5:3b)
+# natively understands multilingual content (Spanish, Russian, Arabic, etc.). Set TRANSLATE_MODEL="qwen2.5:3b"
+# in .env only if you specifically require pre-translation.
+TRANSLATE_MODEL = os.getenv("TRANSLATE_MODEL", "").strip()
+TRANSLATE_TIMEOUT = float(os.getenv("TRANSLATE_TIMEOUT", 45.0))
+TRANSLATE_WINDOW = int(os.getenv("TRANSLATE_WINDOW", 6))
+TRANSLATE_MIN_SAMPLE = int(os.getenv("TRANSLATE_MIN_SAMPLE", 4))
+TRANSLATE_FAIL_RATE = float(os.getenv("TRANSLATE_FAIL_RATE", 0.75))
+_translate_outcomes: "deque[bool]" = deque(maxlen=TRANSLATE_WINDOW)  # True = failed
+_translate_attempts = 0
+_translate_disabled = False
+
+
+async def translate_preflight() -> bool:
+    """One tiny probe at run start: if Ollama can't translate a 5-word string within
+    the timeout, translation is disabled from domain 0 -- so a big multilingual batch
+    doesn't dribble out timeout lines while the rate-breaker warms up. Returns True if
+    translation is usable. Never raises. Call from runner.run() after Ollama is up."""
+    global _translate_disabled
+    if not TRANSLATE_MODEL:
+        _translate_disabled = True
+        return False
+    try:
+        session = await get_session()
+        async with session.post(
+            f"{OLLAMA_BASE_URL}/api/generate",
+            json={"model": TRANSLATE_MODEL, "prompt": "Translate to English: hola mundo, esto es una prueba",
+                  "stream": False, "keep_alive": os.getenv("TRANSLATE_KEEP_ALIVE", "20m"),
+                  "options": {"temperature": 0.1, "num_ctx": 512, "num_predict": 50}},
+            timeout=aiohttp.ClientTimeout(total=max(TRANSLATE_TIMEOUT, 20.0)),
+        ) as resp:
+            if resp.status == 200 and (await resp.json()).get("response", "").strip():
+                logger.info(f"[translate] preflight OK ({TRANSLATE_MODEL})")
+                return True
+            logger.warning(f"[translate] preflight got HTTP {resp.status} from {TRANSLATE_MODEL} -- translation OFF for this run")
+    except Exception as e:
+        logger.warning(
+            f"[translate] preflight failed ({type(e).__name__}) -- translation OFF for this run. "
+            f"Non-English pages classify on their TLD/brand anchor and Qwen native multilingual understanding. To enable: `ollama pull {TRANSLATE_MODEL}`, "
+            f"set OLLAMA_KEEP_ALIVE=-1 / OLLAMA_MAX_LOADED_MODELS=2, or drop a model tier."
+        )
+    _translate_disabled = True
+    return False
+
+
+def _translate_note_result(ok: bool):
+    """Update the rate-based circuit breaker. Lockless on purpose -- a couple of extra
+    attempts across the on transition are harmless, and it only ever flips OFF."""
+    global _translate_attempts, _translate_disabled
+    _translate_attempts += 1
+    _translate_outcomes.append(not ok)
+    if _translate_disabled or _translate_attempts < TRANSLATE_MIN_SAMPLE:
+        return
+    if len(_translate_outcomes) >= min(TRANSLATE_WINDOW, TRANSLATE_MIN_SAMPLE) and \
+       (sum(_translate_outcomes) / len(_translate_outcomes)) >= TRANSLATE_FAIL_RATE:
+        _translate_disabled = True
+        logger.warning(
+            "[translate] disabled for the rest of this run -- %d/%d recent attempts failed. "
+            "Non-English pages will be classified untranslated (their .bet/.casino TLD + brand "
+            "name still anchor them). Fix: `ollama pull %s`, set OLLAMA_KEEP_ALIVE=-1 / "
+            "OLLAMA_MAX_LOADED_MODELS=2, or run fewer model tiers -- then restart.",
+            sum(_translate_outcomes), len(_translate_outcomes), TRANSLATE_MODEL or "<model>",
+        )
+
+
 async def translate_to_english_if_needed(html: str, url: str = "") -> tuple[str, bool]:
     """Detect a non-English page and translate its visible text to English before
     classification. Both the heuristic keyword scanner (English keyword list) and the
@@ -575,10 +696,10 @@ async def translate_to_english_if_needed(html: str, url: str = "") -> tuple[str,
     Ollama round-trip only happens for the rare actually-non-English page.
 
     Returns (text_for_classification, was_translated). On English content, missing/too-
-    short text, or any failure, returns the original html unchanged so callers can use it
-    exactly as before.
+    short text, the circuit breaker being open, or any failure, returns the original html
+    unchanged so callers can use it exactly as before.
     """
-    if not html:
+    if not html or not TRANSLATE_MODEL or _translate_disabled:
         return html, False
     from checking_url.classifier import _extract_text
     text = _extract_text(html)
@@ -595,34 +716,43 @@ async def translate_to_english_if_needed(html: str, url: str = "") -> tuple[str,
     prompt = (
         "Translate the following webpage text into English. Output ONLY the translated "
         "text with no commentary, no markdown, no notes -- preserve the original meaning "
-        f"exactly:\n\n{text[:6000]}"
+        f"exactly:\n\n{text[:1200]}"
     )
     payload = {
-        "model": "qwen2.5:3b",  # plain base model -- no gambling-analyst persona/system
+        "model": TRANSLATE_MODEL,  # plain base model -- no gambling-analyst persona/system
         # prompt baked in, so it won't bias a translation task.
         "prompt": prompt,
         "stream": False,
-        "options": {"temperature": 0.1, "num_ctx": 4096},
+        "keep_alive": os.getenv("TRANSLATE_KEEP_ALIVE", "20m"),  # keep it warm between non-English pages
+        "options": {"temperature": 0.1, "num_ctx": 2048, "num_predict": 350},
     }
     sem = get_semaphore()
     async with sem:
+        if _translate_disabled:  # breaker flipped while we waited on the semaphore
+            return html, False
         try:
             session = await get_session()
             async with session.post(
                 f"{OLLAMA_BASE_URL}/api/generate",
                 json=payload,
-                timeout=aiohttp.ClientTimeout(total=45),
+                timeout=aiohttp.ClientTimeout(total=TRANSLATE_TIMEOUT),
             ) as resp:
                 if resp.status == 200:
                     result = await resp.json()
                     translated = (result.get("response") or "").strip()
                     if translated:
+                        _translate_note_result(True)
                         logger.info(
                             f"[translate] {url} | {lang}->en | {len(text)}->{len(translated)} chars"
                         )
                         return translated, True
+                # non-200 (e.g. 404 model-not-pulled) counts as a failure for the breaker
+                _translate_note_result(False)
+                logger.warning(f"[translate] HTTP {resp.status} for {url} (lang={lang}), model={TRANSLATE_MODEL}")
+                return html, False
         except Exception as e:
-            logger.warning(f"[translate] Failed for {url} (lang={lang}): {e}")
+            _translate_note_result(False)
+            logger.warning(f"[translate] Failed for {url} (lang={lang}): {type(e).__name__}: {e}")
     return html, False
 
 
@@ -1027,6 +1157,13 @@ async def validate_gambling_verdict(
     analyst_confidence = analyst_verdict.get("confidence", 0.5)
     licensed_operator_signals = detect_licensed_operator_signals(body_text)
     operator_cta_signals = detect_operator_cta_signals(cta_buttons)
+    # "licensed and regulated by", "malta gaming authority", "curacao egaming" etc. also
+    # appear on affiliate/review sites, gambling news, and the regulators' own pages. Only
+    # count that phrasing as hard operator evidence when the page ALSO exposes its own
+    # operator CTA (claim-bonus / bet-ID / demo-ID). Without that co-signal it must not be
+    # allowed to force a tie-breaker over a clean "regular" rejection.
+    if licensed_operator_signals and not operator_cta_signals:
+        licensed_operator_signals = []
     # Combined hard-evidence red flags — any of these existing while the validator rejects
     # "gambling" means the rejection is contradicting directly-checkable page evidence.
     hard_evidence_signals = licensed_operator_signals + operator_cta_signals
@@ -1091,7 +1228,16 @@ Respond ONLY in valid JSON:
                         val_validation = str(val_result.get("validation", "confirmed")).strip().lower()
                         rejection_reason = val_result.get("rejection_reason")
 
-                        if val_validation == "rejected" and val_verdict == "regular" and not hard_evidence_signals:
+                        # The validator's OWN wording sometimes describes a gambling operator
+                        # ("...is a sports betting platform", "reputable online casino",
+                        # "slot gacor", "...which is a gambling site", "1xbet"/"1win"/"PG88")
+                        # while still rejecting -- a self-contradiction the body_text-based
+                        # hard_evidence check misses on non-English pages. Treat it like hard
+                        # evidence: don't trust the rejection, force a tie-break.
+                        _self_contra = validator_reject_self_contradicts(val_result)
+                        _hard = list(hard_evidence_signals) + _self_contra
+
+                        if val_validation == "rejected" and val_verdict == "regular" and not _hard:
                             # Clean, confident rejection with no licensed-operator red flags —
                             # trust it directly, no need for a tie-breaker.
                             logger.info(
@@ -1105,7 +1251,7 @@ Respond ONLY in valid JSON:
                                 "reason": f"Validator rejected: {rejection_reason or val_result.get('final_reason', '')}",
                                 "challenge_override": True,
                             }
-                        elif val_validation == "rejected" and val_verdict == "regular" and hard_evidence_signals:
+                        elif val_validation == "rejected" and val_verdict == "regular" and _hard:
                             # The validator rejected "gambling" despite the page itself citing a
                             # gambling regulator, license number, or self-exclusion/problem-
                             # gambling support body (GamStop/GamCare/BeGambleAware or similar) —
@@ -1117,8 +1263,11 @@ Respond ONLY in valid JSON:
                             # not trust a single small model's confident-but-contradicted call —
                             # force a decisive third look instead.
                             dispute_reason = (
-                                f"Validator rejected despite licensed-operator signals present in page: "
-                                f"{', '.join(hard_evidence_signals[:4])} (validator said: {rejection_reason or val_result.get('final_reason', '')})"
+                                f"Validator rejected despite operator evidence "
+                                f"({'page: ' + ', '.join(hard_evidence_signals[:3]) if hard_evidence_signals else ''}"
+                                f"{'; ' if hard_evidence_signals and _self_contra else ''}"
+                                f"{'validator self-contradiction: ' + ', '.join(_self_contra[:3]) if _self_contra else ''}) "
+                                f"(validator said: {rejection_reason or val_result.get('final_reason', '')})"
                             )
                             tb_result = await _call_tiebreaker(url, title, body_text, analyst_verdict, dispute_reason)
                             if tb_result is not None:
@@ -1353,6 +1502,18 @@ Respond ONLY in valid JSON:
         has_providers = bool(detect_igaming_providers(html))
         has_funnels = bool(detect_gambling_funnels(html))
 
+        # Real gambling signals that make a bare AI "regular" untrustworthy. The weak
+        # local model routinely calls a JS-heavy casino (bet slip / game lobby behind
+        # login, thin extracted text) "regular"; when ANY of these are present it must be
+        # challenged, never fast-accepted. Parked / blog / affiliate / geo-block / physical-
+        # resort pages are already filtered out in classifier.classify() before we get
+        # here, so this no longer re-opens the false-positive classes it once did.
+        _strong_kw = [k for k in (matched_keywords or []) if k in STRONG_GAMBLING_SIGNALS]
+        _operator_ctas = detect_operator_cta_signals(cta_buttons)
+        has_gambling_corroboration = bool(
+            is_g_domain or _strong_kw or _operator_ctas or has_providers or has_funnels
+        )
+
         if is_g_domain:
             _is_parked = any(m in body_text.lower() for m in [
                 "is for sale", "domain for sale", "buy this domain", "parked by",
@@ -1370,21 +1531,32 @@ Respond ONLY in valid JSON:
                 return {"verdict": "blocked", "confidence": 0.95, "category": "access_denied",
                         "key_triggers": [], "reason": "403/Cloudflare block page on gambling-TLD domain", "challenge_override": False}
 
-            if not is_hosp or has_providers or has_funnels:
-                # Domain anchor confirmed on live page -> route to skeptic validator
+            operator_cta_signals = detect_operator_cta_signals(cta_buttons)
+            if has_providers or has_funnels or operator_cta_signals:
+                # Domain anchor + an ACTUAL on-page operator mechanism (game-provider CDN
+                # assets, a betting/cashier funnel, or the page's own claim-bonus / bet-ID
+                # CTAs) -> route to skeptic validator. The bare domain NAME is no longer
+                # enough on its own: GAMBLING_DOMAIN_KEYWORDS substring-matches unrelated
+                # brands, and "domain looks gambling AND page isn't a hotel" was flipping
+                # parked / geo-blocked / blog / affiliate pages straight to "gambling".
                 analyst_verdict = {
                     "verdict": "gambling",
                     "confidence": 0.88,
                     "category": "domain_anchor_gambling",
                     "key_triggers": [domain_signal] + (matched_keywords or []),
-                    "reason": f"Live gambling domain signal ({domain_signal}) with content: {title[:50]}",
+                    "reason": f"Gambling domain signal ({domain_signal}) + on-page operator mechanism",
                     "challenge_override": True,
                 }
                 return await validate_gambling_verdict(url, title, body_text, analyst_verdict, cta_buttons)
+            # Domain name looks gambling but the live page shows no operator mechanism ->
+            # fall through to the normal Round 2 evidence challenge below. If Round 2 also
+            # finds no gambling evidence, it stays "regular" (was: overridden to gambling).
 
         # Low confidence → send to Round 2 evidence challenge instead of an immediate flip
-        # fast_mode=True: skip Round 2 ONLY for non-anchored regular domains
-        if fast_mode and confidence >= REGULAR_CONVICTION_THRESHOLD and not is_g_domain:
+        # fast_mode=True: skip Round 2 ONLY for non-anchored regular domains with no
+        # gambling corroboration whatsoever (never fast-accept a page that has a strong
+        # keyword / operator CTA / provider / funnel behind it).
+        if fast_mode and confidence >= REGULAR_CONVICTION_THRESHOLD and not is_g_domain and not has_gambling_corroboration:
             return {
                 "verdict": "regular",
                 "confidence": confidence,
@@ -1451,16 +1623,35 @@ Respond ONLY in valid JSON:
         # Validate Ground Truth in HTML (Anti-Hallucination)
         evidence_convincing, eval_msg = _evaluate_regular_evidence(r2_reason, r2_evidence, body_text, html)
 
-        if not evidence_convincing:
+        if not evidence_convincing and has_gambling_corroboration:
+            # The AI couldn't substantiate "regular" AND there is a real gambling signal
+            # (gambling-anchored domain, strong gambling keyword in the page text, an
+            # operator CTA, a game-provider CDN, or a betting funnel) -> challenge as
+            # gambling via the skeptic validator. This is the recall safety net for a
+            # weak local model that keeps calling real casinos "regular".
             reject_analyst = {
                 "verdict": "gambling",
                 "confidence": 0.60,
                 "category": "possible_gambling",
-                "key_triggers": matched_keywords or round2.get("key_triggers", []),
-                "reason": f"{eval_msg} (Claimed: '{r2_reason[:80]}')",
+                "key_triggers": (_operator_ctas or []) + _strong_kw + ([domain_signal] if is_g_domain else []) + (matched_keywords or round2.get("key_triggers", [])),
+                "reason": f"Unsubstantiated 'regular' despite gambling signal (Claimed: '{r2_reason[:80]}')",
                 "challenge_override": True,
             }
             return await validate_gambling_verdict(url, title, body_text, reject_analyst, cta_buttons)
+
+        if not evidence_convincing:
+            # Not convincingly proven regular, and NO gambling signal either -> a thin /
+            # parked / geo-blocked / niche or foreign-language page. Precision-first: keep
+            # it "regular" at reduced confidence rather than flipping to "gambling" on the
+            # mere ABSENCE of a non-gambling proof.
+            return {
+                "verdict": "regular",
+                "confidence": min(float(r2_confidence), 0.55),
+                "category": str(round2.get("category", "regular")),
+                "key_triggers": round2.get("key_triggers", []),
+                "reason": f"Accepted regular, no gambling signal found ({eval_msg})",
+                "challenge_override": False,
+            }
 
         return {
             "verdict": "regular",

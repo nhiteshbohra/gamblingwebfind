@@ -8,6 +8,7 @@ Two-collection flow:
   dest:    checked_domains — classification results written here
 """
 import csv
+import json
 import os
 import urllib.parse
 from datetime import datetime, timezone, timedelta
@@ -24,6 +25,26 @@ from pymongo.collection import Collection
 
 # Load root .env
 load_dotenv(dotenv_path=Path(__file__).resolve().parent.parent / ".env")
+
+
+# An "authoritative" gambling verdict came from a trusted external list, not from
+# this pipeline's own guessing. keysfetch_from_txt.py stamps decided_by, and
+# known_gambling_runner.py stamps this exact reason string. Kept in sync with
+# checking_url/ml_text_model.py's circular-source constants and
+# project_sup/mine_keyword_candidates.py's _is_circular.
+_TRUSTED_GAMBLING_REASON = "Known gambling — confirmed true positive"
+
+
+def _is_trusted_gambling(doc: dict) -> bool:
+    """True if `doc` is currently a gambling verdict that came from a trusted import."""
+    if (doc.get("status") or "") != "gambling":
+        return False
+    if doc.get("decided_by") == "external_blocklist":
+        return True
+    if (doc.get("reason") or "").strip() == _TRUSTED_GAMBLING_REASON:
+        return True
+    src = str(doc.get("source") or "")
+    return src.startswith("blocklist:") or src.startswith("imported from ")
 
 
 def resolve_ip(domain: str) -> str | list[str] | None:
@@ -149,13 +170,13 @@ def get_db():
         try:
             _client.admin.command('ping')
         except Exception:
-            # Self-healing: auto-start MongoDB daemon if configured and offline
-            import subprocess
-            import time
-            mongod_path = os.getenv("MONGOD_AUTOSTART_PATH", r"C:\Program Files\MongoDB\Server\8.0\bin\mongod.exe")
-            mongod_cfg = os.getenv("MONGOD_AUTOSTART_CFG", r"C:\Program Files\MongoDB\Server\8.0\bin\mongod.cfg")
+            # Self-healing: auto-start MongoDB daemon if configured in .env and offline
+            mongod_path = os.getenv("MONGOD_AUTOSTART_PATH")
+            mongod_cfg = os.getenv("MONGOD_AUTOSTART_CFG")
             if mongod_path and mongod_cfg and os.path.exists(mongod_path) and os.path.exists(mongod_cfg):
                 try:
+                    import subprocess
+                    import time
                     subprocess.Popen([mongod_path, "--config", mongod_cfg], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                     time.sleep(2)
                 except Exception:
@@ -163,6 +184,92 @@ def get_db():
             _client = MongoClient(uri, serverSelectionTimeoutMS=10000, connectTimeoutMS=10000, socketTimeoutMS=30000)
             _db = _client[db_name]
     return _db
+
+
+def _ping_ok() -> bool:
+    try:
+        if _client is None:
+            return False
+        _client.admin.command("ping")
+        return True
+    except Exception:
+        return False
+
+
+def _try_revive_mongo():
+    """MongoDB died mid-run (machine slept, OOM, service bounce). Re-ping; if still
+    down and an autostart path is configured in .env, try to relaunch mongod. Best-effort,
+    never raises."""
+    if _ping_ok():
+        return
+    try:
+        mongod_path = os.getenv("MONGOD_AUTOSTART_PATH")
+        mongod_cfg = os.getenv("MONGOD_AUTOSTART_CFG")
+        if mongod_path and mongod_cfg and os.path.exists(mongod_path) and os.path.exists(mongod_cfg):
+            import subprocess
+            import time as _t
+            subprocess.Popen([mongod_path, "--config", mongod_cfg],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            _t.sleep(3)
+    except Exception:
+        pass
+
+
+# ── Durable write outbox ─────────────────────────────────────────────────────
+# On a multi-hour / multi-thousand-domain run, MongoDB WILL occasionally be
+# unreachable (sleep, restart, OOM). A verdict is expensive (fetch + OCR + up to
+# 3 Ollama rounds + screenshot) so it must never be dropped just because the DB
+# blinked. When every retry fails, the exact write_result() call is appended here
+# as one JSON line; replay_pending_writes() (called at the start of every run)
+# flushes them back once the DB is healthy.
+_OUTBOX = Path(__file__).resolve().parent.parent / "output" / "pending_writes.jsonl"
+
+
+def _spool_pending_write(domain: str, call_kwargs: dict):
+    try:
+        _OUTBOX.parent.mkdir(parents=True, exist_ok=True)
+        rec = {"domain": domain, "kwargs": call_kwargs,
+               "spooled_at": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")}
+        with open(_OUTBOX, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(rec, default=str) + "\n")
+    except Exception as e:  # last resort -- at least say it out loud
+        print(f"[outbox ERROR] could not spool verdict for '{domain}': {e}")
+
+
+def replay_pending_writes(verbose: bool = True) -> int:
+    """Re-apply verdicts that a previous run couldn't save. Returns how many landed.
+    Rows that still fail are kept in the file for the next attempt."""
+    import json as _json
+    if not _OUTBOX.exists():
+        return 0
+    try:
+        lines = [ln for ln in _OUTBOX.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    except Exception:
+        return 0
+    if not lines:
+        _OUTBOX.unlink(missing_ok=True)
+        return 0
+    _try_revive_mongo()
+    if not _ping_ok():
+        if verbose:
+            print(f"[outbox] {len(lines)} pending verdict(s) but MongoDB is still unreachable -- kept for later.")
+        return 0
+    done, still_failing = 0, []
+    for ln in lines:
+        try:
+            rec = _json.loads(ln)
+            write_result(rec["domain"], **rec["kwargs"])
+            done += 1
+        except Exception:
+            still_failing.append(ln)
+    if still_failing:
+        _OUTBOX.write_text("\n".join(still_failing) + "\n", encoding="utf-8")
+    else:
+        _OUTBOX.unlink(missing_ok=True)
+    if verbose and (done or still_failing):
+        print(f"[outbox] replayed {done} pending verdict(s)"
+              + (f", {len(still_failing)} still failing" if still_failing else ""))
+    return done
 
 
 def source_domains() -> Collection:
@@ -468,6 +575,16 @@ def write_result(
     """
     today_date = datetime.now(IST).strftime("%Y-%m-%d")
 
+    # Snapshot the raw call so a failed write can be spooled and replayed verbatim
+    # later (see _spool_pending_write / replay_pending_writes). ip/asn are left as
+    # passed -- replay re-resolves them if they were None, which is fine.
+    _call = {
+        "status": status, "reason": reason, "url": url,
+        "screenshot_taken": screenshot_taken, "screenshot_failed_reason": screenshot_failed_reason,
+        "ip": ip, "asn": asn, "confidence": confidence, "category": category,
+        "decided_by": decided_by, "ai_context": ai_context, "matched_keywords": matched_keywords,
+    }
+
     # Format reason as concise short-form text
     if isinstance(reason, list):
         if len(reason) == 0:
@@ -478,6 +595,27 @@ def write_result(
             formatted_reason = ", ".join(str(r) for r in reason)
     else:
         formatted_reason = str(reason) if reason else "No reason provided"
+
+    # Downgrade guard: a trusted external gambling verdict (GitHub blocklist import /
+    # known-gambling import) must NOT be silently flipped to regular/dead/for_sale by a
+    # single re-fetch that rendered thin, cloaked, or geo-blocked. Keep status="gambling",
+    # record that the pipeline disagreed, and surface it for human review via the flag
+    # ({"pipeline_disputed": {"$exists": true}}). This is the root cause of
+    # "known gambling sites shifting to regular on reprocess".
+    # ponytail: runner.py may have already delete_screenshot()'d before this call, so a
+    # previously-captured disputed domain drops to screenshot_taken=False and
+    # find_pending_capture() re-shoots it on the next capture pass. Acceptable; tighten
+    # by gating runner.py's delete_screenshot calls on get_checked()+_is_trusted_gambling
+    # if the re-shoot cost ever matters.
+    _disputed_from = None
+    if status in ("regular", "dead", "for_sale"):
+        _existing = checked_domains().find_one(
+            {"_id": domain}, {"status": 1, "decided_by": 1, "reason": 1, "source": 1}
+        )
+        if _existing and _is_trusted_gambling(_existing):
+            _disputed_from = status
+            status = "gambling"
+            formatted_reason = f"[pipeline disputed -> {_disputed_from}] {formatted_reason}"[:500]
 
     if not ip:
         ip = resolve_ip(domain)
@@ -513,6 +651,9 @@ def write_result(
         set_fields["matched_keywords"] = [str(k) for k in matched_keywords]
     if status != "unconfirmed":
         set_fields["unconfirmed_count"] = 0  # any real verdict clears the streak
+    if _disputed_from is not None:
+        set_fields["pipeline_disputed"] = _disputed_from
+        set_fields["pipeline_disputed_at"] = today_date
 
     # screenshot_taken and screenshot_date are strictly for gambling status only. Only
     # touched when the caller passes an explicit True/False -- leaving screenshot_taken=None
@@ -537,9 +678,15 @@ def write_result(
     }
 
     import time
+    # More attempts + longer backoff than before: a MongoDB restart / brief network
+    # blip on a multi-hour run takes ~10-30s to clear, and riding that out
+    # transparently is far cheaper than spooling + replaying a verdict.
+    _backoff = (0.5, 1, 2, 4, 8, 15)
     last_err = None
-    for attempt in range(3):
+    for attempt in range(len(_backoff)):
         try:
+            if attempt == 2:
+                _try_revive_mongo()  # halfway through: try to bring mongod back
             checked_domains().update_one(
                 {"_id": domain},
                 update,
@@ -593,11 +740,15 @@ def write_result(
             return
         except Exception as e:
             last_err = e
-            if attempt < 2:
-                time.sleep(0.5 * (attempt + 1))
+            if attempt < len(_backoff) - 1:
+                time.sleep(_backoff[attempt])
             else:
-                print(f"[write_result ERROR] Failed writing to MongoDB for domain '{domain}': {e}")
-                raise last_err
+                # Do NOT raise -- the verdict is expensive and the run must not stall or
+                # discard it. Spool it; replay_pending_writes() flushes it once the DB
+                # is healthy (called at the start of every runner.py run).
+                _spool_pending_write(domain, _call)
+                print(f"[write_result] MongoDB unreachable for '{domain}' ({e}); "
+                      f"verdict spooled to {_OUTBOX.name} for later replay.")
 
 
 def get_checked(domain: str) -> dict | None:
@@ -834,6 +985,48 @@ def seed_discovered_domains(domains: set, discovered_from: str) -> tuple[int, in
     return inserted, skipped
 
 
+# Redirect targets we never want to queue: search engines, big CDNs, registrar /
+# domain-parking hubs, translate/archive. Compared against the target's registrable
+# domain (eTLD+1).
+_REDIRECT_SKIP_REG = {
+    "google.com", "gstatic.com", "googleusercontent.com", "goo.gl", "bing.com", "yahoo.com",
+    "duckduckgo.com", "yandex.com", "baidu.com",
+    "cloudflare.com", "cloudflaressl.com", "akamai.net", "akamaized.net", "fastly.net",
+    "amazonaws.com", "azureedge.net", "cloudfront.net",
+    "sedo.com", "sedoparking.com", "dan.com", "afternic.com", "hugedomains.com", "bodis.com",
+    "parkingcrew.net", "parkingcrew.com", "above.com", "namecheap.com", "godaddy.com",
+    "name.com", "dynadot.com", "porkbun.com", "uniregistrymarket.link", "squadhelp.com",
+    "web.archive.org", "archive.org", "translate.goog", "t.co",
+}
+
+
+def _reg_domain(host_or_url: str) -> str:
+    s = (host_or_url or "").strip().lower().split("://")[-1].split("/")[0].split(":")[0].removeprefix("www.")
+    ext = tldextract.extract(s)
+    return ".".join(p for p in (ext.domain, ext.suffix) if p)
+
+
+def record_redirect(source_domain: str, final_url: str) -> str | None:
+    """A domain 302/meta/JS-redirected to a DIFFERENT registrable domain. Seed that
+    target into domain_Listed as a fresh unprocessed domain (so the next --mode new run
+    classifies it on its own merits) and stamp `redirected_to` on the source's row.
+    Returns the target domain, or None if it's the same site / a skip-host / junk.
+
+    Operators use throwaway 'link' domains that redirect to the live casino -- without
+    this we record the doorway and never the destination (or vice versa)."""
+    src_reg = _reg_domain(source_domain)
+    tgt_reg = _reg_domain(final_url)
+    if not tgt_reg or "." not in tgt_reg or tgt_reg == src_reg or tgt_reg in _REDIRECT_SKIP_REG:
+        return None
+    try:
+        seed_discovered_domains({tgt_reg}, discovered_from=f"redirect:{src_reg}")
+        checked_domains().update_one({"_id": source_domain}, {"$set": {"redirected_to": tgt_reg}})
+    except Exception as e:
+        print(f"[record_redirect] {source_domain} -> {tgt_reg}: {e}")
+        return None
+    return tgt_reg
+
+
 def backup_databases(backup_dir: str = None) -> dict:
     """Dump source (domain_Listed) and destination (checked_domains) MongoDB collections to JSON backups."""
     import json
@@ -869,6 +1062,45 @@ def backup_databases(backup_dir: str = None) -> dict:
         "source_file": os.path.abspath(source_file),
         "checked_file": os.path.abspath(checked_file),
     }
+
+
+def _selfcheck() -> int:
+    """Pure-function check for the write_result downgrade guard (no DB)."""
+    T = _is_trusted_gambling
+    assert T({"status": "gambling", "decided_by": "external_blocklist"})
+    assert T({"status": "gambling", "reason": "Known gambling — confirmed true positive"})
+    assert T({"status": "gambling", "source": "blocklist:arkynx"})
+    assert T({"status": "gambling", "source": "imported from list.txt on 2026-09-03"})
+    # not trusted: pipeline's own verdicts, or already non-gambling
+    assert not T({"status": "gambling", "decided_by": "ai_round1"})
+    assert not T({"status": "gambling", "reason": "3 keywords matched"})
+    assert not T({"status": "regular", "decided_by": "external_blocklist"})
+    assert not T({})
+
+    # Durable write outbox: spool -> read back the JSONL, no DB touched.
+    global _OUTBOX
+    import tempfile
+    _saved = _OUTBOX
+    try:
+        _OUTBOX = Path(tempfile.gettempdir()) / f"_outbox_selftest_{os.getpid()}.jsonl"
+        _OUTBOX.unlink(missing_ok=True)
+        assert replay_pending_writes(verbose=False) == 0, "empty/missing outbox must replay 0"
+        _spool_pending_write("x.com", {"status": "gambling", "reason": ["casino", "bet"], "ip": None})
+        _spool_pending_write("y.com", {"status": "regular", "reason": "0 keywords"})
+        lines = _OUTBOX.read_text(encoding="utf-8").splitlines()
+        assert len(lines) == 2
+        rec = json.loads(lines[0])
+        assert rec["domain"] == "x.com" and rec["kwargs"]["reason"] == ["casino", "bet"]
+    finally:
+        _OUTBOX.unlink(missing_ok=True)
+        _OUTBOX = _saved
+
+    print("mongo_client self-check: OK (_is_trusted_gambling + write outbox)")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_selfcheck())
 
 
 

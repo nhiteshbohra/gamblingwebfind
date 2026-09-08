@@ -14,8 +14,11 @@ Rules (Updated Architecture — Triple-Lock):
 - Everything else -> "regular" (no AI needed)
 """
 import json
+import warnings
 from pathlib import Path
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, MarkupResemblesLocatorWarning
+
+warnings.filterwarnings("ignore", category=MarkupResemblesLocatorWarning)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -108,13 +111,20 @@ STRONG_GAMBLING_SIGNALS = {
     "wagering requirement", "wagering requirements", "bonus wagering",
     "cashback on losses", "no deposit bonus", "no-deposit bonus",
     "casino vip", "vip casino", "live baccarat", "live roulette", "live dealer",
-    "crash game", "aviator game", "aviator betting", "aviator crash",
-    "teen patti", "andar bahar", "jhandi munda", "dragon tiger", "responsible gambling",
-    "wingogame", "wingo", "color prediction", "casino app", "betting app",
+    "crash game", "aviator game", "aviator betting", "aviator crash", "aviator predictor",
+    "teen patti", "teenpatti", "teen patti master", "teen patti gold", "teen patti real cash",
+    "andar bahar", "jhandi munda", "dragon tiger", "7 up down", "car roulette",
+    "mines game", "plinko", "limbo", "responsible gambling",
+    "wingogame", "wingo", "color prediction", "colour prediction", "colour trading", "color trading",
+    "daman game", "daman games", "tiranga game", "tc lottery", "bdg game", "91 club", "91club", "goa games", "goagames", "big daddy game",
+    "rummy", "rummy cash", "play rummy", "indian rummy", "rummy gold", "rummy modern",
+    "casino app", "betting app",
     "crypto casino", "bitcoin casino", "usdt betting",
     "prop bets", "parlay bet", "accumulator bet", "money line",
     "jodi chart", "panel chart", "half sangam", "full sangam",
-    "win real money", "real cash games", "play for real money", "real money app",
+    "win real money", "real cash games", "play for real money", "real money app", "win real cash", "real cash app", "paisa jeeto",
+    "download apk", "download android app", "instant upi withdrawal", "upi withdrawal", "paytm withdrawal", "min withdrawal", "min recharge",
+    "ludo cash", "ludo real money",
     # Named gambling regulators / self-exclusion schemes -- added 2026-08-24, borrowed
     # from a browser-extension gambling classifier (Fenceline) that uses a similar
     # regulatory-seal regex as a structural feature. Placed in STRONG (not the
@@ -179,6 +189,14 @@ ACTIONABLE_WAGERING_SIGNALS_GENERIC = {
 }
 ACTIONABLE_WAGERING_SIGNALS = ACTIONABLE_WAGERING_SIGNALS_UNAMBIGUOUS | ACTIONABLE_WAGERING_SIGNALS_GENERIC
 
+# Game / chart NAME phrases inside the UNAMBIGUOUS set that a blog / news story / wiki
+# ABOUT gambling quotes descriptively rather than as a working CTA ("how the Aviator crash
+# game works", "reading a satta panel chart"). Excluded when deciding whether an EDITORIAL
+# page has a wagering mechanism of its OWN -- they still count everywhere else.
+_ACTIONABLE_GAME_NAME_PHRASES = {
+    "aviator crash", "dragon tiger live", "teen patti live", "jodi chart", "panel chart",
+}
+
 # Gambling-context words that must co-occur with a GENERIC actionable phrase for it to count
 _ACTIONABLE_SIGNAL_CONTEXT = {
     "bet", "betting", "casino", "wager", "wagering", "sportsbook", "bookmaker",
@@ -234,6 +252,8 @@ def _extract_text(html: str) -> str:
     try:
         # Fast regex pre-strip heavy tags before passing to BeautifulSoup to avoid event-loop blocking
         cleaned_raw = re.sub(r'<(script|style|svg|noscript|iframe|path)[^>]*>[\s\S]*?</\1>', ' ', truncated_html, flags=re.IGNORECASE)
+        if "<" not in cleaned_raw:
+            return cleaned_raw.lower().strip()
         soup = BeautifulSoup(cleaned_raw, 'html.parser')
         parts = [soup.get_text(separator=' ')]
         title = soup.find('title')
@@ -325,6 +345,12 @@ PARKED_AND_FOR_SALE_MARKERS = [
     "domainmarket.com", "bodis.com", "parkingcrew.net", "parkingcrew.com",
     "above.com/parking", "buydomains.com", "domainagent.com", "godaddy.com/domains",
     "namecheap.com/domains", "uniregistry.com/domain", "voodoo.com/parking",
+    # ParkLogic parking template -- bare topical link list ("Style & Fashion",
+    # "Education", "Movies"...) with a "© <year> ParkLogic.com. All rights reserved."
+    # footer and nothing else. No "for sale" wording, so it dodged every marker above
+    # and a casino/bet-named domain then got AI-confirmed on the domain token alone
+    # (freshbetcasino.org incident, 2026-09-03).
+    "parklogic.com", "parklogic",
 ]
 
 # Negative archetype indicators — only trigger if >= 4 signals AND 0 gambling keywords
@@ -443,6 +469,13 @@ NEGATIVE_ARCHETYPES = {
         "personal loan", "corporate banking", "wholesale banking", "rural banking",
         "deposit interest", "fixed deposits", "bank branch", "internet banking",
     ],
+    "video_gaming_entertainment": [
+        "playstation", "xbox", "nintendo switch", "nintendo", "steam", "epic games",
+        "gameplay walkthrough", "patch notes", "system requirements", "game developer",
+        "game studio", "indie game", "board game rental", "board games", "tabletop games",
+        "carnival board games", "game engine", "mod download", "pc game", "console game",
+        "video game review", "esports tournament", "game walkthrough", "speedrun",
+    ],
 }
 
 
@@ -460,6 +493,52 @@ def is_parked_or_for_sale(text: str, html: str = "", url: str = "") -> tuple[boo
     if matched_markers:
         return True, matched_markers
     return False, []
+
+
+DEAD_AND_ERROR_PAGE_MARKERS = [
+    "ssl handshake failed", "error code 525", "error code 520", "error code 521",
+    "error code 522", "error code 523", "error code 524", "web server is down",
+    "host error", "origin unreachable", "verify you are human", "checking your browser",
+    "welcome to nginx", "nginx web server is successfully installed",
+    "apache2 ubuntu default page", "it works!", "iis windows server",
+    "this domain has expired", "domain has expired", "dynadot auctions",
+    "domain is expired", "account suspended", "website under maintenance",
+    "server error 500", "502 bad gateway", "503 service temporarily unavailable",
+    "504 gateway timeout", "page not found 404", "this site can't be reached",
+    # Regulatory / geo-block interstitials -- a full-page notice served instead of the
+    # site because gambling is unlicensed in the visitor's jurisdiction. No functional
+    # gambling interface is present, so these are "blocked", not "gambling" -- but a
+    # casino/bet-named domain would otherwise be AI-confirmed on the domain token plus
+    # the word "gambling" in the blocking notice itself (casinacho-casino.org /
+    # casinokingdoms.net / coolzinocasino.org incident, 2026-09-03).
+    "access to this website is restricted", "access to this website from",
+    "access from canada is blocked", "is blocked to remain compliant",
+    "strona jest niedostępna", "strona jest niedostepna",
+    "dostęp do tej strony został ograniczony", "dostep do tej strony zostal ograniczony",
+]
+
+
+def is_dead_or_error_page(text: str) -> tuple[bool, str]:
+    """Check if the text indicates a dead site, captive portal, or server error page."""
+    text_lower = text.lower() if text else ""
+    # Strip non-alphanumeric for whitespace-resilient matching (e.g. 'welcometonginx')
+    text_compact = re.sub(r"[^a-z0-9]", "", text_lower)
+
+    for marker in DEAD_AND_ERROR_PAGE_MARKERS:
+        marker_compact = re.sub(r"[^a-z0-9]", "", marker)
+        if marker in text_lower or (len(marker_compact) >= 8 and marker_compact in text_compact):
+            return True, marker
+
+    # Check common server default and error patterns regardless of OCR spacing
+    if "nginx" in text_compact and any(w in text_compact for w in ("welcome", "webserver", "successfullyinstalled")):
+        return True, "nginx default page"
+    if "apache" in text_compact and any(w in text_compact for w in ("itworks", "ubuntudefault", "defaultpage")):
+        return True, "apache default page"
+    if "cloudflare" in text_compact and any(w in text_compact for w in ("sslhandshake", "errorcode5", "verifyyouarehuman")):
+        return True, "cloudflare error/turnstile"
+
+    return False, ""
+
 
 
 def detect_negative_archetype(text: str) -> tuple[bool, str]:
@@ -498,6 +577,15 @@ HOSPITALITY_OVERRIDE_SIGNALS = {
     "takeaway", "takeout", "food delivery", "zomato", "swiggy",
     "cafe", "bistro", "bar & grill", "steakhouse", "seafood restaurant",
     "spa treatments", "massage therapy", "wellness center", "facial treatment",
+    # Physical casino-RESORT vocabulary -- a brick-and-mortar "Hotel & Casino" whose
+    # website is a lodging/dining/events brochure, not an online operator (FireKeepers,
+    # Cherokee, Chinook Winds...). These co-occur with the hotel/dining terms above and
+    # push such a page over the strong-hospitality bar so it can't be dragged to
+    # "gambling" by bare "casino"/"slots" mentions on the same brochure.
+    "hotel & casino", "hotel and casino", "casino resort", "casino & resort",
+    "casino hotel", "players club", "plan your visit", "plan your stay", "book your stay",
+    "gaming floor", "casino floor", "box office", "getting here", "directions & parking",
+    "loyalty rewards", "stay & play", "meetings & events", "weddings & events",
 }
 
 
@@ -512,7 +600,8 @@ GAMBLING_DOMAIN_KEYWORDS = {
     "777", "888", "999", "bet365", "gambl", "wingo", "crazytime", "monopoly",
     "megaways", "jili", "spribe", "kingmaker", "bwin", "betway", "betfair",
     "spin", "spins", "winbuzz", "lotus365", "fairplay", "laser247", "cricbet99",
-    "diamondexch", "reddyanna", "mahadevbook", "cricketid", "khelo"
+    "diamondexch", "reddyanna", "mahadevbook", "cricketid", "khelo", "pokies", "pokie",
+    "daman", "baji", "tiranga", "goagames"
 }
 
 NON_GAMBLING_BET_WORDS = {
@@ -592,6 +681,39 @@ def is_hospitality_site(text: str) -> tuple[bool, list[str]]:
     return len(hits) >= 2, hits
 
 
+# Editorial / blog / news article structure. A page ABOUT gambling (strategy blog, news
+# story, wiki, glossary) is saturated with gambling vocabulary but is not an operator --
+# it has an author, a publish date, and article furniture instead of a register/deposit
+# funnel. Byline + date together is the low-noise combination; a real operator's homepage
+# essentially never carries both.
+_EDITORIAL_BYLINE_SIGNALS = (
+    "posted by", "written by", "by admin", "author:", "editor:", "byline",
+    "posted on", "published on", "published by", "last updated on", "updated on",
+    "min read", "minute read", "reading time",
+)
+_EDITORIAL_FURNITURE_SIGNALS = (
+    "read more", "continue reading", "read full article", "read full story",
+    "leave a comment", "leave a reply", "post comment", "0 comments", "related posts",
+    "related articles", "recent posts", "share this article", "share this post",
+    "filed under", "tags:", "category:", "categories:", "table of contents",
+    "in this article", "previous post", "next post", "about the author",
+)
+
+
+def looks_like_editorial(text: str) -> tuple[bool, list[str]]:
+    """Return (True, hits) if the page reads as a blog post / news article / wiki entry
+    rather than an operator site: a byline AND a date/read-time marker, or >= 3 pieces of
+    article furniture."""
+    t = text.lower() if text else ""
+    byline = [s for s in _EDITORIAL_BYLINE_SIGNALS if s in t]
+    furniture = [s for s in _EDITORIAL_FURNITURE_SIGNALS if s in t]
+    has_byline = any(s in ("posted by", "written by", "by admin", "author:", "editor:", "byline", "about the author") for s in byline)
+    has_datemark = any(s in ("posted on", "published on", "published by", "last updated on", "updated on", "min read", "minute read", "reading time") for s in byline)
+    if (has_byline and has_datemark) or len(furniture) >= 3:
+        return True, (byline + furniture)[:4]
+    return False, []
+
+
 def classify(html: str, keywords: set[str] | None = None, url: str | None = None, screenshot_input: str | bytes | None = None) -> tuple[str, list[str]]:
     """
     Weighted Keyword Threshold Pre-Classifier with Safety Gates, Domain Anchors & Targeted OCR:
@@ -633,6 +755,17 @@ def classify(html: str, keywords: set[str] | None = None, url: str | None = None
     if is_parked:
         return "regular", []
 
+    # No-functional-interface gate: a page that is reachable but only shows a parked
+    # lander, a regulatory/geo-block interstitial, a "coming soon" holder, or a server
+    # error has no functional site behind it -- and therefore no functional gambling
+    # interface to confirm. A casino/bet-named domain serving one of these is not an
+    # operator we can verify, regardless of how the domain name reads or how many
+    # gambling words the notice text contains. Runs before the domain-anchor and
+    # keyword logic below so neither can override it.
+    is_dead, dead_reason = is_dead_or_error_page(text)
+    if is_dead:
+        return "regular", [f"blocked:{dead_reason}"]
+
     # Check Domain Anchor early — cheap (no full ~995-keyword scan) — so a gambling-TLD
     # match can short-circuit BEFORE doing any of the expensive content analysis below.
     is_g_domain, domain_signal = is_gambling_domain(url) if url else (False, "")
@@ -646,6 +779,14 @@ def classify(html: str, keywords: set[str] | None = None, url: str | None = None
     # archetype check, hospitality check, and actionable-signal check below entirely, since
     # none of that is needed (or used) for this decision — real, measurable cost at scale.
     if domain_signal.startswith("gambling_tld("):
+        # Exception: physical casino RESORTS (Grey Eagle, Lac-Leamy, Little Creek, Great
+        # Blue Heron...) and blog/news content also register .casino / .bet domains. A
+        # strong lodging/dining/events brochure or an article structure on one of these
+        # is not an online operator -- route to AI instead of an instant lock.
+        _tld_hosp = len(is_hospitality_site(text)[1]) >= 3
+        _tld_editorial = looks_like_editorial(text)[0]
+        if _tld_hosp or _tld_editorial:
+            return "needs_ai", [domain_signal, "physical_hospitality" if _tld_hosp else "editorial"]
         return "gambling", [domain_signal]
 
     kw_set = keywords if keywords is not None else load_keywords()
@@ -679,6 +820,11 @@ def classify(html: str, keywords: set[str] | None = None, url: str | None = None
 
     # Check negative archetypes (e.g. pure math calculators, academic libraries, general e-commerce, banking, news, trading)
     is_neg, neg_reason = detect_negative_archetype(text)
+    # A gambling review / comparison / affiliate site is saturated with operator vocabulary
+    # BY DESIGN but is not itself an operator -- it sends visitors OUT to other brands to
+    # register and wager. Tracked separately so it can be forced to "regular" (not just
+    # "needs_ai") when the page has no real-money wagering CTA of its own.
+    is_affiliate_review = "gambling_review_affiliate" in neg_reason
 
     # Check hospitality gate (hotel/resort/restaurant amenity pages)
     is_hosp, hosp_hits = is_hospitality_site(text)
@@ -711,15 +857,45 @@ def classify(html: str, keywords: set[str] | None = None, url: str | None = None
     # murkier (hospitality wording, negative-archetype wording, weak-keyword-only, or zero
     # keywords on a JS shell) always goes to the AI for a second opinion instead of being
     # silently decided by heuristics alone in either direction.
+    # Affiliate/review sites: force "regular" (not "needs_ai") when there's no own
+    # real-money wagering CTA -- the sheer keyword density on these pages was getting them
+    # AI-confirmed as gambling. Applies whether or not the domain name looks gambling
+    # (many are e.g. "bestcasinos-review.com").
+    if is_affiliate_review and not has_hard_online_signals:
+        return "regular", matched
+
+    # Blog post / news article / wiki ABOUT gambling: has an author + publish date +
+    # article furniture instead of a register/deposit funnel. Force "regular" when there's
+    # no real-money wagering CTA of its own -- same rationale as the affiliate case. Uses a
+    # stricter "own funnel" test than has_hard_online_signals: descriptive mentions of game
+    # NAMES ("aviator crash", "panel chart") don't count as this page's own mechanism.
+    is_editorial, editorial_hits = looks_like_editorial(text)
+    has_own_funnel = any(
+        re.search(rf"\b{re.escape(kw)}\b", text)
+        for kw in (ACTIONABLE_WAGERING_SIGNALS_UNAMBIGUOUS - _ACTIONABLE_GAME_NAME_PHRASES)
+    ) or (
+        any(re.search(rf"\b{re.escape(kw)}\b", text) for kw in ACTIONABLE_WAGERING_SIGNALS_GENERIC)
+        and any(re.search(rf"\b{re.escape(c)}\b", text) for c in _ACTIONABLE_SIGNAL_CONTEXT)
+    )
+    if is_editorial and not has_own_funnel:
+        return ("regular", matched + [f"editorial:{editorial_hits[0]}"]) if editorial_hits else ("regular", matched)
+
+    # Strong physical-hospitality signal (a brick-and-mortar hotel / resort / casino-resort
+    # whose site is a lodging/dining/events brochure): >= 3 hospitality hits and no online
+    # wagering CTA -> "regular" regardless of keyword score. Bare "casino"/"slots"/"jackpot"
+    # mentions on a resort brochure must not drag it to "gambling".
+    if len(hosp_hits) >= 3 and not has_hard_online_signals:
+        return "regular", matched
+
     if is_g_domain:
-        if has_real_strong_signal:
-            # A review/ranking/affiliate site about gambling is, by design, saturated with
-            # the same strong signal phrases a real operator uses ("online casino", "sports
-            # betting"...) — has_real_strong_signal alone cannot tell them apart. If the negative
-            # archetype gate also fired and there's no actionable wagering CTA of this site's
-            # own, this needs AI judgment, not an instant lock.
-            if is_neg and not has_hard_online_signals:
-                return "needs_ai", (matched + [domain_signal]) if matched else [domain_signal]
+        # Precision-first: a gambling-KEYWORD domain anchor is a substring match
+        # (GAMBLING_DOMAIN_KEYWORDS hits "stake"/"spin"/"casino"/"bet" inside unrelated
+        # names) and is NEVER sufficient on its own to auto-lock "gambling". Locking
+        # without AI now requires BOTH an unambiguous multi-word strong signal AND an
+        # actionable real-money wagering CTA present on the live page, and no negative
+        # archetype. Everything else -- weak-keyword-only, strong-signal-but-no-CTA,
+        # archetype wording, a JS shell -- goes to the AI.
+        if has_real_strong_signal and has_hard_online_signals and not is_neg:
             return "gambling", matched or [domain_signal]
         return "needs_ai", (matched + [domain_signal]) if matched else [domain_signal]
 
@@ -762,6 +938,80 @@ def classify(html: str, keywords: set[str] | None = None, url: str | None = None
 
     # 3. No strong signal and score too low to be meaningful: Strictly Regular Website
     return "regular", matched
+
+
+# ── Precision self-check ────────────────────────────────────────────────────
+# Run: python -m checking_url.classifier
+# These page types were all being mislabelled "gambling" purely on a casino/bet-named
+# domain (or sheer keyword density). Every one must resolve to "regular" with NO AI call.
+# If a future edit to the gates regresses one of these, this fails loudly.
+_SELFCHECK_CASES = [
+    ("expired for-sale lander",
+     "<h1>mrfortune-casino.net</h1><p>mrfortune-casino.net has expired and may be "
+     "available at Dynadot auctions. This domain may be for sale.</p>",
+     "https://mrfortune-casino.net", "regular"),
+    ("parklogic parked page",
+     "<h1>freshbetcasino.org</h1><ul><li>Style &amp; Fashion</li><li>Education</li>"
+     "<li>Movies</li></ul><footer>&copy; 2026 ParkLogic.com. All rights reserved.</footer>",
+     "https://freshbetcasino.org", "regular"),
+    ("geo-block interstitial (Canada)",
+     "<h1>Access to this website is restricted</h1><p>Under the Canadian Criminal Code, "
+     "gambling and betting services must be offered by licensed entities. Access from "
+     "Canada is blocked to remain compliant.</p>",
+     "https://casinacho-casino.org", "regular"),
+    ("geo-block interstitial (Poland)",
+     "<h1>Strona jest niedostepna</h1><p>Zgodnie z ustawa o grach hazardowych, dostep "
+     "do tej strony zostal ograniczony.</p>",
+     "https://coolzinocasino.org", "regular"),
+    ("gambling review / affiliate site",
+     "<h1>Best Online Casinos 2026</h1><p>Read our review and editor rating of the top "
+     "rated casinos. Affiliate disclosure: we may earn a commission. Compare casinos and "
+     "compare bonuses below. Visit Casino to claim your welcome offer.</p>",
+     "https://casino-reviews-guide.com", "regular"),
+    ("blog post about gambling",
+     "<article><h1>How the Aviator crash game multiplier actually works</h1>"
+     "<p>Posted on March 3, 2026 by Rahul Sharma. 8 min read.</p><p>Aviator is a popular "
+     "crash game. We break down the maths behind the online casino favourite.</p>"
+     "<footer>Filed under: casino guides. Leave a comment. Related posts.</footer></article>",
+     "https://gamblingtips-blog.com", "regular"),
+    ("physical casino resort brochure",
+     "<h1>Thunder Ridge Hotel &amp; Casino</h1><p>Plan your visit. Book your stay in a "
+     "deluxe room. Fine dining, buffet, spa treatments, box office. Players club rewards. "
+     "Directions &amp; parking. Weddings &amp; events. Our casino floor has slots and "
+     "table games.</p>",
+     "https://thunderridge-casino.com", "regular"),
+    ("physical casino resort on .casino TLD",
+     "<h1>Grey Eagle Resort &amp; Casino</h1><p>Plan your visit. Book your stay in our "
+     "hotel. Fine dining, buffet, spa, box office live shows. Players club. Directions "
+     "and parking. Meetings &amp; events.</p>",
+     "https://grey-eagle.casino", "needs_ai"),
+    # Real operators must still NOT be swallowed by the gates above.
+    ("real operator (funnel present)",
+     "<h1>Bet Big Casino</h1><p>online casino, live casino, sports betting. register and "
+     "deposit. claim welcome bonus. place bet now. instant withdrawal.</p>",
+     "https://betbig-casino.com", "gambling"),
+    ("real operator on .casino TLD",
+     "<h1>JW Casino</h1><p>Play online slots and live casino. Register, deposit, claim "
+     "welcome bonus. Instant withdrawal.</p>",
+     "https://jw.casino", "gambling"),
+]
+
+
+def _selfcheck() -> int:
+    kw = load_keywords()
+    bad = 0
+    for name, html, url, expected in _SELFCHECK_CASES:
+        decision, _ = classify(html, keywords=kw, url=url)
+        ok = decision == expected
+        bad += not ok
+        print(f"  {'ok ' if ok else 'BAD'}  {name:34} -> {decision:9} (want {expected})")
+    print("OK: all self-check cases pass" if not bad else f"FAIL: {bad} self-check case(s) regressed")
+    return 1 if bad else 0
+
+
+if __name__ == "__main__":
+    import sys as _sys
+    _sys.exit(_selfcheck())
 
 
 

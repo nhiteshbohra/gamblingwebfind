@@ -7,8 +7,10 @@ router = APIRouter(prefix="/api")
 @router.get("/settings")
 def get_settings():
     # Mongo check
+    db = None
     try:
-        get_db().command("ping")
+        db = get_db()
+        db.command("ping")
         mongo_ok = True
         mongo_msg = "Connected"
     except Exception as e:
@@ -26,7 +28,7 @@ def get_settings():
         pass
 
     return {
-        "mongo": {"ok": mongo_ok, "message": mongo_msg, "db": os.getenv("MONGO_DB_NAME", "gamblingsites")},
+        "mongo": {"ok": mongo_ok, "message": mongo_msg, "db": db.name if db is not None else os.getenv("MONGO_DB_NAME", "")},
         "ollama": {"ok": ollama_ok, "url": ollama_url},
         "config": {
             "screenshot_dir": os.getenv("SCREENSHOT_DIR", "output/screenshots"),

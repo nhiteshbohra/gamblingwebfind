@@ -118,15 +118,14 @@ def extract_domain(url: str) -> str | None:
 # ── MongoDB helpers ───────────────────────────────────────────────────────────
 
 def get_mongo_collection():
-    """Return the domain_Listed collection from MongoDB."""
-    uri      = os.getenv("MONGO_URI",        "mongodb://localhost:27017/")
-    db_name  = os.getenv("MONGO_DB_NAME",    "gamblingsites")
-    coll_name = os.getenv("MONGO_COLLECTION", "domain_Listed")
+    """Return the source domain collection and client from MongoDB."""
+    from db.mongo_client import source_domains, get_db, _client
     try:
-        client = MongoClient(uri, serverSelectionTimeoutMS=5000)
-        client.admin.command("ping")
-        return client[db_name][coll_name], client
-    except (ConnectionFailure, ServerSelectionTimeoutError) as e:
+        db = get_db()
+        db.command("ping")
+        return source_domains(), _client
+    except (ConnectionFailure, ServerSelectionTimeoutError, Exception) as e:
+        uri = os.getenv("MONGO_URI", "mongodb://localhost:27017/")
         raise ConnectionError(
             f"[searxng_search] Cannot connect to MongoDB at '{uri}': {e}\n"
             "Make sure MongoDB is running."

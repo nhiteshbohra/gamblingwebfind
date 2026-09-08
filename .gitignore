@@ -19,6 +19,10 @@ data/
 logs/
 *.log
 
+# Trained model artifacts (regenerate with: python -m checking_url.ml_text_model train ...)
+checking_url/models/
+*.pkl
+
 # Pytest & Coverage
 .pytest_cache/
 .coverage

@@ -1,8 +1,10 @@
 """
 list_fetcher/keysfetch_from_txt.py
 ───────────────────────────────────────
-Fetches, cleans, normalizes, and imports gambling/cheating blocklists from GitHub
-and external text files into MongoDB (checked_domains & domain_Listed).
+Fetches, cleans, normalizes, and queues gambling/cheating blocklists from GitHub
+and external text files into MongoDB source queue (domain_Listed / MONGO_COLLECTION).
+Data saved here flows into the full verification, AI classification, and
+screenshot capture pipeline (checking_url).
 
 Configured Sources:
   1. Estonia Blocked Gambling Websites (elliotwutingfeng)
@@ -48,10 +50,8 @@ from pymongo import UpdateOne
 from tqdm import tqdm
 
 from db.mongo_client import (
-    checked_domains,
     source_domains,
-    resolve_ip,
-    resolve_asn,
+    checked_domains,
     IST,
 )
 
@@ -298,27 +298,31 @@ def import_blocklists_to_mongo(
     dry_run: bool = False,
 ) -> dict:
     """
-    Main orchestration function to fetch blocklists and bulk save to MongoDB
-    with strict multi-tier deduplication:
-      1. Intra-source deduplication (dedup within file)
-      2. Inter-source deduplication (dedup across all blocklist sources in run)
-      3. Database deduplication (skip domains already existing in checked_domains)
+    Main orchestration function to fetch blocklists and bulk save ONLY into
+    MongoDB collection domain_Listed (MONGO_COLLECTION) as fresh queue entries
+    (active: True, processed: False).
+    
+    Data saved here flows into the standard Stage 2 checking pipeline (checking_url)
+    for live verification, heuristic screening, AI 2-round classification, and screenshotting.
     """
-    today_date = datetime.now(IST).strftime("%d-%m-%Y")
+    today_date = datetime.now(IST).strftime("%Y-%m-%d")
     stats = {
         "sources_processed": 0,
         "raw_lines_read": 0,
         "unique_domains_found": 0,
         "skipped_duplicate_sources": 0,
         "skipped_already_in_db": 0,
-        "checked_domains_inserted": 0,
-        "checked_domains_updated": 0,
-        "domain_listed_upserted": 0,
+        "domain_listed_inserted": 0,
+        "domain_listed_updated": 0,
         "errors": [],
     }
 
-    all_sources = list(sources) if sources is not None else load_sources_from_file()
-
+    if sources is not None:
+        all_sources = list(sources)
+    elif custom_urls or custom_files:
+        all_sources = []
+    else:
+        all_sources = load_sources_from_file()
 
     # Append any custom URLs provided
     if custom_urls:
@@ -344,11 +348,12 @@ def import_blocklists_to_mongo(
                 "reason_prefix": "Local Blocklist File",
             })
 
+    target_col_name = os.getenv("MONGO_COLLECTION", "domain_Listed")
     print(f"\n🚀 Starting Blocklist Import Pipeline ({len(all_sources)} sources)")
-    print(f"   Status: {status} | Fast Mode: {not resolve_dns_records} | Skip Existing in DB: {skip_existing} | Dry Run: {dry_run}")
+    print(f"   Target: MongoDB Collection '{target_col_name}' ONLY (active=True, processed=False)")
+    print(f"   Skip Existing in Queue: {skip_existing} | Dry Run: {dry_run}")
     print("=" * 70)
 
-    checked_col = None if dry_run else checked_domains()
     source_col = None if dry_run else source_domains()
 
     total_unique_seen_global: Set[str] = set()
@@ -357,8 +362,6 @@ def import_blocklists_to_mongo(
         src_id = src.get("id", "blocklist")
         src_name = src.get("name", src_id)
         src_url = src.get("url", "")
-        src_status = src.get("status", status)
-        reason_prefix = src.get("reason_prefix", "Blocklist import")
 
         print(f"\n📥 Fetching [{src_name}] ...")
         print(f"   URL/Path: {src_url}")
@@ -400,15 +403,14 @@ def import_blocklists_to_mongo(
             continue
 
         if dry_run:
-            print(f"   [Dry Run] Would check and write up to {len(new_domains_for_src):,} domains to MongoDB.")
+            print(f"   [Dry Run] Would queue up to {len(new_domains_for_src):,} domains into {target_col_name}.")
             continue
 
-        # Prepare bulk writes
-        print(f"   💾 Writing {len(new_domains_for_src):,} domains to MongoDB...")
+        # Prepare bulk writes into domain_Listed ONLY
+        print(f"   💾 Queuing {len(new_domains_for_src):,} domains into {target_col_name}...")
         pbar = tqdm(total=len(new_domains_for_src), desc=f"   Saving {src_id}", unit="domains", ncols=80)
 
         for chunk in batch_chunks(new_domains_for_src, chunk_size):
-            # Check existing domains in MongoDB if skip_existing is True
             domains_to_write = chunk
             if skip_existing:
                 existing_in_db = set(
@@ -425,50 +427,10 @@ def import_blocklists_to_mongo(
                 pbar.update(len(chunk))
                 continue
 
-            checked_ops = []
             source_ops = []
-
             for d in domains_to_write:
-                ip_val = None
-                asn_val = None
-
-                if resolve_dns_records:
-                    try:
-                        ip_val = resolve_ip(d)
-                        if ip_val:
-                            single_ip = ip_val[0] if isinstance(ip_val, list) else ip_val
-                            asn_val = resolve_asn(single_ip)
-                    except Exception:
-                        pass
-
-                checked_doc = {
-                    "domain": d,
-                    "url": f"https://{d}",
-                    "status": src_status,
-                    "reason": f"Known blocklist: {reason_prefix}",
-                    "screenshot_taken": False,
-                    "source": f"blocklist:{src_id}",
-                    "decided_by": "external_blocklist",
-                }
-                if ip_val:
-                    checked_doc["ip"] = ip_val
-                if asn_val:
-                    checked_doc["asn"] = asn_val
-
-                # Write to checked_domains
-                checked_ops.append(
-                    UpdateOne(
-                        {"_id": d},
-                        {
-                            "$set": checked_doc,
-                            "$setOnInsert": {"added_date": today_date},
-                        },
-                        upsert=True,
-                    )
-                )
-
-                # Sync to domain_Listed with strict schema:
-                # { _id, domain, added_date, active: True, source: "GITHUB FETCH <date>", processed: False }
+                # Save strictly to domain_Listed as unprocessed queue item:
+                # { _id, domain, active: True, processed: False, source: "blocklist:<src_id>", added_date }
                 source_ops.append(
                     UpdateOne(
                         {"_id": d},
@@ -477,7 +439,7 @@ def import_blocklists_to_mongo(
                                 "domain": d,
                                 "active": True,
                                 "processed": False,
-                                "source": f"GITHUB FETCH {today_date}",
+                                "source": f"blocklist:{src_id}",
                             },
                             "$setOnInsert": {"added_date": today_date},
                         },
@@ -485,64 +447,78 @@ def import_blocklists_to_mongo(
                     )
                 )
 
-            if checked_ops:
-                res_checked = checked_col.bulk_write(checked_ops, ordered=False)
+            if source_ops:
                 res_source = source_col.bulk_write(source_ops, ordered=False)
-
-                stats["checked_domains_inserted"] += res_checked.upserted_count
-                stats["checked_domains_updated"] += res_checked.modified_count
-                stats["domain_listed_upserted"] += (res_source.upserted_count + res_source.modified_count)
+                stats["domain_listed_inserted"] += res_source.upserted_count
+                stats["domain_listed_updated"] += res_source.modified_count
 
             pbar.update(len(chunk))
 
         pbar.close()
 
     print("\n" + "=" * 70)
-    print("✨ Blocklist Import Completed Summary:")
+    print(f"✨ Blocklist Queue Import Completed Summary ({target_col_name}):")
     print(f"   • Total Sources Processed      : {stats['sources_processed']}")
     print(f"   • Total Raw Lines Read         : {stats['raw_lines_read']:,}")
     print(f"   • Total Global Unique Domains  : {len(total_unique_seen_global):,}")
     print(f"   • Skipped (Cross-Source Dups)  : {stats['skipped_duplicate_sources']:,}")
-    print(f"   • Skipped (Already in MongoDB) : {stats['skipped_already_in_db']:,}")
-    print(f"   • Newly Inserted to MongoDB    : {stats['checked_domains_inserted']:,}")
-    if stats["checked_domains_updated"]:
-        print(f"   • Updated in MongoDB           : {stats['checked_domains_updated']:,}")
-    print(f"   • domain_Listed Synced         : {stats['domain_listed_upserted']:,}")
+    print(f"   • Skipped (Already in Queue)   : {stats['skipped_already_in_db']:,}")
+    print(f"   • Newly Queued in {target_col_name} : {stats['domain_listed_inserted']:,}")
+    if stats["domain_listed_updated"]:
+        print(f"   • Re-queued / Updated in Queue : {stats['domain_listed_updated']:,}")
     if stats["errors"]:
         print(f"   • Errors encountered           : {len(stats['errors'])}")
         for err in stats["errors"]:
             print(f"     - {err}")
+    print("=" * 70)
+    print("💡 Complete Flow: These domains are now queued in domain_Listed.")
+    print("   Next, run checking_url to fetch, AI classify, and screenshot them:")
+    print("   • Menu option 2: python main.py")
+    print("   • Or direct CLI: python -m checking_url.runner --mode new")
     print("=" * 70 + "\n")
 
     return stats
 
 
 def print_database_stats():
-    """Print current MongoDB collection statistics for checked_domains and domain_Listed."""
+    """Print current MongoDB collection statistics for domain_Listed and checked_domains."""
     try:
-        col_checked = checked_domains()
         col_source = source_domains()
+        col_checked = checked_domains()
+        target_col_name = os.getenv("MONGO_COLLECTION", "domain_Listed")
+
+        total_src = col_source.estimated_document_count()
+        active_src = col_source.count_documents({"active": True})
+        pending_src = col_source.count_documents({"active": True, "processed": {"$ne": True}})
+        processed_src = col_source.count_documents({"processed": True})
 
         print("\n📊 MongoDB Current Statistics:")
-        print(f"   • Database: {col_checked.database.name}")
-        print(f"   • checked_domains total docs : {col_checked.count_documents({}):,}")
-        print(f"   • domain_Listed total docs   : {col_source.count_documents({}):,}")
+        print(f"   • Database: {col_source.database.name}")
+        print(f"\n   [Source Queue: {target_col_name}]")
+        print(f"     - Total domains queued   : {total_src:,}")
+        print(f"     - Pending verification   : {pending_src:,} (active=True, processed!=True)")
+        print(f"     - Processed / Completed  : {processed_src:,} (processed=True)")
+        print(f"     - Active domains         : {active_src:,}")
 
-        print("\n   [checked_domains by status]:")
+        # Blocklist source breakdown in source queue
+        src_groups = list(col_source.aggregate([
+            {"$match": {"source": {"$regex": r"^blocklist:"}}},
+            {"$group": {"_id": "$source", "count": {"$sum": 1}}},
+            {"$sort": {"count": -1}},
+            {"$limit": 10},
+        ]))
+        if src_groups:
+            print(f"     - Top blocklist sources in {target_col_name}:")
+            for g in src_groups:
+                s_name = g["_id"] or "unspecified"
+                print(f"       * {s_name:<30}: {g['count']:,}")
+
+        print(f"\n   [Checked Results: checked_domains]")
+        print(f"     - Total verified docs    : {col_checked.count_documents({}):,}")
         pipeline_status = [{"$group": {"_id": "$status", "count": {"$sum": 1}}}]
         for row in col_checked.aggregate(pipeline_status):
             status_name = row.get("_id") or "unspecified"
             print(f"     - {status_name:<15}: {row['count']:,}")
-
-        print("\n   [checked_domains by source (top 10)]:")
-        pipeline_source = [
-            {"$group": {"_id": "$source", "count": {"$sum": 1}}},
-            {"$sort": {"count": -1}},
-            {"$limit": 10},
-        ]
-        for row in col_checked.aggregate(pipeline_source):
-            src_name = row.get("_id") or "unspecified"
-            print(f"     - {src_name:<30}: {row['count']:,}")
         print()
     except Exception as e:
         print(f"❌ Failed to fetch database statistics: {e}")
@@ -550,27 +526,24 @@ def print_database_stats():
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Fetch, normalize and save blocklists into MongoDB checked_domains",
+        description="Fetch, normalize and queue blocklists into MongoDB domain_Listed (MONGO_COLLECTION)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Import all default 8 blocklists directly into MongoDB (Fast mode)
+  # Import all default blocklists into domain_Listed queue (Fast mode)
   python -m list_fetcher.keysfetch_from_txt
 
-  # Dry run preview with domain counts
+  # Dry run preview with domain counts without writing
   python -m list_fetcher.keysfetch_from_txt --dry-run
 
-  # Import with DNS IP and ASN resolution
-  python -m list_fetcher.keysfetch_from_txt --resolve-dns
-
-  # Import only specific sources by index or ID (e.g. source 1, 3, 5)
+  # Import only specific sources by ID
   python -m list_fetcher.keysfetch_from_txt --sources estonia_gambling acma_gambling
 
   # Import from a custom URL or local text file
   python -m list_fetcher.keysfetch_from_txt --custom-url https://example.com/blocklist.txt
   python -m list_fetcher.keysfetch_from_txt --custom-file path/to/my_domains.txt
 
-  # Show database stats
+  # Show database queue statistics
   python -m list_fetcher.keysfetch_from_txt --stats
         """,
     )
@@ -593,16 +566,6 @@ Examples:
         help="Add additional custom local text file(s) to parse and import",
     )
     parser.add_argument(
-        "--status",
-        default="gambling",
-        help="Status to assign in checked_domains (default: 'gambling')",
-    )
-    parser.add_argument(
-        "--resolve-dns",
-        action="store_true",
-        help="Enable live DNS IP and ASN resolution during import (slower)",
-    )
-    parser.add_argument(
         "--chunk-size",
         type=int,
         default=2500,
@@ -622,12 +585,12 @@ Examples:
     parser.add_argument(
         "--overwrite",
         action="store_true",
-        help="Overwrite/update domains if they already exist in MongoDB checked_domains (default: skip existing)",
+        help="Overwrite/re-queue domains in domain_Listed even if already present (default: skip existing)",
     )
     parser.add_argument(
         "--stats",
         action="store_true",
-        help="Print current MongoDB statistics and exit",
+        help="Print current MongoDB queue statistics and exit",
     )
 
     args = parser.parse_args()
@@ -637,23 +600,32 @@ Examples:
         return
 
     # Filter sources if requested
-    selected_sources = BLOCKLIST_SOURCES
+    try:
+        available_sources = load_sources_from_file()
+    except Exception as e:
+        print(f"⚠️ Error loading sources from sources.txt: {e}")
+        if not args.custom_urls and not args.custom_files:
+            return
+        available_sources = []
+
     if args.sources:
         selected_sources = [
-            s for s in BLOCKLIST_SOURCES
+            s for s in available_sources
             if s["id"] in args.sources or any(src_filter.lower() in s["id"].lower() for src_filter in args.sources)
         ]
         if not selected_sources and not args.custom_urls and not args.custom_files:
             print(f"⚠️ No matching sources found for filter: {args.sources}")
-            print(f"Available sources: {[s['id'] for s in BLOCKLIST_SOURCES]}")
+            print(f"Available sources: {[s['id'] for s in available_sources]}")
             return
+    elif args.custom_urls or args.custom_files:
+        selected_sources = []
+    else:
+        selected_sources = available_sources
 
     import_blocklists_to_mongo(
         sources=selected_sources,
         custom_urls=args.custom_urls,
         custom_files=args.custom_files,
-        status=args.status,
-        resolve_dns_records=args.resolve_dns,
         chunk_size=args.chunk_size,
         limit_per_source=args.limit,
         skip_existing=not args.overwrite,
@@ -663,3 +635,4 @@ Examples:
 
 if __name__ == "__main__":
     main()
+

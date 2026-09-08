@@ -1,6 +1,47 @@
 # List Fetcher (`list_fetcher`)
 
-Automated high-performance parser and bulk importer for curated gambling and illegal site blocklists into MongoDB (`checked_domains` & `domain_Listed`).
+Automated high-performance parser and bulk importer for curated gambling and illegal site blocklists into MongoDB queue (**`domain_Listed` / `MONGO_COLLECTION`**).
+
+---
+
+## 🔄 End-to-End Pipeline Flow
+
+Blocklist domains are **NOT** pre-written to `checked_domains`. Instead, they enter as fresh, unprocessed queue items in `domain_Listed`, flowing through the complete verification pipeline:
+
+```text
+┌──────────────────────────────────────────────────────────┐
+│  Stage 0/1: List Fetcher (`list_fetcher`)                 │
+│  Parses curated external blocklists from sources.txt      │
+└────────────────────────────┬─────────────────────────────┘
+                             │
+                             ▼
+┌──────────────────────────────────────────────────────────┐
+│  MongoDB: `domain_Listed` (`MONGO_COLLECTION`)           │
+│  { _id, domain, active: true, processed: false, source } │
+└────────────────────────────┬─────────────────────────────┘
+                             │
+                             ▼
+┌──────────────────────────────────────────────────────────┐
+│  Stage 2: `checking_url` Runner                          │
+│  • Fast fetch & TLS impersonation                        │
+│  • Layer 2: 988 gambling keywords + heuristic screening  │
+│  • Layer 3: Ollama AI 2-Round Challenge                  │
+│  • Immediate Playwright screenshot for gambling sites    │
+└────────────────────────────┬─────────────────────────────┘
+                             │
+                             ▼
+┌──────────────────────────────────────────────────────────┐
+│  MongoDB: `checked_domains` & sync `domain_Listed`       │
+│  • Full verdict stored in `checked_domains`              │
+│  • `processed: true` marked in `domain_Listed`           │
+└────────────────────────────┬─────────────────────────────┘
+                             │
+                             ▼
+┌──────────────────────────────────────────────────────────┐
+│  Stage 3/4: `export_domains`                             │
+│  Batched Word (.docx), Excel (.xlsx), and PDF reports    │
+└──────────────────────────────────────────────────────────┘
+```
 
 ---
 
@@ -10,7 +51,7 @@ The pipeline ensures **zero duplicate domains** through 3 layers:
 
 1. **Intra-Source Deduplication**: Deduplicates domains within each file/URL.
 2. **Cross-Source Global Deduplication**: If a domain appears in multiple lists (e.g. Estonia + AdGuard + Hagezi), it is processed only once across the entire run.
-3. **Database Pre-Check**: Checks MongoDB before inserting — existing domains in `checked_domains` are automatically skipped to preserve already-classified data and avoid duplicate writes. (Use `--overwrite` to force updates).
+3. **Database Pre-Check**: Checks MongoDB before inserting — existing domains in `domain_Listed` are automatically skipped to avoid duplicate queue items. (Use `--overwrite` to re-queue).
 
 ---
 
@@ -40,9 +81,14 @@ The pipeline ensures **zero duplicate domains** through 3 layers:
 
 ## 🚀 How to Run
 
-### 1. Fetch & Import All Sources into MongoDB (Zero Duplicates)
+### 1. Fetch & Queue All Sources into `domain_Listed`
 ```bash
 python list_fetcher/keysfetch_from_txt.py
+```
+Or via main interactive menu:
+```bash
+python main.py
+# Select Option 6: list_fetcher
 ```
 
 ### 2. Dry Run Preview (Count fresh vs duplicate domains without writing)
@@ -73,32 +119,28 @@ python list_fetcher/keysfetch_from_txt.py --custom-file path/to/my_domains.txt
 python list_fetcher/keysfetch_from_txt.py --stats
 ```
 
+### 6. Process the Queued Domains
+After importing, run Stage 2 checking to classify and capture screenshots:
+```bash
+python main.py
+# Select Option 2: checking_url -> Option 1: Check New Domains
+# Or directly:
+python -m checking_url.runner --mode new
+```
+
 ---
 
 ## 🗄️ MongoDB Document Format
 
-Each domain is upserted with `_id = domain` into **`checked_domains`**:
+Each domain is queued strictly into **`domain_Listed`**:
 ```json
 {
   "_id": "example-casino.com",
   "domain": "example-casino.com",
-  "url": "https://example-casino.com",
-  "status": "gambling",
-  "reason": "Known blocklist: <Source Name>",
-  "source": "blocklist:<source_id>",
-  "decided_by": "external_blocklist",
-  "screenshot_taken": false,
-  "added_date": "2026-08-24"
-}
-```
-And synced to **`domain_Listed`**:
-```json
-{
-  "_id": "live-crazytime.com",
-  "domain": "live-crazytime.com",
-  "added_date": "24-08-2026",
   "active": true,
-  "source": "GITHUB FETCH 24-08-2026",
-  "processed": false
+  "processed": false,
+  "source": "blocklist:estonia_gambling",
+  "added_date": "2026-09-08"
 }
 ```
+When `checking_url` processes the domain, it evaluates the site and records the verdict into **`checked_domains`** while updating `processed: true` in **`domain_Listed`**.
