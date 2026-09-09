@@ -67,8 +67,8 @@ from db.mongo_client import (
 )
 from checking_url.fetcher import fetch, check_cloaking
 from checking_url.classifier import load_keywords, classify, is_gambling_domain, is_parked_or_for_sale, _extract_text
-from checking_url.ai_classifier import classify_with_challenge, close_ai_session, _timeout_mgr, classify_screenshot_vision, clean_page_text, translate_to_english_if_needed, translate_preflight
-from checking_url.ocr_extractor import extract_ocr_text
+from checking_url.ai_classifier import classify_with_challenge, close_ai_session, _timeout_mgr, classify_screenshot_vision, clean_page_text, prepare_page_context_for_ai, translate_to_english_if_needed, translate_preflight
+from checking_url.ml_classifier import predict_proba as ml_predict_proba, is_model_loaded as ml_model_loaded
 from export_domains.screenshot import BrowserPool, is_valid_screenshot, delete_screenshot, all_filename_candidates
 
 OUTPUT_SCREENSHOT_DIR = os.getenv("SCREENSHOT_DIR", os.path.join("output", "screenshots"))
@@ -337,19 +337,31 @@ async def run(concurrency: int = None, limit: int = 0, mode: str = "new", min_ag
             final_asn = None
             final_ai_context = None
 
-            # Persist the page text for EVERY terminal verdict, not just the needs_ai
-            # branch, so the ml_text_model corpus grows on ordinary runs -- the 'regular'
-            # bulk is the scarce training class. needs_ai rebuilds this with more detail.
-            try:
-                _pt, _pm, _pc, _pb = clean_page_text(classify_html, max_chars=2500)
-                final_ai_context = {
-                    "title": _pt, "meta_description": _pm, "cta_buttons": _pc,
-                    "body_excerpt": _pb[:1200], "screenshot_used": bool(fallback_ss_path),
-                }
-            except Exception:
-                final_ai_context = None
+            # --- ML fast-path (only active once ml_trainer.py has been run) ---
+            # Uses domain-name features only: runs in <1ms, no network cost.
+            # High-confidence gambling: skip Ollama and confirm immediately.
+            # High-confidence regular: skip Ollama and reject immediately.
+            # Between those bands: fall through to the existing heuristic/AI logic.
+            _ml_prob = ml_predict_proba(domain) if ml_model_loaded() else 0.5
+            _ml_fast_gambling = _ml_prob >= 0.88 and decision == "gambling"
+            _ml_fast_regular  = _ml_prob <= 0.12 and num_matched == 0
 
-            if decision == "gambling":
+            if _ml_fast_gambling:
+                # ML + heuristic both agree strongly: no need for Ollama
+                final_status = "gambling"
+                final_reason = f"{num_matched} keywords matched [ML-confirmed: prob={_ml_prob:.2f}]"
+                final_decided_by = "ml_heuristic_combined"
+                run_stats["gambling"] += 1
+
+            elif _ml_fast_regular and decision != "gambling":
+                # ML + zero keywords: safe to skip Ollama
+                final_status = "regular"
+                final_reason = f"0 keywords matched [ML-rejected: prob={_ml_prob:.2f}]"
+                final_decided_by = "ml_heuristic_combined"
+                run_stats["regular"] += 1
+                delete_screenshot(domain, output_screenshot_dir)
+
+            elif decision == "gambling":
                 # Keyword / Anchor Triggered Gambling
                 final_status = "gambling"
                 final_reason = f"{num_matched} keywords matched"
@@ -385,7 +397,7 @@ async def run(concurrency: int = None, limit: int = 0, mode: str = "new", min_ag
                 # so a human reviewer can later see exactly what the model reasoned over,
                 # without re-fetching a site that may have changed or gone offline by then.
                 try:
-                    ai_title, ai_meta, ai_ctas, ai_body = clean_page_text(classify_html, max_chars=2500)
+                    ai_title, ai_meta, ai_ctas, ai_body = await prepare_page_context_for_ai(classify_html, url=eval_url, max_chars=2500)
                     final_ai_context = {
                         "title": ai_title,
                         "meta_description": ai_meta,

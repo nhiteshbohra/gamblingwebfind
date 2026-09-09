@@ -74,22 +74,17 @@ def _load_keywords() -> tuple[list[str], str]:
     return [], kw_path.name
 
 
-def run_searxng_search():
-    print("\n--- keywordssearch ---")
+def run_keyword_search():
+    print("\n--- keywordssearch (Crawlee & Multi-Engine Harvester) ---")
 
     keywords, kw_name = _load_keywords()
     print(f"[+] Loaded {len(keywords)} keywords from {kw_name}")
     if keywords:
         print(f"    First 10: {', '.join(keywords[:10])} ...")
 
-    from keywordssearch.searxng_search import run_search
-    summary = asyncio.run(run_search(keywords))
-    print(
-        f"\n[+] keywordssearch complete.\n"
-        f"    Raw URLs found   : {summary['total_urls']}\n"
-        f"    Unique domains   : {summary['unique_domains']}\n"
-        f"    New in MongoDB   : {summary['new_inserted']}"
-    )
+    from keywordssearch.crawlee_search import run_keyword_harvest
+    inserted = asyncio.run(run_keyword_harvest(keywords))
+    print(f"\n[+] keywordssearch complete. Total new domains saved in MongoDB: {inserted}")
 
 
 def ask_checking_mode() -> str | None:
@@ -311,24 +306,51 @@ def run_list_fetcher():
         print("\n[+] Stopped by user.")
 
 
+def run_ml_trainer():
+    """Train the domain-name ML classifier from MongoDB labeled data."""
+    print("\n--- Train ML Gambling Domain Classifier ---")
+    print("    Uses your 19k+ labeled domains from MongoDB to train a")
+    print("    scikit-learn TF-IDF + Logistic Regression classifier.")
+    print("    Trains in seconds on CPU. Saves model to checking_url/models/.")
+    print("    After training, the model acts as a fast-path signal in the")
+    print("    checking_url pipeline, reducing Ollama calls by ~30-40%.\n")
+
+    confirm = input("[?] Start training now? (y/n) [default: y]: ").strip().lower()
+    if confirm in ("n", "no"):
+        print("[+] Cancelled.")
+        return
+
+    try:
+        import subprocess
+        result = subprocess.run(
+            [sys.executable, str(PROJECT_ROOT / "ml_trainer.py")],
+            cwd=str(PROJECT_ROOT),
+        )
+        if result.returncode != 0:
+            print("[!] Trainer exited with errors. Check output above.")
+    except KeyboardInterrupt:
+        print("\n[+] Stopped by user.")
+
+
 def interactive_menu():
     while True:
         print("\n" + "=" * 65)
         print("              GAMBLINGWEBFIND PROCESS MENU              ")
         print("=" * 65)
-        print("1. keywordssearch        (SearXNG / Multi-Engine Search)")
+        print("1. keywordssearch        (Crawlee & Multi-Engine / No Docker)")
         print("2. checking_url          (Fetch, AI Classify & Screenshot)")
         print("3. export_domains        (Export Reports & Divide into Batches)")
         print("4. known gambling scan   (Import list, Screenshot live, Mark dead)")
         print("5. recheck reported      (Are exported/reported domains blocked yet?)")
         print("6. list_fetcher          (Import Blocklists into domain_Listed Queue)")
+        print("7. train ML model        (Train domain classifier from 19k+ MongoDB labels)")
         print("0. Exit")
         print("=" * 65)
 
-        choice = input("Select an option (1-6, 0 to exit): ").strip()
+        choice = input("Select an option (1-7, 0 to exit): ").strip()
 
         if choice == "1":
-            run_searxng_search()
+            run_keyword_search()
         elif choice == "2":
             run_checking_url()
         elif choice == "3":
@@ -339,6 +361,8 @@ def interactive_menu():
             run_reported_blocked_checker()
         elif choice == "6":
             run_list_fetcher()
+        elif choice == "7":
+            run_ml_trainer()
         elif choice == "0" or choice.lower() in ("exit", "q", "quit"):
             print("Exiting.")
             break
@@ -347,13 +371,8 @@ def interactive_menu():
 
 
 def shutdown_background_services():
-    """Safely stop SearXNG Docker container and unload Ollama AI models on exit."""
-    print("\n[+] Safely shutting down background services and releasing system RAM...")
-    try:
-        from keywordssearch.searxng_search import stop_searxng_docker
-        stop_searxng_docker()
-    except Exception:
-        pass
+    """Unload Ollama AI models on exit to free VRAM/RAM."""
+    print("\n[+] Releasing Ollama models from memory...")
     try:
         from checking_url.ai_classifier import stop_ollama_if_running
         asyncio.run(stop_ollama_if_running())

@@ -104,6 +104,7 @@ OLLAMA_TIEBREAKER_MODEL = os.getenv("OLLAMA_TIEBREAKER_MODEL", "qwen2.5:7b-instr
 OLLAMA_VISION_MODEL = os.getenv("OLLAMA_VISION_MODEL", "moondream")
 # ponytail: Default AI concurrency set to 2 to give 8B model ample VRAM and zero queue starvation
 AI_CONCURRENCY = int(os.getenv("AI_CONCURRENCY", 2))
+USE_CRAWL4AI_FOR_AI = os.getenv("USE_CRAWL4AI_FOR_AI", "true").lower() == "true"
 
 # Dynamic timeout bounds (seconds) — scaled for 8B validator model
 AI_TIMEOUT_MIN = float(os.getenv("AI_TIMEOUT_MIN", 10.0))   # fastest simple pages
@@ -536,6 +537,61 @@ def clean_page_text(html: str, max_chars: int = 2500) -> tuple[str, str, list[st
         clean = re.sub(r'<[^>]+>', ' ', truncated_html)
         trimmed = re.sub(r'\s+', ' ', clean)[:max_chars].strip()
         return "", "", [], trimmed
+
+
+async def extract_markdown_crawl4ai(url: str = None, html: str = None, max_chars: int = 3000) -> str | None:
+    """
+    Optional Stage 2 Crawl4AI Extraction Engine:
+    Converts a candidate page into clean, token-efficient Markdown for local Ollama models.
+    Removes boilerplate while preserving promotional bonuses, game tables, deposit CTAs, and links.
+    Returns clean markdown string or None if Crawl4AI is unavailable.
+    """
+    if not USE_CRAWL4AI_FOR_AI:
+        return None
+    try:
+        from crawl4ai import AsyncWebCrawler, CrawlerRunConfig, CacheMode
+        async with AsyncWebCrawler(verbose=False) as crawler:
+            if url:
+                res = await crawler.arun(
+                    url=url,
+                    config=CrawlerRunConfig(cache_mode=CacheMode.BYPASS)
+                )
+            elif html:
+                res = await crawler.arun(
+                    url="raw:" + html[:150000],
+                    config=CrawlerRunConfig(cache_mode=CacheMode.BYPASS)
+                )
+            else:
+                return None
+            
+            md = getattr(res, "markdown", None) or getattr(res, "cleaned_html", "")
+            if md and isinstance(md, str) and len(md.strip()) > 80:
+                return md[:max_chars].strip()
+    except ImportError:
+        # crawl4ai not installed; silent graceful fallback
+        return None
+    except Exception:
+        # Fallback to standard clean_page_text
+        return None
+
+
+async def prepare_page_context_for_ai(html: str, url: str = None, max_chars: int = 2500) -> tuple[str, str, list[str], str]:
+    """
+    Unified AI Context Preparer:
+    1. Extracts Title, Meta Description, interactive CTAs via DOM.
+    2. If Crawl4AI is enabled and available, extracts dense token-efficient Markdown.
+    3. Seamlessly falls back to clean_page_text() if Crawl4AI is unavailable.
+    """
+    title, meta_desc, cta_buttons, body_text = clean_page_text(html, max_chars=max_chars)
+    if USE_CRAWL4AI_FOR_AI:
+        try:
+            md_text = await extract_markdown_crawl4ai(url=url, html=html, max_chars=max_chars)
+            if md_text and len(md_text.strip()) > 100:
+                body_text = md_text
+        except Exception:
+            pass
+
+    return title, meta_desc, cta_buttons, body_text
 
 
 def parse_ai_json_response(raw_text: str) -> dict | None:
@@ -1410,7 +1466,7 @@ async def classify_with_challenge(
                 "challenge_override": False,
             }
 
-    title, meta_desc, cta_buttons, body_text = clean_page_text(html, max_chars=2500)
+    title, meta_desc, cta_buttons, body_text = await prepare_page_context_for_ai(html, url=url, max_chars=2500)
     cta_str = ", ".join(cta_buttons) if cta_buttons else "None"
 
     # ── ROUND 1: Standard Classification ──────────────────────────────────────
