@@ -671,10 +671,12 @@ async def run(concurrency: int = None, limit: int = 0, mode: str = "new", min_ag
     print("=" * 65)
     print(f" Total Domains Processed           : {total_pending:,}")
     print(f"  * Confirmed Gambling Sites       : {run_stats['gambling']:,}")
-    print(f"    - Captured Screenshots         : {run_stats['screenshots_taken']:,}")
-    print(f"    - Evaluated by Ollama AI       : {run_stats['ai_evaluated']:,}")
-    print(f"    - AI Confirmed Gambling        : {run_stats['ai_gambling']:,}")
-    print(f"    - Challenge Round Overrides    : {run_stats.get('challenge_overrides', 0):,}")
+    if fast_bulk:
+        print(f"    - Fast Bulk Evaluated (No LLM) : {run_stats['ai_evaluated']:,}")
+    else:
+        print(f"    - Evaluated by Ollama AI       : {run_stats['ai_evaluated']:,}")
+        print(f"    - AI Confirmed Gambling        : {run_stats['ai_gambling']:,}")
+        print(f"    - Challenge Round Overrides    : {run_stats.get('challenge_overrides', 0):,}")
     print(f"  * Regular Sites (Verified)       : {run_stats['regular']:,}")
     print(f"  * Domains For Sale (Parked)      : {run_stats['for_sale']:,}")
     if run_stats["unconfirmed"]:
