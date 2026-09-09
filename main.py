@@ -92,8 +92,8 @@ def run_searxng_search():
     )
 
 
-def ask_checking_mode() -> str | None:
-    """Prompt user to choose target domain queue for checking/re-checking."""
+def ask_checking_mode() -> tuple[str | None, bool | None]:
+    """Prompt user to choose target domain queue for checking/re-checking and speed mode."""
     print("\nSelect checking target queue:")
     print("  0. Back to main menu")
     print("  1. Check New Domains           (Fresh queue from SearXNG search or CSV import) [default]")
@@ -104,42 +104,61 @@ def ask_checking_mode() -> str | None:
     print("  6. Re-check For-Sale Sites     (Re-test parked/registrar landers in case they've gone live)")
     sub_choice = input("\nEnter choice (0-6) [default: 1]: ").strip()
     if sub_choice in ("0", "b", "back"):
-        return None
-    if sub_choice == "2":
-        return "blocked"
-    if sub_choice == "3":
-        return "unconfirmed"
-    if sub_choice == "4":
-        return "regular"
-    if sub_choice == "5":
-        return "dead"
-    if sub_choice == "6":
-        return "for_sale"
-    return "new"
+        return None, None
+    mode_map = {
+        "2": "blocked",
+        "3": "unconfirmed",
+        "4": "regular",
+        "5": "dead",
+        "6": "for_sale",
+    }
+    mode = mode_map.get(sub_choice, "new")
+
+    # Screening mode selection: Fast Bulk (heuristics, no Ollama) vs Deep AI
+    print("\nSelect screening mode:")
+    if mode == "unconfirmed":
+        print("  1. Deep AI Inspection  (Ollama AI 2-Round Challenge) [default for unconfirmed]")
+        print("  2. Fast Bulk Scan      (High-Speed Heuristics only, 0 Ollama calls)")
+        sp_choice = input("Enter choice (1-2) [default: 1]: ").strip()
+        fast_bulk = (sp_choice == "2")
+    else:
+        print("  1. Fast Bulk Scan      (High-Speed Heuristics, 0 Ollama calls — 30-50 domains/sec, avoids freeze) [default]")
+        print("  2. Deep AI Inspection  (Ollama Dual-Model Challenge + Playwright fallback — for small batches)")
+        sp_choice = input("Enter choice (1-2) [default: 1]: ").strip()
+        fast_bulk = (sp_choice != "2")
+
+    return mode, fast_bulk
 
 
-def run_checking_url(mode: str = None):
+def run_checking_url(mode: str = None, fast_bulk: bool = None):
     print("\n--- checking_url (Fetch, AI Classify & Capture Screenshots) ---")
     if mode is None:
-        mode = ask_checking_mode()
+        mode, fast_bulk = ask_checking_mode()
     if mode is None:
         return  # user chose back
 
-    from checking_url.ai_classifier import start_ollama_if_needed
-    try:
-        asyncio.run(start_ollama_if_needed())
-    except Exception as e:
-        print(f"[!] Local AI status check error: {e}")
+    if fast_bulk is None:
+        fast_bulk = os.getenv("FAST_BULK_MODE", "false").lower() in ("true", "1", "yes")
+
+    if not fast_bulk:
+        from checking_url.ai_classifier import start_ollama_if_needed
+        try:
+            asyncio.run(start_ollama_if_needed())
+        except Exception as e:
+            print(f"[!] Local AI status check error: {e}")
+    else:
+        print("[+] Fast Bulk Screening: Ollama kept offline to protect system resources.")
 
     from checking_url.runner import run as check_run
 
-    concurrency = int(os.getenv("CHECK_CONCURRENCY", os.getenv("MAX_CONCURRENT_FETCHES", 20)))
+    default_concurrency = 30 if fast_bulk else 10
+    concurrency = int(os.getenv("CHECK_CONCURRENCY", os.getenv("MAX_CONCURRENT_FETCHES", default_concurrency)))
     limit = int(os.getenv("CHECK_LIMIT", 0))
     min_age_days = int(os.getenv("RECHECK_MIN_AGE_DAYS", 0))
 
     # ponytail: Clean Ctrl+C exit without raw Python traceback
     try:
-        summary = asyncio.run(check_run(concurrency=concurrency, limit=limit, mode=mode, min_age_days=min_age_days))
+        summary = asyncio.run(check_run(concurrency=concurrency, limit=limit, mode=mode, min_age_days=min_age_days, fast_bulk=fast_bulk))
         if summary:
             print("[+] checking_url complete.")
     except KeyboardInterrupt:

@@ -66,8 +66,15 @@ from db.mongo_client import (
     record_redirect,
 )
 from checking_url.fetcher import fetch, check_cloaking
-from checking_url.classifier import load_keywords, classify, is_gambling_domain, is_parked_or_for_sale, _extract_text
-from checking_url.ai_classifier import classify_with_challenge, close_ai_session, _timeout_mgr, classify_screenshot_vision, clean_page_text, translate_to_english_if_needed, translate_preflight
+from checking_url.classifier import (
+    load_keywords, classify, is_gambling_domain, is_parked_or_for_sale, _extract_text,
+    STRONG_GAMBLING_SIGNALS, BARE_CATEGORY_SIGNALS,
+)
+from checking_url.ai_classifier import (
+    classify_with_challenge, close_ai_session, _timeout_mgr, classify_screenshot_vision,
+    clean_page_text, translate_to_english_if_needed, translate_preflight,
+    detect_igaming_providers, detect_gambling_funnels,
+)
 from checking_url.ocr_extractor import extract_ocr_text
 from export_domains.screenshot import BrowserPool, is_valid_screenshot, delete_screenshot, all_filename_candidates
 
@@ -102,7 +109,7 @@ async def async_write_result(*args, **kwargs):
     return await asyncio.to_thread(write_result, *args, **kwargs)
 
 
-async def run(concurrency: int = None, limit: int = 0, mode: str = "new", min_age_days: int = 0, full_recheck: bool = False):
+async def run(concurrency: int = None, limit: int = 0, mode: str = "new", min_age_days: int = 0, full_recheck: bool = False, fast_bulk: bool = None):
     _prevent_sleep()
     get_db()
     # Flush any verdicts a previous run couldn't save (MongoDB was down mid-run).
@@ -112,19 +119,30 @@ async def run(concurrency: int = None, limit: int = 0, mode: str = "new", min_ag
         print(f"[check] pending-write replay skipped: {e}")
     output_screenshot_dir = os.getenv("SCREENSHOT_DIR", OUTPUT_SCREENSHOT_DIR)
     os.makedirs(output_screenshot_dir, exist_ok=True)
-    concurrency = concurrency or int(os.getenv("MAX_CONCURRENT_FETCHES", 20))
+
+    enable_ai = os.getenv("ENABLE_AI_CLASSIFIER", "true").lower() in ("true", "1", "yes")
+    if fast_bulk is None:
+        fast_bulk = (not enable_ai) or os.getenv("FAST_BULK_MODE", "false").lower() in ("true", "1", "yes")
+
+    if fast_bulk:
+        print("[check] Fast Bulk Screening Mode: ACTIVE (High-speed heuristics, 0 Ollama calls, safe for large queues)")
+        default_concurrency = 30
+    else:
+        print("[check] Deep AI Inspection Mode: ACTIVE (Dual-model Ollama challenge + Playwright fallback)")
+        default_concurrency = 10
+
+    concurrency = concurrency or int(os.getenv("CHECK_CONCURRENCY", os.getenv("MAX_CONCURRENT_FETCHES", default_concurrency)))
     timeout = float(os.getenv("FETCH_TIMEOUT", 10))
     delay = float(os.getenv("PER_DOMAIN_DELAY", 2.0))
 
     keywords = load_keywords()
 
-    # One quick translation probe: if Ollama can't translate now (model not pulled /
-    # thrashing on a memory-tight box), disable translation for this whole run up front
-    # instead of dribbling out a timeout per non-English domain.
-    try:
-        await translate_preflight()
-    except Exception:
-        pass
+    # One quick translation probe: only needed when AI is active
+    if not fast_bulk and enable_ai:
+        try:
+            await translate_preflight()
+        except Exception:
+            pass
 
     # Reset the dynamic timeout EMA so a prior crashed/saturated run's inflated
     # timeouts don't carry over and slow down this fresh batch.
@@ -269,10 +287,12 @@ async def run(concurrency: int = None, limit: int = 0, mode: str = "new", min_ag
             # be classified off near-empty extracted text and never get browser-rendered.
             visible_text_len = len(_extract_text(result.html or ""))
             needs_browser_fallback = (
-                result.failure_type == "blocked"
-                or (not result.html or len(result.html.strip()) < 800)
-                or visible_text_len < 250
-                or is_gambling_domain(eval_url)[0]
+                not fast_bulk and (
+                    result.failure_type == "blocked"
+                    or (not result.html or len(result.html.strip()) < 800)
+                    or visible_text_len < 250
+                    or is_gambling_domain(eval_url)[0]
+                )
             )
 
             decision, matched_keywords = classify(classify_html, url=eval_url, keywords=keywords)
@@ -357,125 +377,158 @@ async def run(concurrency: int = None, limit: int = 0, mode: str = "new", min_ag
                 run_stats["gambling"] += 1
 
             elif decision == "needs_ai":
-                # Route to AI Classifier
+                # Route to AI Classifier / Fast Deterministic Evaluation
                 run_stats["ai_evaluated"] += 1
 
-                # Hosting-cluster corroboration: if this domain's IP sits on an ASN we've
-                # already found heavily concentrated with confirmed gambling domains, surface
-                # that as extra context for the AI rather than deciding anything ourselves —
-                # see get_gambling_asn_concentration() docstring for why this is a hint, not
-                # a trigger. Only spent here (the already-small needs_ai bucket), not on
-                # every domain.
-                if asn_concentration:
-                    try:
-                        domain_ip = await asyncio.to_thread(resolve_ip, domain)
-                        single_ip = (domain_ip[0] if isinstance(domain_ip, list) else domain_ip) if domain_ip else None
-                        domain_asn = await asyncio.to_thread(resolve_asn, single_ip) if single_ip else None
-                        if domain_asn and domain_asn in asn_concentration:
-                            final_ip, final_asn = single_ip, domain_asn
-                            matched_keywords = list(matched_keywords) + [
-                                f"hosting_cluster:{domain_asn}(gambling_ratio={asn_concentration[domain_asn]})"
-                            ]
-                        elif single_ip:
-                            final_ip, final_asn = single_ip, domain_asn
-                    except Exception:
-                        pass
-
-                # Save the page context actually shown to the AI (title/meta/CTAs/body text)
-                # so a human reviewer can later see exactly what the model reasoned over,
-                # without re-fetching a site that may have changed or gone offline by then.
-                try:
-                    ai_title, ai_meta, ai_ctas, ai_body = clean_page_text(classify_html, max_chars=2500)
-                    final_ai_context = {
-                        "title": ai_title,
-                        "meta_description": ai_meta,
-                        "cta_buttons": ai_ctas,
-                        "body_excerpt": ai_body[:1200],
-                        "screenshot_used": bool(fallback_ss_path),
-                    }
-                except Exception:
-                    final_ai_context = None
-
-                # A domain that already has a real screenshot on disk was proven gambling at
-                # some point -- fast_mode's whole point is skipping the Round 2 challenge for
-                # speed, but that's exactly what let a single un-challenged Round 1 AI pass
-                # flip 248 previously-confirmed-gambling domains to "regular" on recheck.
-                # Force the full challenge whenever there's existing screenshot evidence to
-                # overturn, regardless of which recheck mode this is.
-                _has_prior_screenshot = any(
-                    is_valid_screenshot(os.path.join(output_screenshot_dir, cand))
-                    for cand in all_filename_candidates(eval_url, domain)
-                )
-                # Circuit breaker: if most of the last 10 AI calls already timed out,
-                # Ollama is clearly struggling right now -- skip waiting out another one.
-                # This only ever changes WHEN we give up (fast vs. after a full timeout),
-                # never WHAT gets decided: the outcome is still "unconfirmed" for a later
-                # retry, exactly what a real timeout would have produced anyway. Deciding
-                # gambling/regular from the heuristic alone here would skip the AI review
-                # this whole pipeline exists to provide -- not worth the time saved.
-                if _timeout_mgr.recent_timeout_rate() >= 0.6:
-                    ai_res = {"verdict": "unconfirmed", "reason": "AI circuit breaker: Ollama timing out on recent calls, skipped to avoid another wait"}
-                else:
-                    ai_res = await classify_with_challenge(
-                        classify_html,
-                        url=eval_url,
-                        matched_keywords=matched_keywords,
-                        fast_mode=(mode in ("unconfirmed", "regular", "dead", "blocked", "for_sale") or os.getenv("AI_FAST_MODE", "false").lower() == "true") and not _has_prior_screenshot and not full_recheck,
+                if fast_bulk or not enable_ai:
+                    # High-speed deterministic resolution (No Ollama calls - avoids machine freeze)
+                    has_providers = bool(detect_igaming_providers(classify_html or result.html or ""))
+                    has_funnels = bool(detect_gambling_funnels(classify_html or result.html or ""))
+                    has_real_strong = any(
+                        kw in STRONG_GAMBLING_SIGNALS and kw not in BARE_CATEGORY_SIGNALS
+                        for kw in matched_keywords
                     )
-                ai_verdict = str(ai_res.get("verdict", "unconfirmed")).strip().lower()
-                final_confidence = ai_res.get("confidence")
-                final_category = ai_res.get("category")
-                final_decided_by = (
-                    "tiebreaker_resolved" if ai_res.get("category") == "tiebreaker_resolved" else
-                    "validator_override" if ai_res.get("category") == "validator_override" else
-                    "validator_confirmed" if ai_res.get("challenge_override") is False and "Validated:" in str(ai_res.get("reason", "")) else
-                    "ai_round2_challenge" if ai_res.get("challenge_override") else "ai_round1"
-                )
 
-                if ai_verdict == "gambling":
-                    final_status = "gambling"
-                    run_stats["gambling"] += 1
-                    run_stats["ai_gambling"] += 1
-                    final_reason = ai_res.get("reason", "AI confirmed gambling")
-                elif ai_verdict == "regular":
-                    final_status = "regular"
-                    run_stats["regular"] += 1
-                    final_reason = ai_res.get("reason", "AI rejected: Regular website")
-                    delete_screenshot(domain, output_screenshot_dir)
-
-                    # Cloaking corroboration for the single highest-risk false-negative
-                    # shape: a domain with its own gambling-keyword anchor (e.g. "bet"/
-                    # "casino" in the name) that the AI still rejected as regular --
-                    # review_queue.py already calls exactly this combination its
-                    # highest-priority "Tier 1" case worth a human's eyes. This adds an
-                    # automatic corroborating check via a second, non-browser-like fetch
-                    # (borrowed from PySecAuditWebScanner's dual-UA cloaking technique --
-                    # see checking_url/fetcher.py's check_cloaking()) rather than trusting
-                    # the single original fetch. It deliberately never overrides the AI's
-                    # verdict on its own -- a content-length/keyword diff across two fetches
-                    # is corroborating evidence, not proof -- it only annotates the record
-                    # so it surfaces distinctly for human review instead of disappearing
-                    # into "regular" indistinguishable from an ordinary correct rejection.
-                    # Bounded cost: only runs for this already-narrow gambling-anchor
-                    # subset, never on every domain. Added 2026-08-24.
-                    if is_gambling_domain(eval_url)[0]:
-                        try:
-                            cloak = await check_cloaking(eval_url, timeout_seconds=timeout, gambling_keywords=keywords)
-                        except Exception:
-                            cloak = None
-                        if cloak and cloak.get("cloaking_suspected"):
-                            final_reason = f"{final_reason} [CLOAKING SUSPECTED: {cloak.get('note')} -- flagged for human review]"
-                            final_category = "cloaking_suspected"
-                elif ai_verdict in ("dead", "blocked"):
-                    final_status = ai_verdict
-                    run_stats[ai_verdict] += 1
-                    final_reason = ai_res.get("reason", f"AI identified site as {ai_verdict}")
-                    delete_screenshot(domain, output_screenshot_dir)
+                    if has_providers or has_funnels:
+                        final_status = "gambling"
+                        final_confidence = 0.95
+                        final_category = "online_casino" if has_providers else "betting_funnel"
+                        final_decided_by = "fast_bulk_provider_funnel"
+                        final_reason = f"Fast Bulk: Confirmed iGaming asset/funnel detected ({'provider' if has_providers else 'funnel'})"
+                        run_stats["gambling"] += 1
+                    elif has_real_strong:
+                        final_status = "gambling"
+                        final_confidence = 0.85
+                        final_category = "keyword_strong"
+                        final_decided_by = "fast_bulk_strong_signal"
+                        final_reason = f"Fast Bulk: High-conviction gambling signals ({', '.join(str(k) for k in matched_keywords[:2])})"
+                        run_stats["gambling"] += 1
+                    else:
+                        # Ambiguous: route cleanly to unconfirmed for later batch review
+                        final_status = "unconfirmed"
+                        final_confidence = 0.50
+                        final_category = "fast_bulk_ambiguous"
+                        final_decided_by = "fast_bulk_unconfirmed"
+                        final_reason = f"Fast Bulk: Ambiguous signals ({num_matched} keywords), queued for AI batch recheck"
+                        run_stats["unconfirmed"] += 1
+                        delete_screenshot(domain, output_screenshot_dir)
                 else:
-                    # Ollama offline or timeout -> Unconfirmed fallback without deleting screenshot
-                    final_status = "unconfirmed"
-                    run_stats["unconfirmed"] += 1
-                    final_reason = ai_res.get("reason") or "Unconfirmed: AI model was busy/offline, queued to re-run"
+                    # Hosting-cluster corroboration: if this domain's IP sits on an ASN we've
+                    # already found heavily concentrated with confirmed gambling domains, surface
+                    # that as extra context for the AI rather than deciding anything ourselves —
+                    # see get_gambling_asn_concentration() docstring for why this is a hint, not
+                    # a trigger. Only spent here (the already-small needs_ai bucket), not on
+                    # every domain.
+                    if asn_concentration:
+                        try:
+                            domain_ip = await asyncio.to_thread(resolve_ip, domain)
+                            single_ip = (domain_ip[0] if isinstance(domain_ip, list) else domain_ip) if domain_ip else None
+                            domain_asn = await asyncio.to_thread(resolve_asn, single_ip) if single_ip else None
+                            if domain_asn and domain_asn in asn_concentration:
+                                final_ip, final_asn = single_ip, domain_asn
+                                matched_keywords = list(matched_keywords) + [
+                                    f"hosting_cluster:{domain_asn}(gambling_ratio={asn_concentration[domain_asn]})"
+                                ]
+                            elif single_ip:
+                                final_ip, final_asn = single_ip, domain_asn
+                        except Exception:
+                            pass
+
+                    # Save the page context actually shown to the AI (title/meta/CTAs/body text)
+                    # so a human reviewer can later see exactly what the model reasoned over,
+                    # without re-fetching a site that may have changed or gone offline by then.
+                    try:
+                        ai_title, ai_meta, ai_ctas, ai_body = clean_page_text(classify_html, max_chars=2500)
+                        final_ai_context = {
+                            "title": ai_title,
+                            "meta_description": ai_meta,
+                            "cta_buttons": ai_ctas,
+                            "body_excerpt": ai_body[:1200],
+                            "screenshot_used": bool(fallback_ss_path),
+                        }
+                    except Exception:
+                        final_ai_context = None
+
+                    # A domain that already has a real screenshot on disk was proven gambling at
+                    # some point -- fast_mode's whole point is skipping the Round 2 challenge for
+                    # speed, but that's exactly what let a single un-challenged Round 1 AI pass
+                    # flip 248 previously-confirmed-gambling domains to "regular" on recheck.
+                    # Force the full challenge whenever there's existing screenshot evidence to
+                    # overturn, regardless of which recheck mode this is.
+                    _has_prior_screenshot = any(
+                        is_valid_screenshot(os.path.join(output_screenshot_dir, cand))
+                        for cand in all_filename_candidates(eval_url, domain)
+                    )
+                    # Circuit breaker: if most of the last 10 AI calls already timed out,
+                    # Ollama is clearly struggling right now -- skip waiting out another one.
+                    # This only ever changes WHEN we give up (fast vs. after a full timeout),
+                    # never WHAT gets decided: the outcome is still "unconfirmed" for a later
+                    # retry, exactly what a real timeout would have produced anyway. Deciding
+                    # gambling/regular from the heuristic alone here would skip the AI review
+                    # this whole pipeline exists to provide -- not worth the time saved.
+                    if _timeout_mgr.recent_timeout_rate() >= 0.6:
+                        ai_res = {"verdict": "unconfirmed", "reason": "AI circuit breaker: Ollama timing out on recent calls, skipped to avoid another wait"}
+                    else:
+                        ai_res = await classify_with_challenge(
+                            classify_html,
+                            url=eval_url,
+                            matched_keywords=matched_keywords,
+                            fast_mode=(mode in ("unconfirmed", "regular", "dead", "blocked", "for_sale") or os.getenv("AI_FAST_MODE", "false").lower() == "true") and not _has_prior_screenshot and not full_recheck,
+                        )
+                    ai_verdict = str(ai_res.get("verdict", "unconfirmed")).strip().lower()
+                    final_confidence = ai_res.get("confidence")
+                    final_category = ai_res.get("category")
+                    final_decided_by = (
+                        "tiebreaker_resolved" if ai_res.get("category") == "tiebreaker_resolved" else
+                        "validator_override" if ai_res.get("category") == "validator_override" else
+                        "validator_confirmed" if ai_res.get("challenge_override") is False and "Validated:" in str(ai_res.get("reason", "")) else
+                        "ai_round2_challenge" if ai_res.get("challenge_override") else "ai_round1"
+                    )
+
+                    if ai_verdict == "gambling":
+                        final_status = "gambling"
+                        run_stats["gambling"] += 1
+                        run_stats["ai_gambling"] += 1
+                        final_reason = ai_res.get("reason", "AI confirmed gambling")
+                    elif ai_verdict == "regular":
+                        final_status = "regular"
+                        run_stats["regular"] += 1
+                        final_reason = ai_res.get("reason", "AI rejected: Regular website")
+                        delete_screenshot(domain, output_screenshot_dir)
+
+                        # Cloaking corroboration for the single highest-risk false-negative
+                        # shape: a domain with its own gambling-keyword anchor (e.g. "bet"/
+                        # "casino" in the name) that the AI still rejected as regular --
+                        # review_queue.py already calls exactly this combination its
+                        # highest-priority "Tier 1" case worth a human's eyes. This adds an
+                        # automatic corroborating check via a second, non-browser-like fetch
+                        # (borrowed from PySecAuditWebScanner's dual-UA cloaking technique --
+                        # see checking_url/fetcher.py's check_cloaking()) rather than trusting
+                        # the single original fetch. It deliberately never overrides the AI's
+                        # verdict on its own -- a content-length/keyword diff across two fetches
+                        # is corroborating evidence, not proof -- it only annotates the record
+                        # so it surfaces distinctly for human review instead of disappearing
+                        # into "regular" indistinguishable from an ordinary correct rejection.
+                        # Bounded cost: only runs for this already-narrow gambling-anchor
+                        # subset, never on every domain. Added 2026-08-24.
+                        if is_gambling_domain(eval_url)[0]:
+                            try:
+                                cloak = await check_cloaking(eval_url, timeout_seconds=timeout, gambling_keywords=keywords)
+                            except Exception:
+                                cloak = None
+                            if cloak and cloak.get("cloaking_suspected"):
+                                final_reason = f"{final_reason} [CLOAKING SUSPECTED: {cloak.get('note')} -- flagged for human review]"
+                                final_category = "cloaking_suspected"
+                    elif ai_verdict in ("dead", "blocked"):
+                        final_status = ai_verdict
+                        run_stats[ai_verdict] += 1
+                        final_reason = ai_res.get("reason", f"AI identified site as {ai_verdict}")
+                        delete_screenshot(domain, output_screenshot_dir)
+                    else:
+                        # Ollama offline or timeout -> Unconfirmed fallback without deleting screenshot
+                        final_status = "unconfirmed"
+                        run_stats["unconfirmed"] += 1
+                        final_reason = ai_res.get("reason") or "Unconfirmed: AI model was busy/offline, queued to re-run"
 
             else:
                 # Less than threshold keywords: Strictly Regular Website
@@ -491,47 +544,65 @@ async def run(concurrency: int = None, limit: int = 0, mode: str = "new", min_ag
             # 3. Screenshot Capture & Error Management Rules
             # Strict Proof Requirement: Only capture if validated as gambling
             if final_status == "gambling":
-                ss_path, ss_status, ss_reason = await browser_pool.capture_url(
-                    eval_url, output_screenshot_dir, retries=2, keywords=keywords, domain=domain
-                )
-                if ss_path and is_valid_screenshot(ss_path):
-                    run_stats["screenshots_taken"] += 1
-                    await async_write_result(
-                        domain,
-                        url=eval_url,
-                        status="gambling",
-                        reason=final_reason,
-                        screenshot_taken=True,
-                        screenshot_failed_reason=None,
-                        ip=final_ip,
-                        asn=final_asn,
-                        confidence=final_confidence,
-                        category=final_category,
-                        decided_by=final_decided_by,
-                        ai_context=final_ai_context,
-                        matched_keywords=matched_keywords,
+                capture_screenshots = os.getenv("CAPTURE_SCREENSHOTS_IN_FAST_SCAN", "true").lower() in ("true", "1", "yes")
+                if capture_screenshots:
+                    ss_path, ss_status, ss_reason = await browser_pool.capture_url(
+                        eval_url, output_screenshot_dir, retries=1 if fast_bulk else 2, keywords=keywords, domain=domain
                     )
+                    if ss_path and is_valid_screenshot(ss_path):
+                        run_stats["screenshots_taken"] += 1
+                        await async_write_result(
+                            domain,
+                            url=eval_url,
+                            status="gambling",
+                            reason=final_reason,
+                            screenshot_taken=True,
+                            screenshot_failed_reason=None,
+                            ip=final_ip,
+                            asn=final_asn,
+                            confidence=final_confidence,
+                            category=final_category,
+                            decided_by=final_decided_by,
+                            ai_context=final_ai_context,
+                            matched_keywords=matched_keywords,
+                        )
+                    else:
+                        # Screenshot capture failing does NOT mean the site isn't gambling --
+                        # it means a separate, later, dedicated fetch (Playwright, not the
+                        # original classifier fetch) hit a WAF block/dead-end/timeout. The
+                        # content-based verdict (heuristic score and/or AI Analyst+Validator,
+                        # already backed by real evidence in `final_reason`/`final_confidence`/
+                        # `final_category`) used to get silently overwritten to
+                        # blocked/dead/unconfirmed here, discarding a confirmed true positive
+                        # purely because of unrelated screenshot infrastructure flakiness.
+                        # Fixed 2026-08-24: keep status="gambling" and leave screenshot_taken
+                        # False with a reason -- db/mongo_client.find_pending_capture() already
+                        # exists specifically to re-attempt these later, so this now actually
+                        # gets retried instead of being lost as a different status entirely.
+                        delete_screenshot(domain, output_screenshot_dir)
+                        await async_write_result(
+                            domain,
+                            url=eval_url,
+                            status="gambling",
+                            reason=final_reason,
+                            screenshot_taken=False,
+                            screenshot_failed_reason=f"{ss_status}: {ss_reason}",
+                            ip=final_ip,
+                            asn=final_asn,
+                            confidence=final_confidence,
+                            category=final_category,
+                            decided_by=final_decided_by,
+                            ai_context=final_ai_context,
+                            matched_keywords=matched_keywords,
+                        )
                 else:
-                    # Screenshot capture failing does NOT mean the site isn't gambling --
-                    # it means a separate, later, dedicated fetch (Playwright, not the
-                    # original classifier fetch) hit a WAF block/dead-end/timeout. The
-                    # content-based verdict (heuristic score and/or AI Analyst+Validator,
-                    # already backed by real evidence in `final_reason`/`final_confidence`/
-                    # `final_category`) used to get silently overwritten to
-                    # blocked/dead/unconfirmed here, discarding a confirmed true positive
-                    # purely because of unrelated screenshot infrastructure flakiness.
-                    # Fixed 2026-08-24: keep status="gambling" and leave screenshot_taken
-                    # False with a reason -- db/mongo_client.find_pending_capture() already
-                    # exists specifically to re-attempt these later, so this now actually
-                    # gets retried instead of being lost as a different status entirely.
-                    delete_screenshot(domain, output_screenshot_dir)
                     await async_write_result(
                         domain,
                         url=eval_url,
                         status="gambling",
                         reason=final_reason,
                         screenshot_taken=False,
-                        screenshot_failed_reason=f"{ss_status}: {ss_reason}",
+                        screenshot_failed_reason="Deferred: Screenshot capture skipped in fast bulk mode (defer to export_domains)",
                         ip=final_ip,
                         asn=final_asn,
                         confidence=final_confidence,
