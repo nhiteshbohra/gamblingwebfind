@@ -698,16 +698,18 @@ if __name__ == "__main__":
     parser.add_argument("--min-age-days", type=int, default=int(os.getenv("RECHECK_MIN_AGE_DAYS", 0)), help="Cooldown age threshold in days for regular/dead rechecks")
     parser.add_argument("--file", "--seed-file", help="Path to Excel/CSV/txt file to seed into domain_Listed before running")
     parser.add_argument("--full-recheck", action="store_true", help="Force the full Round 2 AI challenge even in modes that default to fast_mode")
+    parser.add_argument("--fast-bulk", action="store_true", default=None, help="High-speed heuristic mode (0 Ollama calls, avoids PC freeze)")
     args = parser.parse_args()
 
     if args.file:
         from db.mongo_client import seed_file_to_domain_listed
         seed_file_to_domain_listed(args.file)
 
-    from checking_url.ai_classifier import start_ollama_if_needed
-    try:
-        asyncio.run(start_ollama_if_needed())
-    except Exception as e:
-        print(f"[!] Local AI status check error: {e}")
+    if not args.fast_bulk:
+        from checking_url.ai_classifier import start_ollama_if_needed
+        try:
+            asyncio.run(start_ollama_if_needed())
+        except Exception as e:
+            print(f"[!] Local AI status check error: {e}")
 
-    asyncio.run(run(concurrency=args.concurrency, limit=args.limit, mode=args.mode, min_age_days=args.min_age_days, full_recheck=args.full_recheck))
+    asyncio.run(run(concurrency=args.concurrency, limit=args.limit, mode=args.mode, min_age_days=args.min_age_days, full_recheck=args.full_recheck, fast_bulk=args.fast_bulk))
