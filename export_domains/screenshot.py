@@ -62,11 +62,28 @@ def find_screenshot_path(url: str, domain: str, output_dir: str = None) -> str |
     if output_dir is None:
         output_dir = os.getenv("SCREENSHOT_DIR", os.path.join("output", "screenshots"))
     SEARCH_SUBDIRS = ("", "New folder")
-    for cand in all_filename_candidates(url, domain):
+    cands = all_filename_candidates(url, domain)
+    for cand in cands:
         for subdir in SEARCH_SUBDIRS:
             p = os.path.join(output_dir, subdir, cand) if subdir else os.path.join(output_dir, cand)
             if is_valid_screenshot(p):
                 return p
+
+    # Fallback: if screenshot was moved to an export run directory (output/<run_id>/screenshots/), check there too
+    parent_output = os.path.dirname(os.path.abspath(output_dir))
+    if os.path.isdir(parent_output):
+        try:
+            for entry in os.scandir(parent_output):
+                if entry.is_dir() and entry.name != "screenshots":
+                    run_screenshots_dir = os.path.join(entry.path, "screenshots")
+                    if os.path.isdir(run_screenshots_dir):
+                        for cand in cands:
+                            p = os.path.join(run_screenshots_dir, cand)
+                            if is_valid_screenshot(p):
+                                return p
+        except Exception:
+            pass
+
     return None
 
 

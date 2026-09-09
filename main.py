@@ -190,10 +190,10 @@ def _size_based_split(domain_ids: list, pdf_limit_mb: float = 24.0) -> list[list
 
 
 def run_export_domains():
-    print("\n--- export_domains (Export & Batch Splitting) ---")
+    print("\n--- export_domains (Ultra-Fast Direct Batch Export) ---")
     print("  0. Back to main menu")
-    print("  1. Export from Database  (Generate Word, PDF & Excel from MongoDB)")
-    print("  2. Divide into Batches   (Split existing Excel/CSV + PDF into batch folders)")
+    print("  1. Export Directly to Batches (Fast PyMuPDF PDF + Excel Batches, <=24 MB) [default]")
+    print("  2. Divide Existing Files into Batches (Split legacy Excel/CSV + PDF)")
     mode = input("Select option (0-2) [default: 1]: ").strip()
     if mode in ("0", "b", "back"):
         return
@@ -203,7 +203,7 @@ def run_export_domains():
         prompt_divide_into_batches()
         return
 
-    # Mode 1: Export from Database
+    # Mode 1: Export directly to batches from Database
     from export_domains.exporter import run as export_run
 
     limit = int(os.getenv("CAPTURE_LIMIT", 0))
@@ -214,20 +214,12 @@ def run_export_domains():
         return
 
     print(f"\n[+] Export Complete:")
-    print(f"    Run ID   : {result.get('run_id')}")
-    print(f"    PDF      : {result.get('pdf') or 'N/A'}")
-    print(f"    Excel    : {result.get('xlsx') or 'N/A'}")
-    print(f"    Captured : {result.get('captured')}")
-    print(f"    Failed   : {result.get('failed')}")
-
-    if result.get("pdf") and result.get("xlsx") and os.path.exists(result["pdf"]):
-        try:
-            ask_split = input("\n[?] Would you like to divide these exported files into batches now? (y/n) [default: n]: ").strip().lower()
-            if ask_split in ("y", "yes"):
-                from export_domains.batch_splitter import create_batches
-                create_batches(csv_path=result["xlsx"], pdf_path=result["pdf"])
-        except Exception as e:
-            print(f"[!] Batch splitting error: {e}")
+    print(f"    Run ID       : {result.get('run_id')}")
+    print(f"    Batches      : {result.get('batches', 0)} batch folders in '{result.get('batches_dir')}'")
+    print(f"    Sample PDF   : {result.get('pdf') or 'N/A'}")
+    print(f"    Master Excel : {result.get('xlsx') or 'N/A'}")
+    print(f"    Captured     : {result.get('captured')}")
+    print(f"    Failed       : {result.get('failed')}")
 
 
 

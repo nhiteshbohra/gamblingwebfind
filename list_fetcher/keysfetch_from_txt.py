@@ -312,6 +312,8 @@ def import_blocklists_to_mongo(
         "unique_domains_found": 0,
         "skipped_duplicate_sources": 0,
         "skipped_already_in_db": 0,
+        "skipped_in_source_queue": 0,
+        "skipped_in_checked_domains": 0,
         "domain_listed_inserted": 0,
         "domain_listed_updated": 0,
         "errors": [],
@@ -351,10 +353,11 @@ def import_blocklists_to_mongo(
     target_col_name = os.getenv("MONGO_COLLECTION", "domain_Listed")
     print(f"\n🚀 Starting Blocklist Import Pipeline ({len(all_sources)} sources)")
     print(f"   Target: MongoDB Collection '{target_col_name}' ONLY (active=True, processed=False)")
-    print(f"   Skip Existing in Queue: {skip_existing} | Dry Run: {dry_run}")
+    print(f"   Skip Existing in Queue / Checked: {skip_existing} | Dry Run: {dry_run}")
     print("=" * 70)
 
     source_col = None if dry_run else source_domains()
+    checked_col = None if dry_run else checked_domains()
 
     total_unique_seen_global: Set[str] = set()
 
@@ -413,12 +416,24 @@ def import_blocklists_to_mongo(
         for chunk in batch_chunks(new_domains_for_src, chunk_size):
             domains_to_write = chunk
             if skip_existing:
-                existing_in_db = set(
+                existing_in_source = set(
                     doc["_id"] for doc in source_col.find(
                         {"_id": {"$in": chunk}},
                         {"_id": 1}
                     )
                 )
+                existing_in_checked = set(
+                    doc["_id"] for doc in checked_col.find(
+                        {"_id": {"$in": chunk}},
+                        {"_id": 1}
+                    )
+                )
+                already_in_source_count = len(existing_in_source)
+                already_in_checked_count = len(existing_in_checked - existing_in_source)
+                stats["skipped_in_source_queue"] += already_in_source_count
+                stats["skipped_in_checked_domains"] += already_in_checked_count
+
+                existing_in_db = existing_in_source | existing_in_checked
                 if existing_in_db:
                     stats["skipped_already_in_db"] += len(existing_in_db)
                     domains_to_write = [d for d in chunk if d not in existing_in_db]
@@ -462,7 +477,11 @@ def import_blocklists_to_mongo(
     print(f"   • Total Raw Lines Read         : {stats['raw_lines_read']:,}")
     print(f"   • Total Global Unique Domains  : {len(total_unique_seen_global):,}")
     print(f"   • Skipped (Cross-Source Dups)  : {stats['skipped_duplicate_sources']:,}")
-    print(f"   • Skipped (Already in Queue)   : {stats['skipped_already_in_db']:,}")
+    print(f"   • Skipped (Already in DB)      : {stats['skipped_already_in_db']:,}")
+    if stats["skipped_in_source_queue"]:
+        print(f"     - In source queue ({target_col_name}): {stats['skipped_in_source_queue']:,}")
+    if stats["skipped_in_checked_domains"]:
+        print(f"     - In checked results (checked_domains): {stats['skipped_in_checked_domains']:,}")
     print(f"   • Newly Queued in {target_col_name} : {stats['domain_listed_inserted']:,}")
     if stats["domain_listed_updated"]:
         print(f"   • Re-queued / Updated in Queue : {stats['domain_listed_updated']:,}")
