@@ -801,7 +801,6 @@ async def _call_vision_model(image_path: str, prompt: str, log_ctx: str = "") ->
     Call a vision-capable model using the standard OpenAI chat completions
     image_url data URI sent to the OmniRoute gateway.
     """
-    if not image_path or not os.path.exists(image_path):
     if not ENABLE_VISION_AI or not image_path or not os.path.exists(image_path):
         return None
     try:
