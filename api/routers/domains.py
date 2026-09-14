@@ -1,12 +1,11 @@
 import os
 import re
-import asyncio
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
-from typing import Optional, List, Dict, Any
+from typing import Optional, Any
 
-from db.mongo_client import checked_domains as _cd, source_domains as _sd, resolve_ip, write_result
+from db.mongo_client import checked_domains as _cd, resolve_ip, write_result
 from export_domains.screenshot import find_screenshot_path
 
 router = APIRouter(prefix="/api")
@@ -108,7 +107,7 @@ async def test_single_url(req: TestUrlRequest):
     """
     Interactive Sandbox Tester:
     Fetches a single URL live, runs heuristic keyword screening,
-    evaluates with Ollama AI challenge (if enabled), resolves IP,
+    evaluates with OmniRoute AI challenge (if enabled), resolves IP,
     and optionally captures a screenshot.
     """
     raw_url = req.url.strip()
@@ -188,7 +187,7 @@ async def test_single_url(req: TestUrlRequest):
     except Exception as e:
         reason_summary = f"Heuristic error: {e}"
 
-    # 4. Ollama AI Evaluation (if enabled and page content exists)
+    # 4. OmniRoute AI Evaluation (if enabled and page content exists)
     ai_result = None
     final_verdict = heuristic_verdict
 
@@ -206,7 +205,7 @@ async def test_single_url(req: TestUrlRequest):
                 final_verdict = ai_eval.get("verdict")
                 reason_summary = ai_eval.get("reason") or reason_summary
         except Exception as e:
-            ai_result = {"error": f"Ollama AI offline or timeout: {e}"}
+            ai_result = {"error": f"OmniRoute AI offline or timeout: {e}"}
 
     if final_verdict in ("gambling", "regular"):
         pass
@@ -345,7 +344,6 @@ async def proxy_domain_page(domain: str):
 @router.post("/backup")
 def trigger_backup():
     try:
-        from db.mongo_client import backup_databases
         res = backup_databases()
         return res
     except Exception as e:

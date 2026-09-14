@@ -39,8 +39,10 @@ from dotenv import load_dotenv
 
 load_dotenv(dotenv_path=Path(__file__).resolve().parent.parent / ".env")
 
-from export_domains.screenshot import _url_to_filename, all_filename_candidates, find_screenshot_path
-from db.mongo_client import checked_domains, source_domains
+from export_domains.screenshot import all_filename_candidates, find_screenshot_path
+from db.mongo_client import checked_domains
+from export_domains.screenshot import all_filename_candidates, find_screenshot_path
+from db.mongo_client import checked_domains
 
 IST = timezone(timedelta(hours=5, minutes=30))
 HYPERLINK_FONT = Font(color="0000FF", underline="single")
@@ -453,11 +455,6 @@ def run_export(
 async def run(concurrency: int = None, limit: int = 0) -> dict:
     """Async entry point."""
     return await asyncio.to_thread(run_export, None, limit)
-
-
-# Backward compatibility aliases
-build_report = generate_pdf_batch
-_convert_to_pdf = lambda docx_path: docx_path.replace(".docx", ".pdf")
 
 
 if __name__ == "__main__":

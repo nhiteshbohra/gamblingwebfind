@@ -4,7 +4,6 @@ and failure classification.
 """
 import asyncio
 import logging
-import os
 
 # Silence verbose third-party loggers to prevent breaking tqdm progress bar
 for _logger_name in ("scrapling", "curl_cffi", "urllib3", "asyncio", "playwright"):

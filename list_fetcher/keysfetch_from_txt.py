@@ -19,12 +19,10 @@ Configured Sources:
 """
 
 import argparse
-import concurrent.futures
 import os
 import re
 import sys
 import time
-import urllib.parse
 import urllib.request
 from datetime import datetime
 from pathlib import Path

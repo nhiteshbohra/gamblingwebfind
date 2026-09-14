@@ -483,6 +483,17 @@ async function loadOverview() {
       mTxt.textContent = `Mongo: ${fmtNum(chk.total_checked || src.total_listed)}`;
     }
 
+    fetch(`${API}/api/settings`)
+      .then(r => r.json())
+      .then(s => {
+        const oDot = document.getElementById("hdr-omniroute-dot");
+        const oTxt = document.getElementById("hdr-omniroute-text");
+        if (oDot && oTxt && s.omniroute) {
+          oDot.className = s.omniroute.ok ? "status-dot ok" : "status-dot warn";
+          oTxt.textContent = s.omniroute.ok ? `OmniRoute: ${s.omniroute.model || 'auto'}` : "OmniRoute: Offline";
+        }
+      }).catch(() => {});
+
     document.getElementById("st-src-total").textContent = fmtNum(src.total_listed);
     document.getElementById("st-src-pending").textContent = fmtNum(src.pending);
     document.getElementById("st-src-active").textContent = fmtNum(src.active);
@@ -717,6 +728,7 @@ async function runUrlTest() {
 
   loadTitle.textContent = `Connecting to ${rawUrl}...`;
   loadSubtitle.textContent = "Bypassing WAF, analyzing keywords & querying Ollama AI challenge...";
+  loadSubtitle.textContent = "Bypassing WAF, analyzing keywords & querying OmniRoute AI challenge...";
 
   try {
     const res = await fetch(`${API}/api/test-url`, {

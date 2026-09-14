@@ -6,9 +6,7 @@ def __getattr__(name):
     if name in (
         "run_export",
         "run",
-        "build_report",
         "build_workbook",
-        "_convert_to_pdf",
         "add_clickable_hyperlink",
         "generate_pdf_batch",
         "build_batch_workbook",
@@ -37,9 +35,7 @@ def __getattr__(name):
 __all__ = [
     "run_export",
     "run",
-    "build_report",
     "build_workbook",
-    "_convert_to_pdf",
     "add_clickable_hyperlink",
     "generate_pdf_batch",
     "build_batch_workbook",

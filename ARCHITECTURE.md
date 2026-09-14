@@ -1,23 +1,29 @@
 # ARCHITECTURE — gamblingwebfind System & Data Specifications
+# ARCHITECTURE — gamblingwebfind System & Data Specifications (OmniRoute Edition)
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.100%2B-009688.svg)](https://fastapi.tiangolo.com/)
 [![MongoDB](https://img.shields.io/badge/MongoDB-8.0-green.svg)](https://www.mongodb.com/)
 [![Ollama](https://img.shields.io/badge/Ollama-Local_AI-black.svg)](https://ollama.ai/)
+[![MongoDB](https://img.shields.io/badge/MongoDB-7.0%2B-green.svg)](https://www.mongodb.com/)
+[![OmniRoute](https://img.shields.io/badge/OmniRoute-AI_Gateway-6366f1.svg)](https://github.com/diegosouzapw/OmniRoute)
 [![Playwright](https://img.shields.io/badge/Playwright-Chromium-red.svg)](https://playwright.dev/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 This document provides a comprehensive technical reference for the architecture, data models, state transitions, component designs, and execution lifecycles of the **gamblingwebfind** platform.
+This document provides a comprehensive technical reference for the architecture, data models, state transitions, component designs, and execution lifecycles of the **gamblingwebfind** platform (OmniRoute edition).
 
 ---
 
 ## 1. PROJECT OVERVIEW
+## 1. High-Level Architecture
 
 ### Elevator Pitch
 **gamblingwebfind** is an enterprise-grade, high-performance Python pipeline for discovering, classifying, validating, and generating audit-ready compliance reports for online gambling and illegal wagering websites. Combining high-speed TLS-impersonating fetchers, a 1,000+ term keyword heuristic engine, a dual-model + tiebreaker local LLM challenge system (Ollama, built from `qwen2.5:3b`/`qwen2.5:7b-instruct`), non-English page translation, headless browser screenshot validation, and an independent OCR + vision-model visual audit layer, the platform detects illegal betting operators with high recall, bounded false-positive risk, and automated generation of PDF/Excel compliance reports plus a live web dashboard.
+The platform operates as a high-concurrency, asynchronous pipeline designed to scale across 700,000+ domains without local GPU bottlenecks.
 
 ### Key Capabilities
-- **Multi-Source Domain Discovery**: Mined via SearXNG meta-search queries (Stage 0), Common Crawl parquet datasets (Stage 1), and manual CSV/known-gambling-list imports.
+- **Multi-Source Domain Discovery**: Mined via multi-engine keyword search queries (Stage 0), Common Crawl parquet datasets (Stage 1), and manual CSV/known-gambling-list imports.
 - **TLS-Impersonating HTTP Engine**: Uses `Scrapling` with `curl_cffi` Chrome fingerprinting to bypass standard network blocks and anti-bot measures.
 - **Non-English Page Translation**: Pages that fail an offline `langdetect` English check are translated via the local LLM before classification.
 - **Triple-Lock Classification**:
@@ -52,9 +58,19 @@ This document provides a comprehensive technical reference for the architecture,
          ┌───────────────────────────────┴───────────────────────────────┐
          │                                                               │
          ▼                                                               ▼
+                      ┌──────────────────────────────────────────────┐
+                      │                 USER INTERFACE               │
+                      │   Interactive CLI (main.py) / FastAPI REST   │
+                      └──────────────────────┬───────────────────────┘
+                                             │
+             ┌───────────────────────────────┴───────────────────────────────┐
+             │                                                               │
+             ▼                                                               ▼
 ┌─────────────────────────┐                                   ┌─────────────────────────┐
-│ Stage 0: SearXNG Search │                                   │ Stage 1: Common Crawl   │
+│ Stage 0: Keyword Search │                                   │ Stage 1: Common Crawl   │
 │ Live Web Discovery      │                                   │ Parquet Archive Mining  │
+│ Stage 0: Search Harvest │                                   │ Bulk Domain Seed Files  │
+│ Crawlee Multi-Engine    │                                   │ CSV / Excel / TXT       │
 └────────────┬────────────┘                                   └────────────┬────────────┘
              │                                                             │
              └───────────────────────────┬─────────────────────────────────┘
@@ -72,6 +88,9 @@ This document provides a comprehensive technical reference for the architecture,
                              │  • Scrapling Fetcher │
                              │  • Heuristics (988)  │
                              │  • Ollama 2-Round AI │
+                             │  • 1,050 Heuristics  │
+                             │  • ML Fast-Path      │
+                             │  • OmniRoute Gateway │
                              │  • Playwright Pool   │
                              └───────────┬──────────┘
                                          │
@@ -80,12 +99,14 @@ This document provides a comprehensive technical reference for the architecture,
                              │ Stage 3: Exporter    │
                              │  • Report Generator  │
                              │  • Batch Splitter    │
+                             │  • PDF / Excel Report│
+                             │  • 24MB Size Splitter│
                              └──────────────────────┘
 ```
 
 ### Component Responsibilities
 
-1. **`searxng_search.py` (Stage 0)**: Runs SearXNG via Docker to execute automated keyword search queries across Google, Bing, and DuckDuckGo, extracting candidate domains.
+1. **`crawlee_search.py` (Stage 0)**: Executes automated multi-engine keyword search queries (Bing, DuckDuckGo) and casino hub spidering to extract candidate domains.
 2. **`find_gambling.py` & `historical_common_crawl.py` (Stage 1)**: Queries AWS Common Crawl columnar parquet indexes to discover historical gambling landers.
 3. **`db/mongo_client.py` (Data Persistence Layer)**: Manages MongoDB connections, domain normalization (using `.removeprefix("www.")`), state tracking (`active`, `processed`, `status`), and retry policies.
 4. **`checking_url/` (Stage 2 Verification Engine)**:
@@ -123,21 +144,33 @@ This document provides a comprehensive technical reference for the architecture,
 ---
 
 ## 3. ARCHITECTURE DIAGRAM
+## 2. Component Specifications
 
 ### Mermaid System Flowchart
+### 2.1 Stage 0: Multi-Engine Search Harvester (`keywordssearch/crawlee_search.py`)
+- **Technology**: Crawlee for Python + Playwright / curl_cffi.
+- **Search Engines**: Bing, DuckDuckGo, Yahoo, Google.
+- **Strategy**: Dispatches targeted queries derived from Indian and global gambling keywords (*"online satta app"*, *"cricket betting id whatsapp"*, *"live casino india"*, *"instant withdrawal aviator"*).
+- **Deduplication**: Filters out common search engine landing pages, ad domains, and social media hubs before pushing normalized base domains into MongoDB (`domain_Listed`).
 
 ```mermaid
 flowchart TD
     subgraph Discovery ["1. Discovery Layer"]
-        S0["searxng_search.py<br/>(Live Web Search via Docker)"]
+        S0["crawlee_search.py<br/>(Live Web Search)"]
         S1["find_gambling.py<br/>(Common Crawl Parquet Index)"]
         CSV["CSV / Excel Manual Import"]
     end
+### 2.2 Stage 1: Domain Ingestion & Normalization (`db/mongo_client.py`)
+- **Data Collections**:
+  - `domain_Listed`: Queue of discovered and pending domains.
+  - `checked_domains`: Classified outcomes, reasons, evidentiary metadata, and timestamps.
+- **Normalization**: Strips schemes (`http://`, `https://`), trailing paths, query strings, and redundant prefixes (`www.`) to maintain canonical domain keys.
 
     subgraph Storage ["2. Database Layer"]
         M1[("MongoDB: domain_Listed<br/>{domain, active, processed, source}")]
         M2[("MongoDB: checked_domains<br/>{status, reason, screenshot_taken, exported}")]
     end
+### 2.3 Stage 2: Triple-Lock Verification Engine (`checking_url/`)
 
     subgraph Verification ["3. Stage 2: URL Checker (checking_url)"]
         RUN["runner.py (Orchestrator)"]
@@ -146,39 +179,80 @@ flowchart TD
         AI["ai_classifier.py (Ollama qwen2.5:3b LLM)"]
         PWB["screenshot.py (Playwright BrowserPool)"]
     end
+#### A. TLS-Impersonating Fetcher (`fetcher.py`)
+- **Core Technology**: `Scrapling` library wrapped over `curl_cffi`.
+- **Browser Impersonation**: Uses Chrome TLS fingerprints (JA3/JA4) and randomized user-agent headers to evade basic bot defenses and Cloudflare protection.
+- **Failure Classification**: Distinguishes connection issues:
+  - `dead`: DNS NXDOMAIN, host unreachable, connection refused.
+  - `blocked`: HTTP 403 Forbidden, Cloudflare challenge landers.
+  - `server_error`: Transient HTTP 5xx responses (routed to `unconfirmed` for auto-retry).
+  - `parked`: Detected registrar landing pages (GoDaddy, Sedo, Namecheap, Dan.com).
 
     subgraph Reporting ["4. Stage 3: Compliance Exporter (export_domains)"]
         EXP["exporter.py (Word/PDF/Excel Builder)"]
         SPL["batch_splitter.py (PyMuPDF Batch Splitter)"]
     end
+#### B. ML Fast-Path Classifier (`ml_classifier.py`)
+- **Model**: Scikit-learn Logistic Regression / Random Forest trained on 19,000+ labeled domain names.
+- **Feature Extraction**: Character n-grams, domain tokenization, vowel-to-consonant ratios, betting keyword sub-stems, and TLD categories.
+- **Fast-Path Decision Gates**:
+  - Probability $\ge 0.85$: Confirms `gambling` instantly with zero network/AI overhead.
+  - Probability $\le 0.12$ and 0 keywords matched: Confirms `regular` instantly with zero network/AI overhead.
+  - Between $0.12$ and $0.85$: Falls through to heuristic analysis and OmniRoute challenge rounds.
 
     S0 & S1 & CSV -->|Insert candidates| M1
     M1 -->|Fetch unprocessed active domains| RUN
     RUN --> FET
     FET -- "HTTP HTML Body" --> CLA
     FET -- "Network Failure (403/404/Refused)" --> RUN
+#### C. Weighted Heuristic Engine (`classifier.py`)
+- **Keyword Corpus**: 1,050+ weighted terms across English, Hindi, and Hinglish.
+- **Categories**:
+  - `STRONG_GAMBLING_SIGNALS`: Specific betting terms (*"aviator game"*, *"satta matka"*, *"betting exchange"*, *"sportsbook"*, *"teen patti"*, *"andar bahar"*).
+  - `GAMBLING_TLDS`: `.casino`, `.bet`, `.poker`, `.bingo`, `.lotto`.
+  - `NEGATIVE_ARCHETYPES`: Guardrails for educational, banking, hospitality, shopping, and news websites to prevent false positives.
+- **Scoring**: Computes a float score. If $\text{Score} \ge 4.0$ with an anchor signal $\rightarrow$ locked as `gambling`. If ambiguous $\rightarrow$ routed to `needs_ai`.
 
     CLA -- "Score >= 4.0 + strong signal" --> PWB
     CLA -- "Score < 1.5, no strong signal" --> RUN
     CLA -- "needs_ai: 1.5<=Score<4.0, or any strong signal" --> AI
     AI -- "Confirmed Gambling" --> PWB
     AI -- "Regular / Offline" --> RUN
+#### D. OmniRoute Cloud AI Gateway (`ai_classifier.py`)
+- **Architecture**: OpenAI-compatible HTTP interface communicating with the local OmniRoute gateway daemon on `http://localhost:20128/v1`.
+- **Self-Healing Auto-Start**:
+  - `start_omniroute_if_needed(timeout_sec=25.0)`: Checks health via `/v1/models`. If offline, acquires an `asyncio.Lock()` and launches `omniroute serve` as a detached background process (`DETACHED_PROCESS` on Windows; `start_new_session=True` on POSIX).
+  - Automatically polls until the gateway is operational and retries interrupted requests without crashing.
+- **Adaptive Dynamic Timeout (`DynamicTimeoutManager`)**:
+  - Tracks rolling Exponential Moving Average (EMA) of cloud response latencies.
+  - Computes timeouts as: $\text{Timeout} = \text{EMA} \times 1.6 + \text{Content Factor}$, clamped to $[10.0\text{s}, 60.0\text{s}]$.
+- **Two-Round Analyst-Validator Pattern**:
+  - **Round 1 (Analyst)**: Analyzes cleaned DOM text, meta descriptions, page titles, and deposit/cashier funnels.
+  - **Round 2 (Validator Judge)**: Sceptically evaluates candidate gambling verdicts against anti-hallucination rules (rejecting media reviews, commercial banking, academic pages).
+  - **Tie-Breaker**: Resolves genuine disagreements between Analyst and Validator.
 
     PWB -- "Screenshot Captured (.jpg)" --> RUN
     RUN -->|Save final status & reason| M2
     RUN -->|Mark processed=True| M1
+#### E. Evidentiary Visual Capture (`export_domains/screenshot.py`)
+- **Engine**: Playwright asynchronous Chromium browser pool (`BrowserPool`).
+- **Trigger**: Automatically executed when a domain is confirmed as `gambling`.
+- **Output**: Full-page PNG screenshots saved to `data/screenshots/<domain>.png` with timestamp metadata.
 
     M2 -->|Query unexported gambling domains| EXP
     EXP --> SPL
     SPL -->|Output Audit Bundles| OUT["output/Batches/<br/>(PDF & Excel Reports)"]
 ```
+### 2.4 Stage 3: Compliance Reporting & Sizing Engine (`export_domains/`)
+- **PyMuPDF Engine (`exporter.py`)**: Assembles evidence reports with clickable hyperlinks, classification verdicts, and timestamps.
+- **Batch Sizing Splitter (`batch_splitter.py`)**: Evaluates generated PDF and Excel bundles. Automatically splits exports if file size exceeds $24\text{ MB}$ or domain count exceeds $1,000$ to comply with regulatory upload constraints.
 
 ### ASCII Fallback Diagram
 
 ```
 +-----------------------------------------------------------------------------+
 |                               DISCOVERY LAYER                               |
-|   SearXNG Docker Search   |   Common Crawl Mining   |   CSV / API Import   |
+|   Multi-Engine Search     |   Common Crawl Mining   |   CSV / API Import   |
 +--------------------------------───┬─────────────────────────────────────────+
                                     │
                                     v
@@ -207,8 +281,10 @@ flowchart TD
 ---
 
 ## 4. STEP-BY-STEP "HOW IT WORKS"
+## 3. Data Schema & State Machine
 
 ### End-to-End Processing Lifecycle
+### 3.1 Domain Life Cycle States
 
 ```mermaid
 sequenceDiagram
@@ -266,7 +342,7 @@ sequenceDiagram
 ```
 
 #### Step 1: Ingestion & Seeding
-- **Action**: Discovery engines (`searxng_search.py`, `find_gambling.py`) or manual CSV uploaders push domain strings into MongoDB collection `domain_Listed`.
+- **Action**: Discovery engines (`crawlee_search.py`, `find_gambling.py`) or manual CSV uploaders push domain strings into MongoDB collection `domain_Listed`.
 - **Handling Component**: `db/mongo_client.py` (`seed_discovered_domains` / `seed_from_csv`).
 - **Domain Normalization**: Strips protocol schemes and uses `str.removeprefix("www.")` to prevent domain corruption (e.g., `win88casino.com` is preserved correctly).
 - **Failure Risk**: Malformed inputs or network drops to MongoDB; mitigated by retry logic and `$setOnInsert` operations to preserve historical check state.
@@ -339,6 +415,28 @@ sequenceDiagram
 
 ## 5. FOLDER / FILE STRUCTURE
 
+                [Unprocessed Domain]
+                         │
+                         ▼
+                   [Fetch Status]
+                    /    │     \
+            403 / WAF   404    200 OK
+               /         │       \
+          [blocked]   [dead]   [Classifier]
+                                /    |     \
+                           ML Fast  Rule   needs_ai
+                            Path   Score      │
+                             /       \        ▼
+                            /         \   [OmniRoute AI]
+                           /           \  /     \
+                          ▼             ▼▼       ▼
+                     [regular]      [gambling]  [unconfirmed]
+                                        │
+                                        ▼
+                                [Capture Screenshot]
+                                        │
+                                        ▼
+                                 [Export Report]
 ```
 gamblingwebfind/
 ├── api/                         # FastAPI REST Server
@@ -396,6 +494,7 @@ gamblingwebfind/
 ```
 
 ---
+### 3.2 Database Record Structure (`checked_domains`)
 
 ## 6. SETUP & INSTALLATION
 
@@ -404,7 +503,6 @@ gamblingwebfind/
 - **Python**: Version `3.11` or `3.12`.
 - **MongoDB**: Version `6.0` or `8.0` running locally on port `27017` (or remote MongoDB Atlas instance).
 - **Ollama**: Local AI runner (Required for Stage 2 AI evaluation). Download from [ollama.ai](https://ollama.ai/).
-- **Docker Desktop**: Required only for Stage 0 SearXNG search execution.
 
 ---
 
@@ -413,7 +511,26 @@ gamblingwebfind/
 #### 1. Clone the Repository
 ```bash
 git clone https://github.com/nhiteshbohra/gamblingwebfind.git
+git clone https://github.com/your-username/gamblingwebfind.git
 cd gamblingwebfind
+```json
+{
+  "_id": "bet365india-example.com",
+  "domain": "bet365india-example.com",
+  "url": "https://bet365india-example.com",
+  "status": "gambling",
+  "decided_by": "validator_confirmed",
+  "confidence": 0.96,
+  "category": "sports_betting",
+  "reason": "Validated: Online sports betting exchange with active cricket match odds and UPI cashier",
+  "matched_keywords": ["betting exchange", "live odds", "cricket id", "upi deposit"],
+  "screenshot_taken": true,
+  "screenshot_path": "data/screenshots/bet365india-example.com.png",
+  "server_ip": "104.21.55.12",
+  "asn": "AS13335",
+  "processed_at": "2026-09-14T10:47:20Z",
+  "export_batch_id": null
+}
 ```
 
 #### 2. Create and Activate a Virtual Environment
@@ -488,6 +605,7 @@ Confirm all four are built/pulled with `ollama list`, and that `OLLAMA_MODEL=gam
 ---
 
 ### Running the Application
+## 4. Resilience & Error Handling Specifications
 
 #### Option A: Interactive CLI Menu
 Launch the CLI interface to run any pipeline stage interactively:
@@ -560,7 +678,7 @@ erDiagram
         string domain "Normalized Domain"
         boolean active "Candidate Active Flag"
         boolean processed "Processing Complete Status"
-        string source "Discovery Source (searxng / common_crawl / manual)"
+        string source "Discovery Source (keyword_search / common_crawl / manual)"
         string block_reason "Reason if deactivated"
         string added_date "ISO Date String"
     }
@@ -597,3 +715,10 @@ Contributions are welcome! Please run `python -m pytest` to ensure all tests pas
 
 ### License
 Distributed under the MIT License. See `LICENSE` for details.
+1. **AI Gateway Outage**:
+   - Detected via `aiohttp.ClientConnectorError` or server disconnection.
+   - Handled by `start_omniroute_if_needed()`, which recovers the server in the background and transparently replays the request.
+2. **Circuit Breaker**:
+   - If $\ge 60\%$ of the last 10 requests time out, the system marks domains as `unconfirmed` instead of hanging indefinitely.
+3. **Headless Browser Failure**:
+   - Guarded inside `BrowserPool.start()`. Safe error catch triggers graceful session closure without leaving orphaned node/browser processes or unclosed asyncio event loop pipes.

@@ -1,5 +1,6 @@
 from fastapi import APIRouter
-import os, asyncio
+import os
+import os
 from db.mongo_client import get_db
 
 router = APIRouter(prefix="/api")
@@ -17,19 +18,24 @@ def get_settings():
         mongo_ok = False
         mongo_msg = str(e)[:80]
 
-    # Ollama check
+    # OmniRoute check
     import urllib.request
-    ollama_ok = False
-    ollama_url = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
+    omniroute_ok = False
+    omniroute_url = os.getenv("OMNIROUTE_BASE_URL", "http://localhost:20128/v1")
+    omniroute_key = os.getenv("OMNIROUTE_API_KEY", "")
     try:
-        urllib.request.urlopen(f"{ollama_url}/api/tags", timeout=3)
-        ollama_ok = True
+        headers = {"Authorization": f"Bearer {omniroute_key}"} if omniroute_key else {}
+        req = urllib.request.Request(f"{omniroute_url}/models", headers=headers)
+        res = urllib.request.urlopen(req, timeout=3)
+        if res.status == 200:
+            omniroute_ok = True
     except Exception:
         pass
 
     return {
         "mongo": {"ok": mongo_ok, "message": mongo_msg, "db": db.name if db is not None else os.getenv("MONGO_DB_NAME", "")},
-        "ollama": {"ok": ollama_ok, "url": ollama_url},
+        "omniroute": {"ok": omniroute_ok, "url": omniroute_url, "model": os.getenv("OMNIROUTE_MODEL", "auto")},
+        "ollama": {"ok": omniroute_ok, "url": omniroute_url},  # alias for backward-compatible frontend
         "config": {
             "screenshot_dir": os.getenv("SCREENSHOT_DIR", "output/screenshots"),
             "check_concurrency": os.getenv("CHECK_CONCURRENCY", "20"),

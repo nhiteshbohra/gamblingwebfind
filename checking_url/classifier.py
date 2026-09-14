@@ -187,7 +187,6 @@ ACTIONABLE_WAGERING_SIGNALS_GENERIC = {
     "deposit money", "deposit now", "instant deposit", "deposit funds",
     "withdraw money", "instant withdrawal", "withdrawal request", "cashier",
 }
-ACTIONABLE_WAGERING_SIGNALS = ACTIONABLE_WAGERING_SIGNALS_UNAMBIGUOUS | ACTIONABLE_WAGERING_SIGNALS_GENERIC
 
 # Game / chart NAME phrases inside the UNAMBIGUOUS set that a blog / news story / wiki
 # ABOUT gambling quotes descriptively rather than as a working CTA ("how the Aviator crash

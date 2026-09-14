@@ -16,7 +16,6 @@ import sys
 import threading
 import time
 import webbrowser
-from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -91,9 +90,9 @@ def ask_checking_mode() -> str | None:
     """Prompt user to choose target domain queue for checking/re-checking."""
     print("\nSelect checking target queue:")
     print("  0. Back to main menu")
-    print("  1. Check New Domains           (Fresh queue from SearXNG search or CSV import) [default]")
+    print("  1. Check New Domains           (Fresh queue from keyword search or CSV import) [default]")
     print("  2. Re-check Blocked Sites      (Retry HTTP 403 / Cloudflare WAF protected sites)")
-    print("  3. Re-check Unconfirmed Sites  (Re-evaluate pending sites with Ollama AI)")
+    print("  3. Re-check Unconfirmed Sites  (Re-evaluate pending sites with OmniRoute AI)")
     print("  4. Re-check Regular Websites   (Re-verify non-gambling sites to detect new gambling content)")
     print("  5. Re-check Dead Sites         (Re-test offline or DNS-failed sites to see if back online)")
     print("  6. Re-check For-Sale Sites     (Re-test parked/registrar landers in case they've gone live)")
@@ -120,11 +119,11 @@ def run_checking_url(mode: str = None):
     if mode is None:
         return  # user chose back
 
-    from checking_url.ai_classifier import start_ollama_if_needed
+    from checking_url.ai_classifier import ensure_omniroute_ready
     try:
-        asyncio.run(start_ollama_if_needed())
+        asyncio.run(ensure_omniroute_ready())
     except Exception as e:
-        print(f"[!] Local AI status check error: {e}")
+        print(f"[!] AI Gateway status check error: {e}")
 
     from checking_url.runner import run as check_run
 
@@ -139,49 +138,6 @@ def run_checking_url(mode: str = None):
             print("[+] checking_url complete.")
     except KeyboardInterrupt:
         print("\n[+] Stopped by user. Progress saved — you can resume anytime.")
-
-
-def _size_based_split(domain_ids: list, pdf_limit_mb: float = 24.0) -> list[list[str]]:
-    """Split domain_ids into batches where each batch's estimated PDF size stays under pdf_limit_mb.
-
-    Estimation: JPEG file size on disk + PDF_PAGE_OVERHEAD_BYTES per entry.
-    Target ceiling is set slightly below the limit to leave headroom.
-    """
-    from export_domains.screenshot import all_filename_candidates
-    SCREENSHOTS_DIR = os.getenv("SCREENSHOT_DIR", os.path.join("output", "screenshots"))
-    PDF_PAGE_OVERHEAD = 12_000          # ~12KB per page for text/metadata
-    PDF_LIMIT_BYTES   = int(pdf_limit_mb * 1024 * 1024 * 0.92)  # 92% of 24MB as safe ceiling
-
-    batches = []
-    current_batch = []
-    current_size  = 0
-
-    from db.mongo_client import checked_domains as _cd
-    for domain in domain_ids:
-        doc = _cd().find_one({"_id": domain}, {"url": 1})
-        url = (doc or {}).get("url") or f"https://{domain}"
-        candidates = all_filename_candidates(url, domain)
-        jpeg_size = 0
-        for cand in candidates:
-            p = os.path.join(SCREENSHOTS_DIR, cand)
-            if os.path.exists(p):
-                jpeg_size = os.path.getsize(p)
-                break
-
-        entry_size = jpeg_size + PDF_PAGE_OVERHEAD
-
-        if current_batch and (current_size + entry_size) > PDF_LIMIT_BYTES:
-            batches.append(current_batch)
-            current_batch = []
-            current_size  = 0
-
-        current_batch.append(domain)
-        current_size += entry_size
-
-    if current_batch:
-        batches.append(current_batch)
-
-    return batches
 
 
 def run_export_domains():
@@ -313,7 +269,7 @@ def run_ml_trainer():
     print("    scikit-learn TF-IDF + Logistic Regression classifier.")
     print("    Trains in seconds on CPU. Saves model to checking_url/models/.")
     print("    After training, the model acts as a fast-path signal in the")
-    print("    checking_url pipeline, reducing Ollama calls by ~30-40%.\n")
+    print("    checking_url pipeline, reducing AI calls by ~30-40%.\n")
 
     confirm = input("[?] Start training now? (y/n) [default: y]: ").strip().lower()
     if confirm in ("n", "no"):
@@ -371,11 +327,10 @@ def interactive_menu():
 
 
 def shutdown_background_services():
-    """Unload Ollama AI models on exit to free VRAM/RAM."""
-    print("\n[+] Releasing Ollama models from memory...")
+    """Close AI gateway sessions on exit."""
     try:
-        from checking_url.ai_classifier import stop_ollama_if_running
-        asyncio.run(stop_ollama_if_running())
+        from checking_url.ai_classifier import close_ai_session
+        asyncio.run(close_ai_session())
     except Exception:
         pass
 

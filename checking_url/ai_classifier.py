@@ -1,17 +1,17 @@
 """
-checking_url/ai_classifier.py — Local AI (Ollama) Dual-Model Classifier.
+checking_url/ai_classifier.py — OmniRoute AI Dual-Model Classifier.
 
-Architecture: Analyst + Validator (Judge) Pattern
-- Round 1 (gambling-analyst): Standard deep semantic classification
-- Round 2 (gambling-analyst): If Round 1 says "regular" → evidence challenge
-- Validator (gambling-validator): If analyst says "gambling" → skeptic validator
-  challenges the verdict, checks if cited evidence is real, catches false positives
-
-Both models use qwen2.5:3b but with opposing system prompts:
-  analyst  → finds gambling signals
-  validator → actively looks for reasons the verdict is WRONG
+Architecture: Analyst + Validator (Judge) Pattern powered by OmniRoute AI Gateway
+- Round 1 (Analyst): Standard deep semantic classification with Indian domain rules
+- Round 2 (Analyst): If Round 1 says "regular" → evidence challenge
+- Validator: If analyst says "gambling" → skeptic validator challenges the verdict,
+  checks if cited evidence is real, catches false positives
+- Tiebreaker: Decisive final arbitrator for disputed verdicts
 """
 import os
+import subprocess
+import sys
+import time
 import json
 import re
 import asyncio
@@ -65,124 +65,159 @@ except ImportError:
     def is_gambling_domain(url: str):
         return False, ""
 
-# ── Configuration ─────────────────────────────────────────────────────────────
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gambling-analyst")
-OLLAMA_VALIDATOR_MODEL = os.getenv("OLLAMA_VALIDATOR_MODEL", "gambling-validator")
+# ── Configuration (OmniRoute AI Gateway) ─────────────────────────────────────
+OMNIROUTE_BASE_URL = os.getenv("OMNIROUTE_BASE_URL", "http://localhost:20128/v1").rstrip("/")
+OMNIROUTE_API_KEY = os.getenv("OMNIROUTE_API_KEY", "")
+OMNIROUTE_MODEL = os.getenv("OMNIROUTE_MODEL", "auto")
+OMNIROUTE_VALIDATOR_MODEL = os.getenv("OMNIROUTE_VALIDATOR_MODEL", "auto")
+OMNIROUTE_TIEBREAKER_MODEL = os.getenv("OMNIROUTE_TIEBREAKER_MODEL", "auto")
+OMNIROUTE_VISION_MODEL = os.getenv("OMNIROUTE_VISION_MODEL", "auto")
+AI_CONCURRENCY = int(os.getenv("AI_CONCURRENCY", 8))
+USE_CRAWL4AI_FOR_AI = os.getenv("USE_CRAWL4AI_FOR_AI", "false").lower() == "true"
 
-# ── Ollama Validator Config Guard ───────────────────────────────────────────
-# Fixed 2026-08-21 (see ARCHITECTURE.md): production .env once had
-# OLLAMA_VALIDATOR_MODEL == OLLAMA_MODEL, and gambling-validator had never
-# been built, so every "independent skeptic" Validator round was silently
-# just the Analyst model re-confirming its own verdict. That degraded the
-# whole two-round challenge system to a single round with no one actually
-# checking it, with no error or warning anywhere. Refuse to import this
-# module in that state so the same misconfiguration can never again fail
-# silently -- set ALLOW_SAME_OLLAMA_VALIDATOR_MODEL=true in .env only for
-# deliberate single-model local testing.
-if OLLAMA_MODEL == OLLAMA_VALIDATOR_MODEL and os.getenv("ALLOW_SAME_OLLAMA_VALIDATOR_MODEL", "false").lower() != "true":
-    raise RuntimeError(
-        f"OLLAMA_MODEL and OLLAMA_VALIDATOR_MODEL are both '{OLLAMA_MODEL}' -- the "
-        "Validator round would just be the Analyst model validating itself, silently "
-        "defeating the two-round challenge system (this is the exact bug fixed on "
-        "2026-08-21). Set OLLAMA_VALIDATOR_MODEL to a distinct model in your .env "
-        "(e.g. OLLAMA_MODEL=gambling-analyst / OLLAMA_VALIDATOR_MODEL=gambling-validator), "
-        "or set ALLOW_SAME_OLLAMA_VALIDATOR_MODEL=true if this is intentional for local testing."
-    )
-# Tie-breaker: only invoked for the small slice of disputed/uncertain cases (validator says
-# "uncertain", or both validator model attempts fail) — a bigger model is affordable there
-# since it's a tiny fraction of total volume, unlike running it on every domain. Default is
-# 7B (~4.5GB q4) rather than 14B (~9GB) because AI_CONCURRENCY allows overlapping requests
-# for DIFFERENT domains at DIFFERENT stages (analyst / validator / tiebreaker), so Ollama can
-# end up holding two models resident at once — 7B keeps that safe on a 16GB machine. Bump to
-# qwen2.5:14b-instruct-q4_K_M only if you also set OLLAMA_MAX_LOADED_MODELS=1 on the Ollama
-# server (forces it to evict the previous model before loading a new one).
-OLLAMA_TIEBREAKER_MODEL = os.getenv("OLLAMA_TIEBREAKER_MODEL", "qwen2.5:7b-instruct-q4_K_M")
-# Vision fallback for canvas/WebGL-rendered casino UIs (slot reels, live dealer feeds) that
-# ship zero DOM text and zero OCR-readable banner text. Kept small on purpose — see
-# classify_screenshot_vision() for why "moondream" is the right size for this machine.
-OLLAMA_VISION_MODEL = os.getenv("OLLAMA_VISION_MODEL", "moondream")
-# ponytail: Default AI concurrency set to 2 to give 8B model ample VRAM and zero queue starvation
-AI_CONCURRENCY = int(os.getenv("AI_CONCURRENCY", 2))
-USE_CRAWL4AI_FOR_AI = os.getenv("USE_CRAWL4AI_FOR_AI", "true").lower() == "true"
-
-# Dynamic timeout bounds (seconds) — scaled for 8B validator model
+# Dynamic timeout bounds (seconds)
 AI_TIMEOUT_MIN = float(os.getenv("AI_TIMEOUT_MIN", 10.0))   # fastest simple pages
 AI_TIMEOUT_MAX = float(os.getenv("AI_TIMEOUT_MAX", 60.0))   # slowest complex pages
-AI_TIMEOUT_BASE = float(os.getenv("AI_TIMEOUT_BASE", 20.0)) # initial seed before data
+AI_TIMEOUT_BASE = float(os.getenv("AI_TIMEOUT_BASE", 25.0)) # initial seed before data
+
+# ── Analyst & Validator System Instructions ──────────────────────────────────
+ANALYST_SYSTEM_PROMPT = """You are an expert Cyber Crime Intelligence Analyst specializing in detecting illegal online gambling, real-money gaming, betting exchanges, Satta networks, online lotteries, and gambling-adjacent platforms operating in India and globally.
+
+Your sole task is to analyze extracted website text, HTML metadata, page titles, and visual text to determine whether the website is a GAMBLING/BETTING platform or a REGULAR non-gambling website.
+
+1. CRITICAL POSITIVE INDICATORS (Classify as "gambling" if ANY are present):
+A. Cricket & Sports Betting Exchanges:
+   - IPL, T20, Test, World Cup, Tennis, Football, Kabaddi betting or live odds.
+   - Betting exchange terms: "Back / Lay", "Bookmaker", "Fancy Odds", "Session / Khai-Lagai", "Match Odds", "Punter", "Exchange 247".
+   - Betting syndicates / Clone platforms: Mahadev Book, Reddy Anna, Laser247, Fairplay, Betbhai9, Cricbet99, Lotus365, SkyExchange, Diamondexch, Winbuzz.
+   - Funnels: "Get Instant Demo ID", "WhatsApp for Betting ID", "Telegram Bookie ID", "Customer Care WhatsApp".
+
+B. Casino & Table Games:
+   - Traditional Indian Games: Teen Patti, Andar Bahar, Jhandi Munda, 7 Up Down, Mang Patta, Real-money Rummy / Points Rummy.
+   - Live Dealer / International Casino: Roulette, Blackjack, Baccarat, Dragon Tiger, Sic Bo, Live Casino streaming.
+   - Slots & Crash Games: Aviator, Crash X, Spaceman, JetX, Rocket game, Mines, Plinko, Megaways, Spin & Win, Wheel of Fortune.
+   - Casino resorts: classified as gambling ONLY if the site itself advertises its gaming floor, slots, or table games for wagering.
+
+C. Lottery & Prize Draw Platforms:
+   - Any online lottery site, state lottery result portal, or lottery prediction site (e.g. bhagyashree lottery, nagaland lottery, kerala lottery, sikkim state lottery).
+   - Scratch cards, instant win games, lucky draw, prize draw competitions.
+   - Kalyan Matka, Mumbai Main, Gali Disawar, Milan Day/Night, Rajdhani, Satta King.
+
+D. Financial & Promotional Triggers:
+   - Deposit/Withdrawal: UPI deposit, Paytm/PhonePe/GPay instant deposit, IMPS, Crypto/USDT betting, "Instant 5-minute withdrawal", "Minimum deposit ₹100".
+   - Bonuses: "100% First Deposit Bonus", "₹500 Signup Bonus", "Free Spins", "200x Multiplier", "Daily Cashback on Losses".
+   - APK Distribution: "Download Betting App APK", "Install Casino Android App", "Play Real Money App".
+
+2. FALSE POSITIVE GUARDRAILS (Classify as "regular" ONLY with specific evidence):
+Do NOT classify as gambling if you can provide SPECIFIC page evidence that the website is:
+- Educational / Academic: College, University, School portals.
+- Genuine E-Commerce: Shopping cart, product listings with prices, physical shipping.
+- News / Wiki / Government: News reporting on raids, Wikipedia history, Government anti-gambling warnings.
+- Hospitality (Hotels/Resorts/Restaurants): Room bookings, menus, conference spaces without remote gambling.
+- Commercial Banking & Financial Institutions: Official banks, credit unions, NBFCs (savings accounts, loans, fixed deposits, net banking). NEVER classify an official bank as gambling simply because it mentions deposits or accounts.
+- Review / Ranking / Comparison / Affiliate Sites: A site that reviews, ranks, or compares casinos/betting sites with outlinks to third-party brands and NO Login/Register of its own is REGULAR (media/affiliate). Classify as "gambling" if the site has its OWN Login/Register account system for this brand to place bets or play games.
+
+3. RESOLUTION POLICY:
+- If a site has real-money cash stakes, betting IDs, live casino games, Satta Matka, or lottery → "gambling".
+- When in doubt and cannot cite a specific gambling mechanism → classify as "regular".
+
+Respond ONLY with a valid JSON object:
+{
+  "verdict": "gambling" or "regular",
+  "confidence": <float 0.0-1.0>,
+  "category": "<sports_betting | live_casino | satta_matka | crash_game | lottery | casino_resort | betting_id_funnel | regular>",
+  "key_triggers": ["<specific signals on this page>"],
+  "reason": "<one sentence explanation>"
+}
+"""
+
+VALIDATOR_SYSTEM_PROMPT = """You are an expert Cyber Crime Intelligence Validator.
+Another analyst model has evaluated a website and suspected it of being "gambling".
+Your job is to double-check the verdict skeptically against the actual page content.
+
+CONFIRM GAMBLING ("validation": "confirmed", "verdict": "gambling"):
+- Casino/Card games: Roulette, Blackjack, Baccarat, Teen Patti, Andar Bahar, Poker, Slots, Aviator crash game.
+- Sports/Cricket Betting: Live IPL odds, Match odds, Bookmaker, Betting IDs, Exchange.
+- Real-money deposit/withdrawal flows: UPI, Paytm, crypto betting, Demo IDs.
+- Satta Matka or Lotteries: Kalyan Matka, Satta King, Nagaland/Kerala lotteries.
+- The page IS the operator: has its OWN Login/Register account system for this brand, or states it is a licensed gambling operator.
+
+REJECT GAMBLING ("validation": "rejected", "verdict": "regular"):
+- Hospitality / Dining: Genuine hotel, resort, restaurant with no gambling floor.
+- News / Educational / Legal: News articles, legal analysis, university portals.
+- E-Commerce: Sells physical goods with a shopping cart.
+- Official Bank / Financial Portal: Savings, loans, fixed deposits, net banking.
+- Review / Ranking / Affiliate: Compares casinos and links OUT to third-party brands; no operator login/deposit of its own.
+
+Respond ONLY in valid JSON:
+If confirmed gambling:
+{
+  "verdict": "gambling",
+  "confidence": <float 0.0-1.0>,
+  "validation": "confirmed",
+  "rejection_reason": null,
+  "evidence_check": "<quote the exact gambling text from page>",
+  "final_reason": "<one sentence>"
+}
+If rejected:
+{
+  "verdict": "regular",
+  "confidence": <float 0.0-1.0>,
+  "validation": "rejected",
+  "rejection_reason": "<why prior verdict was rejected>",
+  "evidence_check": "<quote non-gambling text from page>",
+  "final_reason": "<one sentence>"
+}
+"""
 
 
 class DynamicTimeoutManager:
     """
-    Adaptive timeout calculator for Ollama AI requests.
-
-    Logic:
-    - Tracks a rolling Exponential Moving Average (EMA) of actual response times.
-    - Each request gets a timeout based on:
-        (a) Content complexity: longer prompts need more inference time.
-        (b) Observed latency: EMA of past response times * safety_multiplier.
-    - Bounds: [AI_TIMEOUT_MIN, AI_TIMEOUT_MAX]
-    - Quick sites stay fast. Slow/complex sites get the time they need.
+    Adaptive timeout calculator for AI requests.
+    Tracks a rolling Exponential Moving Average (EMA) of actual response times.
     """
-    EMA_ALPHA = 0.25        # EMA smoothing factor (higher = adapts faster)
-    SAFETY_MULTIPLIER = 1.6 # timeout = ema_time * 1.6 (60% headroom)
-    CHARS_PER_SECOND = 150  # approx model chars-per-second throughput baseline
+    EMA_ALPHA = 0.25        # EMA smoothing factor
+    SAFETY_MULTIPLIER = 1.6 # timeout = ema_time * 1.6
+    CHARS_PER_SECOND = 150  # approx model chars-per-second baseline
 
     def __init__(self):
-        self._ema_response_time: float = AI_TIMEOUT_BASE  # seed with base
+        self._ema_response_time: float = AI_TIMEOUT_BASE
         self._total_calls: int = 0
         self._total_timeouts: int = 0
         self._lock = asyncio.Lock()
-        self._recent_outcomes: deque = deque(maxlen=10)  # True = timed out, for recent_timeout_rate()
+        self._recent_outcomes: deque = deque(maxlen=10)
 
     def compute_timeout(self, prompt_chars: int) -> float:
-        """
-        Compute the dynamic timeout for this request.
-        Formula:
-            content_factor = prompt_chars / CHARS_PER_SECOND
-            dynamic_timeout = max(MIN, min(MAX, ema * SAFETY_MULTIPLIER + content_factor))
-        """
         content_factor = max(0.0, (prompt_chars - 500) / self.CHARS_PER_SECOND)
         raw = self._ema_response_time * self.SAFETY_MULTIPLIER + content_factor
         clamped = max(AI_TIMEOUT_MIN, min(AI_TIMEOUT_MAX, raw))
         return round(clamped, 1)
 
     async def record_success(self, elapsed: float):
-        """Update EMA with a successful response time."""
         async with self._lock:
             self._total_calls += 1
             self._recent_outcomes.append(False)
-            # EMA update: new_ema = alpha * latest + (1 - alpha) * old_ema
             self._ema_response_time = (
                 self.EMA_ALPHA * elapsed
                 + (1 - self.EMA_ALPHA) * self._ema_response_time
             )
 
     async def record_timeout(self):
-        """Track timeouts — bump EMA conservatively so next request gets a bit more headroom without compounding excessively."""
         async with self._lock:
             self._total_calls += 1
             self._total_timeouts += 1
             self._recent_outcomes.append(True)
-            # Conservative 5% bump instead of 20% to prevent runaway 60s timeout freezes
             self._ema_response_time = min(
                 AI_TIMEOUT_MAX / self.SAFETY_MULTIPLIER,
                 self._ema_response_time * 1.05
             )
 
     def recent_timeout_rate(self) -> float:
-        """Fraction of the last 10 calls that timed out. Used to fail fast (skip waiting
-        out another timeout) when Ollama is clearly struggling right now -- NEVER to
-        decide a verdict on its own. A high rate only ever means 'ask again later'
-        (status stays 'unconfirmed'), same outcome an actual timeout would produce, just
-        without burning the wait. Deciding gambling/regular from heuristics alone here
-        would bypass the AI review this whole pipeline exists to provide."""
         if not self._recent_outcomes:
             return 0.0
         return sum(self._recent_outcomes) / len(self._recent_outcomes)
 
     async def reset_ema(self):
-        """Reset EMA to base seed — call at start of a new batch to clear inflated timeouts from prior run."""
         async with self._lock:
             self._ema_response_time = AI_TIMEOUT_BASE
             self._total_calls = 0
@@ -201,36 +236,31 @@ class DynamicTimeoutManager:
         )
 
 
-# Global dynamic timeout manager (shared across all calls in a session)
+# Global dynamic timeout manager
 _timeout_mgr = DynamicTimeoutManager()
 
 # Known iGaming game provider CDNs / APIs / iframes
 IGAMING_PROVIDERS = (
-    # Top Global Live Casino & Slots
     "pragmaticplay", "evolutiongaming", "evolution.com", "spribe", "jiligaming", "ezugi",
     "sexybaccarat", "supernowa", "kingmaker", "habanero", "playngo", "pgsoft",
     "microgaming", "netent", "relax-gaming", "betgames.tv", "fastspin", "cq9gaming",
     "yggdrasil", "redtiger", "bgaming", "playtech", "betsoft", "endorphina",
     "wazdan", "spinomenal", "booming-games", "evoplay", "smartsoft", "nolimitcity",
     "thunderkick", "blueprintgaming", "amatic", "gamomat", "greentube", "novomatic",
-    # Asian & Indian targeted networks
     "jili", "sexygaming", "fachai", "dreamgaming", "sa gaming", "wm casino", "allbet"
 )
 
-# High-conviction deposit/cashier/VIP funnel hooks — standalone triggers (no gambling context needed)
+# High-conviction deposit/cashier/VIP funnel hooks
 GAMBLING_FUNNEL_MARKERS_STRONG = (
     "get demo id", "create master id", "whatsapp betting", "telegram betting",
     "instant deposit", "instant withdrawal", "24/7 withdrawal", "fast payout",
     "usdt deposit", "trc20 deposit", "crypto cashier", "betting exchange id"
 )
 
-# Social/contact links — only a funnel when gambling context words also appear in the HTML
-# wa.me/ and t.me/ appear on millions of legitimate Indian business sites as contact buttons
 GAMBLING_FUNNEL_MARKERS_SOCIAL = (
     "wa.me/", "api.whatsapp.com/send", "t.me/", "telegram.me/",
 )
 
-# Context words that make a social link a betting funnel
 _FUNNEL_SOCIAL_CONTEXT = (
     "bet", "betting", "casino", "satta", "matka", "odds", "deposit", "withdraw",
     "demo id", "bookmaker", "cricket id", "ipl", "live odds", "bonus",
@@ -244,11 +274,6 @@ def detect_gambling_funnels(html: str) -> list[str]:
     html_lower = html.lower()
 
     matched = [m for m in GAMBLING_FUNNEL_MARKERS_STRONG if m in html_lower]
-
-    # Word-boundary match required — a bare substring check on short words like "bet" matches
-    # inside ordinary English ("between", "alphabet", "diabetes", "Tibetan"), which would let
-    # ANY page using the word "between" plus a WhatsApp/Telegram contact link (ubiquitous on
-    # legitimate small-business sites) trip this and get instant-locked to gambling downstream.
     has_gambling_context = any(re.search(rf"\b{re.escape(c)}\b", html_lower) for c in _FUNNEL_SOCIAL_CONTEXT)
     if has_gambling_context:
         matched += [m for m in GAMBLING_FUNNEL_MARKERS_SOCIAL if m in html_lower]
@@ -256,23 +281,7 @@ def detect_gambling_funnels(html: str) -> list[str]:
     return matched
 
 
-# Verbatim mentions of known gambling regulators / self-exclusion & problem-gambling support
-# bodies are near-zero-noise signals — a non-gambling site essentially never cites these. Small
-# local models proved unreliable at weighing this correctly even with explicit prompt
-# instructions: live-tested repeatedly against a real UK Gambling Commission-licensed operator
-# whose page explicitly said "licensed and regulated... Gambling Commission... GamStop...
-# GamCare... BeGambleAware... you can register and place a bet" and was still confidently
-# REJECTED as "regular" in some runs, with reasoning that literally acknowledged the licensing
-# language and then contradicted itself. This is a code-level safety net: it does NOT auto-lock
-# "gambling" (shared hosting/false brand mentions could exist) — it only prevents a validator's
-# rejection from being trusted blindly when these signals are present, forcing a tie-breaker
-# look instead, in both the "clean" and "hedged" rejection paths.
 LICENSED_OPERATOR_SIGNALS = (
-    # Deliberately self-referential compliance phrasing only ("we ARE licensed", "our
-    # account/license number is...") — NOT bare regulator/charity names like "gamstop" or
-    # "gamcare" alone, which legitimately appear on genuine support/awareness/charity/news
-    # sites that are emphatically not operators (a real false positive I caught live-testing
-    # this exact fix against a gambling-addiction support charity page).
     "licensed and regulated by", "licensed and regulated in", "licensed by the gambling commission",
     "gambling commission account", "under account", "malta gaming authority",
     "curacao egaming", "curacao gaming license", "regulated by the gambling commission",
@@ -281,19 +290,13 @@ LICENSED_OPERATOR_SIGNALS = (
 
 
 def detect_licensed_operator_signals(text: str) -> list[str]:
-    """Detect verbatim regulator/self-exclusion-body mentions in already-extracted page text."""
+    """Detect verbatim regulator/self-exclusion-body mentions in page text."""
     if not text:
         return []
     text_lower = text.lower()
     return [s for s in LICENSED_OPERATOR_SIGNALS if s in text_lower]
 
 
-# Phrases the VALIDATOR itself writes when it is describing a gambling operator while
-# still rejecting the "gambling" verdict -- a self-contradiction. Non-English operator
-# pages (Russian/Vietnamese/Chinese 1xbet/1win/PG88 mirrors) trigger this constantly
-# because detect_licensed_operator_signals only matches English page text, so the
-# body_text-based hard-evidence check never fires and the wrong rejection is trusted.
-# When the validator's OWN reasoning contains one of these, don't trust it -> tie-break.
 _VALIDATOR_OPERATOR_TELLS = (
     "reputable online casino", "an online casino", "is a casino", "online gambling platform",
     "is a gambling site", "which is a gambling site", "is a gambling platform", "a gambling site,",
@@ -308,9 +311,7 @@ _VALIDATOR_NEGATION_RE = re.compile(r"(?:\bnot\b|n't|\bno\b|resembl|domain name 
 
 
 def validator_reject_self_contradicts(val_result: dict) -> list[str]:
-    """Operator language in the validator's own rejection/final/evidence text that a
-    genuine clean rejection would not contain. Negated mentions ('not a gambling site',
-    'only resembling a gambling term') are skipped."""
+    """Detect operator language in validator's own rejection text."""
     blob = " ".join(str(val_result.get(k, "") or "") for k in
                      ("rejection_reason", "final_reason", "evidence_check")).lower()
     if not blob:
@@ -326,10 +327,6 @@ def validator_reject_self_contradicts(val_result: dict) -> list[str]:
     return hits
 
 
-# Gambling-specific CTA button text (deliberately excludes generic account-system terms like
-# bare "login"/"deposit"/"withdraw" that also appear on banks/e-commerce/forums) — these are
-# the subset of clean_page_text()'s cta_patterns that essentially only belong to a gambling
-# operator's own interactive elements.
 _GAMBLING_SPECIFIC_CTA_MARKERS = (
     "claim bonus", "bet id", "demo id", "bookmaker", "spin", "play now",
     "lottery", "lotto", "scratch", "no-deposit", "free bonus",
@@ -337,16 +334,7 @@ _GAMBLING_SPECIFIC_CTA_MARKERS = (
 
 
 def detect_operator_cta_signals(cta_buttons: list | None) -> list[str]:
-    """Detect gambling-specific interactive CTAs (already extracted from the live page's own
-    <a>/<button> tags by clean_page_text()) — proof the SITE ITSELF has operator-style
-    interactive elements, not just descriptive text. Used to catch a validator rejection that
-    claims "no login/register-to-play mechanism" while the page's own extracted buttons say
-    otherwise — this was reproduced live: a validator rejected a real operator (juegging-
-    sports.bet) with "does not contain gambling mechanisms such as login/register-to-play"
-    while its own cta_buttons list contained "Login", "Withdrawal", and "CLAIM BONUS" — a
-    directly falsifiable contradiction the code can catch without relying on the model to
-    notice its own inconsistency.
-    """
+    """Detect gambling-specific interactive CTAs."""
     if not cta_buttons:
         return []
     hits = []
@@ -360,24 +348,15 @@ def detect_operator_cta_signals(cta_buttons: list | None) -> list[str]:
 
 
 def detect_igaming_providers(html: str) -> list[str]:
-    """Detect if HTML *loads assets from* known casino game provider CDNs (script src, iframe src, img src).
-
-    Only matches inside src="..." or data-src="..." attribute values — not free text —
-    to avoid false positives where an ad network or analytics tag on a portal page happens
-    to contain a provider name as a substring in unrelated text or comment.
-    """
+    """Detect if HTML loads assets from known casino game provider CDNs."""
     if not html:
         return []
-    # Extract all src / data-src values: <... src="VALUE" ...> or <... data-src="VALUE" ...>
     src_values = " ".join(re.findall(r"""(?:data-)?src\s*=\s*["']([^"']{5,300})["']""", html, re.IGNORECASE)).lower()
     return [p for p in IGAMING_PROVIDERS if p in src_values]
 
 
-
-# Conviction threshold: if AI says "regular" with confidence below this → send to Round 2 challenge
 REGULAR_CONVICTION_THRESHOLD = 0.50
 
-# Non-gambling archetype patterns for ground-truth evidence verification
 NON_GAMBLING_EVIDENCE_MAP = {
     "hotel_hospitality": [
         "hotel", "resort", "book a room", "hotel reservation", "check-in", "check-out",
@@ -407,7 +386,6 @@ NON_GAMBLING_EVIDENCE_MAP = {
         "brokerage", "etf", "asset management", "invest online", "trading account",
         "demat account", "financial advisor", "sebi registered", "mas regulated",
         "sec registered", "robo advisor", "sip", "investment",
-        # Forex / CFD broker specific — these CANNOT appear on gambling sites
         "forex", "foreign exchange", "cfds", "cfd trading", "pip", "spread betting",
         "lot size", "leverage", "margin call", "stop loss", "take profit",
         "mt4", "mt5", "metatrader", "fca regulated", "asic regulated", "cysec",
@@ -429,7 +407,7 @@ NON_GAMBLING_EVIDENCE_MAP = {
     ],
 }
 
-# Global session and semaphore (tracked with active event loop)
+# Global session and semaphore
 _session: aiohttp.ClientSession | None = None
 _session_loop = None
 _semaphore: asyncio.Semaphore | None = None
@@ -469,13 +447,10 @@ async def get_session() -> aiohttp.ClientSession:
     return _session
 
 
-
 def clean_page_text(html: str, max_chars: int = 2500) -> tuple[str, str, list[str], str]:
     """
     DOM Stripper Engine:
     Extracts Title, Meta Description, interactive CTAs, and cleaned body text.
-    Strips scripts, styling, navbars, tracking, and repetitive whitespace.
-    Returns: (title, meta_desc, cta_buttons, trimmed_body_text)
     """
     if not html:
         return "", "", [], ""
@@ -497,7 +472,6 @@ def clean_page_text(html: str, max_chars: int = 2500) -> tuple[str, str, list[st
                 meta_desc += " " + meta["content"].strip()
         meta_desc = meta_desc.strip()
 
-        # Extract interactive CTAs (WhatsApp, Telegram, APK, Deposit, Login, Bookmaker IDs)
         cta_buttons = []
         cta_patterns = (
             "whatsapp", "wa.me", "telegram", "t.me", "deposit", "withdraw",
@@ -516,10 +490,6 @@ def clean_page_text(html: str, max_chars: int = 2500) -> tuple[str, str, list[st
                 if len(cta_buttons) >= 8:
                     break
 
-        # img alt text carries real content on image-heavy pages (banner carousels, promo
-        # graphics, jackpot artwork) that get_text() never sees — it only returns text nodes,
-        # never attribute values. Collect it before the AI ever sees the page, not just for
-        # the heuristic layer's own extractor (see classifier._extract_text).
         alt_texts = [img["alt"].strip() for img in soup.find_all("img", attrs={"alt": True}) if img["alt"].strip()]
 
         for tag in soup(["script", "style", "svg", "noscript", "iframe", "path"]):
@@ -533,19 +503,13 @@ def clean_page_text(html: str, max_chars: int = 2500) -> tuple[str, str, list[st
         trimmed_text = body_text[:max_chars].strip()
         return title, meta_desc, cta_buttons, trimmed_text
     except Exception:
-        # Fallback fast regex parser
         clean = re.sub(r'<[^>]+>', ' ', truncated_html)
         trimmed = re.sub(r'\s+', ' ', clean)[:max_chars].strip()
         return "", "", [], trimmed
 
 
 async def extract_markdown_crawl4ai(url: str = None, html: str = None, max_chars: int = 3000) -> str | None:
-    """
-    Optional Stage 2 Crawl4AI Extraction Engine:
-    Converts a candidate page into clean, token-efficient Markdown for local Ollama models.
-    Removes boilerplate while preserving promotional bonuses, game tables, deposit CTAs, and links.
-    Returns clean markdown string or None if Crawl4AI is unavailable.
-    """
+    """Optional Stage 2 Crawl4AI Extraction Engine."""
     if not USE_CRAWL4AI_FOR_AI:
         return None
     try:
@@ -567,21 +531,12 @@ async def extract_markdown_crawl4ai(url: str = None, html: str = None, max_chars
             md = getattr(res, "markdown", None) or getattr(res, "cleaned_html", "")
             if md and isinstance(md, str) and len(md.strip()) > 80:
                 return md[:max_chars].strip()
-    except ImportError:
-        # crawl4ai not installed; silent graceful fallback
-        return None
     except Exception:
-        # Fallback to standard clean_page_text
         return None
 
 
 async def prepare_page_context_for_ai(html: str, url: str = None, max_chars: int = 2500) -> tuple[str, str, list[str], str]:
-    """
-    Unified AI Context Preparer:
-    1. Extracts Title, Meta Description, interactive CTAs via DOM.
-    2. If Crawl4AI is enabled and available, extracts dense token-efficient Markdown.
-    3. Seamlessly falls back to clean_page_text() if Crawl4AI is unavailable.
-    """
+    """Unified AI Context Preparer."""
     title, meta_desc, cta_buttons, body_text = clean_page_text(html, max_chars=max_chars)
     if USE_CRAWL4AI_FOR_AI:
         try:
@@ -606,7 +561,6 @@ def parse_ai_json_response(raw_text: str) -> dict | None:
     except Exception:
         pass
 
-    # Regex extraction of JSON block
     match = re.search(r"\{[\s\S]*\}", raw_text)
     if match:
         try:
@@ -620,112 +574,69 @@ def parse_ai_json_response(raw_text: str) -> dict | None:
 
 
 def _evaluate_regular_evidence(reason: str, evidence: str, body_text: str, html: str) -> tuple[bool, str]:
-    """
-    Anti-Hallucination Ground-Truth Evaluator:
-    1. Checks if the AI's claimed evidence words actually exist in the live page HTML/body_text.
-       If the AI claims 'shopping cart' or 'university' but those words are absent from the HTML,
-       it is an LLM hallucination -> return (False, 'AI hallucinated non-existent evidence').
-    2. Checks if 2+ verified real non-gambling archetype patterns exist in the actual page HTML.
-    """
+    """Anti-Hallucination Ground-Truth Evaluator."""
     combined_ai_claim = (reason + " " + evidence).lower()
     page_content = (body_text + " " + (html or "")[:100000]).lower()
 
-    # Check if page has gambling / betting keywords present. Word-boundary match required —
-    # a bare substring check on "bet" matches inside ordinary English ("between", "alphabet",
-    # "diabetes"), which would wrongly suppress real news/sports-score archetype evidence
-    # (below) for any page merely containing the word "between".
     has_gambling_terms = any(re.search(rf"\b{re.escape(kw)}\b", page_content) for kw in (
         "bet", "betting", "casino", "satta", "matka", "poker", "slot", "slots",
         "odds", "bookmaker", "sportsbook", "wagering", "aviator", "roulette"
     ))
 
-    # Verify each claimed archetype against ACTUAL page content
     verified_archetypes = []
     for archetype, patterns in NON_GAMBLING_EVIDENCE_MAP.items():
-        # Generic news and sports score markers MUST NOT count as proof of regular for gambling affiliate/sportsbook pages
         if has_gambling_terms and archetype in ("news", "sports_scores_stats"):
             continue
 
         claimed = any(p in combined_ai_claim for p in patterns)
         if claimed:
-            # Verify if the pattern ACTUALLY exists in real page HTML
             actual_matches = [p for p in patterns if p in page_content]
             if actual_matches:
                 verified_archetypes.append(f"{archetype}({','.join(actual_matches[:2])})")
 
-    # If 2+ verified distinct non-gambling archetypes exist in real HTML -> Confirmed Regular
     if len(verified_archetypes) >= 2:
         return True, f"Verified real non-gambling evidence in HTML: {', '.join(verified_archetypes)}"
 
-    # If 1 archetype matched with multiple verified terms -> Confirmed Regular
     if len(verified_archetypes) >= 1:
         return True, f"Verified non-gambling evidence: {verified_archetypes[0]}"
 
-    # If AI claimed non-gambling features, but none were verified in HTML -> Hallucination rejected
     return False, "AI claimed non-gambling features that do not exist in page HTML (hallucination rejected)"
 
 
 # ── Translation circuit breaker ──────────────────────────────────────────────
-# On a memory-tight box, translation adds a 4th resident Ollama model
-# (TRANSLATE_MODEL) on top of analyst + validator + tiebreaker + vision. When Ollama
-# can't keep it warm, every non-English page eats a full timeout and is then classified
-# untranslated anyway -- on a big multilingual dataset that's hours of pure waste.
-#
-# Breaker is RATE-based, not consecutive-count: on a mixed dataset, non-English pages
-# are interleaved with English ones (which don't touch the counter), and Ollama
-# occasionally serves one fast -- so a "5 in a row" counter with reset-on-success
-# never trips even when 90% of attempts are timing out (observed live). Instead: once
-# TRANSLATE_MIN_SAMPLE attempts have happened and the failure rate over the last
-# TRANSLATE_WINDOW of them is >= TRANSLATE_FAIL_RATE, translation is OFF for the rest
-# of the process. Set TRANSLATE_MODEL="" to skip translation entirely from the start.
-# By default, TRANSLATE_MODEL is empty ("") because gambling-analyst (built on qwen2.5:3b)
-# natively understands multilingual content (Spanish, Russian, Arabic, etc.). Set TRANSLATE_MODEL="qwen2.5:3b"
-# in .env only if you specifically require pre-translation.
 TRANSLATE_MODEL = os.getenv("TRANSLATE_MODEL", "").strip()
-TRANSLATE_TIMEOUT = float(os.getenv("TRANSLATE_TIMEOUT", 45.0))
+TRANSLATE_TIMEOUT = float(os.getenv("TRANSLATE_TIMEOUT", 30.0))
 TRANSLATE_WINDOW = int(os.getenv("TRANSLATE_WINDOW", 6))
 TRANSLATE_MIN_SAMPLE = int(os.getenv("TRANSLATE_MIN_SAMPLE", 4))
 TRANSLATE_FAIL_RATE = float(os.getenv("TRANSLATE_FAIL_RATE", 0.75))
-_translate_outcomes: "deque[bool]" = deque(maxlen=TRANSLATE_WINDOW)  # True = failed
+_translate_outcomes: deque[bool] = deque(maxlen=TRANSLATE_WINDOW)
 _translate_attempts = 0
 _translate_disabled = False
 
 
 async def translate_preflight() -> bool:
-    """One tiny probe at run start: if Ollama can't translate a 5-word string within
-    the timeout, translation is disabled from domain 0 -- so a big multilingual batch
-    doesn't dribble out timeout lines while the rate-breaker warms up. Returns True if
-    translation is usable. Never raises. Call from runner.run() after Ollama is up."""
+    """Probe at run start to verify translation is usable."""
     global _translate_disabled
     if not TRANSLATE_MODEL:
         _translate_disabled = True
         return False
     try:
-        session = await get_session()
-        async with session.post(
-            f"{OLLAMA_BASE_URL}/api/generate",
-            json={"model": TRANSLATE_MODEL, "prompt": "Translate to English: hola mundo, esto es una prueba",
-                  "stream": False, "keep_alive": os.getenv("TRANSLATE_KEEP_ALIVE", "20m"),
-                  "options": {"temperature": 0.1, "num_ctx": 512, "num_predict": 50}},
-            timeout=aiohttp.ClientTimeout(total=max(TRANSLATE_TIMEOUT, 20.0)),
-        ) as resp:
-            if resp.status == 200 and (await resp.json()).get("response", "").strip():
-                logger.info(f"[translate] preflight OK ({TRANSLATE_MODEL})")
-                return True
-            logger.warning(f"[translate] preflight got HTTP {resp.status} from {TRANSLATE_MODEL} -- translation OFF for this run")
+        messages = [
+            {"role": "system", "content": "You are a translator. Output only the translation."},
+            {"role": "user", "content": "Translate to English: hola mundo"}
+        ]
+        res = await _call_omniroute(messages, model=TRANSLATE_MODEL, timeout_override=10.0)
+        if res:
+            logger.info(f"[translate] preflight OK ({TRANSLATE_MODEL})")
+            return True
     except Exception as e:
-        logger.warning(
-            f"[translate] preflight failed ({type(e).__name__}) -- translation OFF for this run. "
-            f"Non-English pages classify on their TLD/brand anchor and Qwen native multilingual understanding. To enable: `ollama pull {TRANSLATE_MODEL}`, "
-            f"set OLLAMA_KEEP_ALIVE=-1 / OLLAMA_MAX_LOADED_MODELS=2, or drop a model tier."
-        )
+        logger.warning(f"[translate] preflight failed ({e}) -- translation OFF for this run.")
     _translate_disabled = True
     return False
 
 
 def _translate_note_result(ok: bool):
-    """Update the rate-based circuit breaker. Lockless on purpose -- a couple of extra
-    attempts across the on transition are harmless, and it only ever flips OFF."""
+    """Update the rate-based circuit breaker."""
     global _translate_attempts, _translate_disabled
     _translate_attempts += 1
     _translate_outcomes.append(not ok)
@@ -735,26 +646,13 @@ def _translate_note_result(ok: bool):
        (sum(_translate_outcomes) / len(_translate_outcomes)) >= TRANSLATE_FAIL_RATE:
         _translate_disabled = True
         logger.warning(
-            "[translate] disabled for the rest of this run -- %d/%d recent attempts failed. "
-            "Non-English pages will be classified untranslated (their .bet/.casino TLD + brand "
-            "name still anchor them). Fix: `ollama pull %s`, set OLLAMA_KEEP_ALIVE=-1 / "
-            "OLLAMA_MAX_LOADED_MODELS=2, or run fewer model tiers -- then restart.",
-            sum(_translate_outcomes), len(_translate_outcomes), TRANSLATE_MODEL or "<model>",
+            "[translate] disabled for the rest of this run -- %d/%d recent attempts failed.",
+            sum(_translate_outcomes), len(_translate_outcomes),
         )
 
 
 async def translate_to_english_if_needed(html: str, url: str = "") -> tuple[str, bool]:
-    """Detect a non-English page and translate its visible text to English before
-    classification. Both the heuristic keyword scanner (English keyword list) and the
-    gambling-analyst prompt (English-only guardrails) are effectively blind to a page in
-    Chinese/Russian/Portuguese/etc. -- a real false-negative class for gambling sites
-    targeting non-English markets. A cheap offline langdetect check gates this so the
-    Ollama round-trip only happens for the rare actually-non-English page.
-
-    Returns (text_for_classification, was_translated). On English content, missing/too-
-    short text, the circuit breaker being open, or any failure, returns the original html
-    unchanged so callers can use it exactly as before.
-    """
+    """Detect a non-English page and translate visible text to English using OmniRoute."""
     if not html or not TRANSLATE_MODEL or _translate_disabled:
         return html, False
     from checking_url.classifier import _extract_text
@@ -769,40 +667,39 @@ async def translate_to_english_if_needed(html: str, url: str = "") -> tuple[str,
     if lang == "en":
         return html, False
 
-    prompt = (
-        "Translate the following webpage text into English. Output ONLY the translated "
-        "text with no commentary, no markdown, no notes -- preserve the original meaning "
-        f"exactly:\n\n{text[:1200]}"
-    )
-    payload = {
-        "model": TRANSLATE_MODEL,  # plain base model -- no gambling-analyst persona/system
-        # prompt baked in, so it won't bias a translation task.
-        "prompt": prompt,
-        "stream": False,
-        "keep_alive": os.getenv("TRANSLATE_KEEP_ALIVE", "20m"),  # keep it warm between non-English pages
-        "options": {"temperature": 0.1, "num_ctx": 2048, "num_predict": 350},
-    }
+    messages = [
+        {"role": "system", "content": "You are a translator. Translate the following webpage text into English. Output ONLY the translated text with no commentary, no markdown, no notes."},
+        {"role": "user", "content": f"Translate to English:\n\n{text[:1200]}"}
+    ]
     sem = get_semaphore()
     async with sem:
-        if _translate_disabled:  # breaker flipped while we waited on the semaphore
+        if _translate_disabled:
             return html, False
         try:
             session = await get_session()
+            headers = {"Content-Type": "application/json"}
+            if OMNIROUTE_API_KEY:
+                headers["Authorization"] = f"Bearer {OMNIROUTE_API_KEY}"
+            payload = {
+                "model": TRANSLATE_MODEL,
+                "messages": messages,
+                "temperature": 0.1,
+            }
             async with session.post(
-                f"{OLLAMA_BASE_URL}/api/generate",
+                f"{OMNIROUTE_BASE_URL}/chat/completions",
                 json=payload,
+                headers=headers,
                 timeout=aiohttp.ClientTimeout(total=TRANSLATE_TIMEOUT),
             ) as resp:
                 if resp.status == 200:
                     result = await resp.json()
-                    translated = (result.get("response") or "").strip()
-                    if translated:
-                        _translate_note_result(True)
-                        logger.info(
-                            f"[translate] {url} | {lang}->en | {len(text)}->{len(translated)} chars"
-                        )
-                        return translated, True
-                # non-200 (e.g. 404 model-not-pulled) counts as a failure for the breaker
+                    choices = result.get("choices", [])
+                    if choices:
+                        translated = (choices[0].get("message", {}).get("content") or "").strip()
+                        if translated:
+                            _translate_note_result(True)
+                            logger.info(f"[translate] {url} | {lang}->en | {len(text)}->{len(translated)} chars")
+                            return translated, True
                 _translate_note_result(False)
                 logger.warning(f"[translate] HTTP {resp.status} for {url} (lang={lang}), model={TRANSLATE_MODEL}")
                 return html, False
@@ -812,31 +709,34 @@ async def translate_to_english_if_needed(html: str, url: str = "") -> tuple[str,
     return html, False
 
 
-async def _call_ollama(prompt: str, url: str = "") -> dict | None:
+async def _call_omniroute(
+    messages: list[dict],
+    model: str = None,
+    url: str = "",
+    timeout_override: float = None,
+    _retry_on_offline: bool = True,
+) -> dict | None:
     """
-    Make a single Ollama API call with DYNAMIC per-request timeout.
-
-    Timeout is computed from:
-    - Content length (more chars = more inference time needed)
-    - EMA of past successful response times (adaptive to current load)
-    - Bounded between AI_TIMEOUT_MIN and AI_TIMEOUT_MAX
+    Make an OpenAI-compatible Chat Completion call to the OmniRoute gateway.
+    Supports dynamic timeout, retry safety, and robust JSON output parsing.
     """
     import time
 
-    prompt_chars = len(prompt)
-    dynamic_timeout = _timeout_mgr.compute_timeout(prompt_chars)
+    prompt_chars = sum(len(str(m.get("content", ""))) for m in messages)
+    dynamic_timeout = timeout_override or _timeout_mgr.compute_timeout(prompt_chars)
+    target_model = model or OMNIROUTE_MODEL
 
     payload = {
-        "model": OLLAMA_MODEL,
-        "prompt": prompt,
-        "stream": False,
-        "format": "json",
-        "options": {
-            "temperature": 0.1,
-            "top_p": 0.85,
-            "num_ctx": 4096,
-        },
+        "model": target_model,
+        "messages": messages,
+        "temperature": 0.1,
     }
+
+    headers = {
+        "Content-Type": "application/json",
+    }
+    if OMNIROUTE_API_KEY:
+        headers["Authorization"] = f"Bearer {OMNIROUTE_API_KEY}"
 
     sem = get_semaphore()
     async with sem:
@@ -844,8 +744,9 @@ async def _call_ollama(prompt: str, url: str = "") -> dict | None:
         try:
             session = await get_session()
             async with session.post(
-                f"{OLLAMA_BASE_URL}/api/generate",
+                f"{OMNIROUTE_BASE_URL}/chat/completions",
                 json=payload,
+                headers=headers,
                 timeout=aiohttp.ClientTimeout(total=dynamic_timeout),
             ) as resp:
                 if resp.status == 200:
@@ -855,13 +756,33 @@ async def _call_ollama(prompt: str, url: str = "") -> dict | None:
                     logger.debug(
                         f"[ai_classifier] {url} | chars={prompt_chars} | "
                         f"timeout_given={dynamic_timeout:.1f}s | "
-                        f"actual={elapsed:.1f}s | "
-                        f"mgr: {_timeout_mgr.stats()}"
+                        f"actual={elapsed:.1f}s | model={target_model}"
                     )
-                    response_text = result.get("response", "")
-                    return parse_ai_json_response(response_text)
+                    choices = result.get("choices", [])
+                    if choices:
+                        content = choices[0].get("message", {}).get("content", "")
+                        return parse_ai_json_response(content)
+                    return None
+                elif resp.status in (401, 403):
+                    logger.error(f"[ai_classifier] OmniRoute auth error HTTP {resp.status} - check OMNIROUTE_API_KEY")
+                elif resp.status == 502:
+                    logger.warning(f"[ai_classifier] OmniRoute Bad Gateway (502) for {url} using model {target_model}")
+                else:
+                    err_text = await resp.text()
+                    logger.warning(f"[ai_classifier] OmniRoute HTTP {resp.status} for {url}: {err_text[:200]}")
         except (aiohttp.ClientConnectorError, aiohttp.ServerDisconnectedError):
-            logger.warning(f"[ai_classifier] Ollama server is offline for {url}")
+            if _retry_on_offline:
+                logger.info(f"[ai_classifier] OmniRoute gateway is offline at {OMNIROUTE_BASE_URL}. Attempting auto-start...")
+                if await start_omniroute_if_needed():
+                    logger.info(f"[ai_classifier] OmniRoute started successfully. Retrying request for {url}...")
+                    return await _call_omniroute(
+                        messages=messages,
+                        model=model,
+                        url=url,
+                        timeout_override=timeout_override,
+                        _retry_on_offline=False,
+                    )
+            logger.warning(f"[ai_classifier] OmniRoute gateway is offline at {OMNIROUTE_BASE_URL} for {url}")
         except asyncio.TimeoutError:
             await _timeout_mgr.record_timeout()
             logger.warning(
@@ -869,16 +790,15 @@ async def _call_ollama(prompt: str, url: str = "") -> dict | None:
                 f"| chars={prompt_chars} | mgr: {_timeout_mgr.stats()}"
             )
         except Exception as e:
-            logger.warning(f"[ai_classifier] Inference failed for {url}: {e}")
+            logger.warning(f"[ai_classifier] OmniRoute inference failed for {url}: {e}")
     return None
 
 
 async def _call_vision_model(image_path: str, prompt: str, log_ctx: str = "") -> dict | None:
-    """Shared Ollama vision-model call: reads the image, sends it + prompt, parses the JSON
-    response. Uses a small, purpose-built vision model (default: moondream, ~1.7GB) rather
-    than a large general VLM -- a fast targeted image-read, not open-ended reasoning, so a
-    lightweight model is the right fit for a 16GB-RAM box also holding Ollama's text model,
-    MongoDB, and a Playwright browser pool in memory."""
+    """
+    OmniRoute vision-model call: reads the screenshot and formats it as an OpenAI
+    image_url data URI sent to the OmniRoute gateway.
+    """
     if not image_path or not os.path.exists(image_path):
         return None
     try:
@@ -888,51 +808,26 @@ async def _call_vision_model(image_path: str, prompt: str, log_ctx: str = "") ->
         logger.warning(f"[vision] Could not read screenshot {image_path}: {e}")
         return None
 
-    payload = {
-        "model": OLLAMA_VISION_MODEL,
-        "prompt": prompt,
-        "images": [img_b64],
-        "stream": False,
-        "format": "json",
-        "options": {"temperature": 0.1, "num_ctx": 2048},
-    }
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}},
+            ],
+        }
+    ]
 
-    sem = get_semaphore()
-    async with sem:
-        try:
-            session = await get_session()
-            async with session.post(
-                f"{OLLAMA_BASE_URL}/api/generate",
-                json=payload,
-                timeout=aiohttp.ClientTimeout(total=max(30.0, AI_TIMEOUT_MAX)),
-            ) as resp:
-                if resp.status == 200:
-                    result = await resp.json()
-                    return parse_ai_json_response(result.get("response", ""))
-                elif resp.status == 404:
-                    logger.warning(
-                        f"[vision] Model '{OLLAMA_VISION_MODEL}' not found in Ollama — "
-                        f"run: ollama pull {OLLAMA_VISION_MODEL}"
-                    )
-        except (aiohttp.ClientConnectorError, aiohttp.ServerDisconnectedError):
-            logger.warning(f"[vision] Ollama server offline for {log_ctx}")
-        except asyncio.TimeoutError:
-            logger.warning(f"[vision] Timeout classifying screenshot for {log_ctx}")
-        except Exception as e:
-            logger.warning(f"[vision] Screenshot classification failed for {log_ctx}: {e}")
-    return None
+    return await _call_omniroute(
+        messages,
+        model=OMNIROUTE_VISION_MODEL,
+        url=log_ctx,
+        timeout_override=max(30.0, AI_TIMEOUT_MAX),
+    )
 
 
 async def classify_screenshot_vision(image_path: str, url: str = "") -> dict | None:
-    """
-    Vision-model last resort for canvas/WebGL-rendered gambling UIs (slot reels, live-dealer
-    video feeds, bet-slip panels, roulette wheels) that render entirely inside a <canvas> or
-    WebGL context — these ship ZERO DOM text (the keyword classifier sees nothing) and often
-    zero printed banner text either (OCR sees nothing, since there's no static text to read,
-    just animated game graphics). Only call this on pages that already look empty everywhere
-    else (see runner.py) — it's a targeted patch for one specific blind spot, not a general
-    replacement for the text pipeline.
-    """
+    """Vision-model last resort for canvas/WebGL-rendered gambling UIs."""
     prompt = f"""You are looking at a screenshot of the website {url}.
 
 Does this image show an online casino, sports betting, slot machine, live dealer game, poker
@@ -955,163 +850,124 @@ Respond ONLY in valid JSON:
     return await _call_vision_model(image_path, prompt, log_ctx=url)
 
 
-async def classify_screenshot_for_sorting(image_path: str, label: str = "") -> dict | None:
-    """
-    Vision check for checking_url/screenshot_folder_sorter.py: sorting a folder of arbitrary
-    screenshots into gambling / not-gambling. Unlike classify_screenshot_vision() (a narrow
-    canvas/WebGL fallback for the main pipeline), this is the PRIMARY signal for that tool, so
-    it explicitly asks about -- and forces "false" for -- hotels/resorts, restaurants,
-    schools/colleges, and banks, even when the image itself shows a casino: a resort's own
-    gaming floor or a bank's "jackpot rewards" ad is real gambling-adjacent imagery on a site
-    that isn't an online gambling operator, exactly the false-positive class this project has
-    hit repeatedly on the text side (see classifier.py's hospitality/banking archetype gates).
-    """
-    prompt = f"""You are looking at a screenshot of a website{f' ({label})' if label else ''}.
-
-Determine whether this is an ONLINE GAMBLING operator's own site: a casino, sportsbook, slot
-game, poker room, or lottery platform where a visitor can register and wager real money on
-THIS site.
-
-CRITICAL: If the image shows a hotel/resort, restaurant, school/college/university, or
-bank/financial institution, answer "is_gambling": false and "is_institutional": true —
-REGARDLESS of any casino, slot machine, or gambling-themed imagery visible (e.g. a resort's
-own casino floor, a bank ad using the word "jackpot"). These are real businesses that may
-have a physical gaming amenity or gambling-themed marketing, not an online gambling operator,
-and must never be counted as gambling here.
-
-Respond ONLY in valid JSON:
-{{
-  "is_gambling": true or false,
-  "is_institutional": true or false,
-  "category": "online_casino" | "sports_betting" | "poker" | "lottery" | "hotel_resort" | "school_education" | "bank_financial" | "other_regular",
-  "visual_evidence": "what you actually see in the image that supports this"
-}}
-"""
-    return await _call_vision_model(image_path, prompt, log_ctx=label)
+_start_lock = asyncio.Lock()
+_omniroute_proc = None
 
 
-async def check_ollama_status() -> tuple[bool, str]:
-    """Check if Ollama server is accessible and the model is available."""
+async def check_omniroute_status() -> tuple[bool, str]:
+    """Check if OmniRoute gateway is accessible and authenticated."""
     try:
         session = await get_session()
-        async with session.get(f"{OLLAMA_BASE_URL}/api/tags") as resp:
+        headers = {"Authorization": f"Bearer {OMNIROUTE_API_KEY}"} if OMNIROUTE_API_KEY else {}
+        async with session.get(f"{OMNIROUTE_BASE_URL}/models", headers=headers, timeout=aiohttp.ClientTimeout(total=5.0)) as resp:
             if resp.status == 200:
                 data = await resp.json()
-                models = [m.get("name", "").split(":")[0] for m in data.get("models", [])]
-                model_base = OLLAMA_MODEL.split(":")[0]
-                if model_base in models or any(OLLAMA_MODEL in m.get("name", "") for m in data.get("models", [])):
-                    return True, f"Ollama is running with model '{OLLAMA_MODEL}'"
-                return True, f"Ollama running, but model '{OLLAMA_MODEL}' not found in: {', '.join(models)}"
-            return False, f"Ollama returned HTTP status {resp.status}"
+                models = data.get("data", [])
+                return True, f"OmniRoute Gateway active ({len(models)} models available, default='{OMNIROUTE_MODEL}')"
+            elif resp.status in (401, 403):
+                return False, f"OmniRoute auth failed (HTTP {resp.status}) — check OMNIROUTE_API_KEY"
+            return False, f"OmniRoute returned HTTP status {resp.status}"
     except Exception as e:
-        return False, f"Cannot connect to Ollama at {OLLAMA_BASE_URL}: {e}"
+        return False, f"Cannot connect to OmniRoute at {OMNIROUTE_BASE_URL}: {e}"
 
 
-async def start_ollama_if_needed() -> bool:
+async def start_omniroute_if_needed(timeout_sec: float = 25.0) -> bool:
     """
-    Check if Ollama server is running; if not, attempt to start it via subprocess.
-    Returns True if Ollama is running/started, False if unavailable.
+    Check if OmniRoute gateway is running. If not, auto-launch 'omniroute serve'
+    in the background and wait until it responds to health checks.
     """
-    global _session
-    try:
-        import subprocess
-        ok, msg = await check_ollama_status()
+    global _omniroute_proc
+    ok, _ = await check_omniroute_status()
+    if ok:
+        return True
+
+    async with _start_lock:
+        # Re-check status inside the lock to avoid double-launch
+        ok, _ = await check_omniroute_status()
         if ok:
-            print(f"[+] Local AI: {msg}")
             return True
 
-        binary = os.getenv("OLLAMA_AUTOSTART_PATH", "ollama")
-        timeout = float(os.getenv("OLLAMA_AUTOSTART_TIMEOUT", "15.0"))
+        print(f"[+] OmniRoute is offline at {OMNIROUTE_BASE_URL}. Auto-starting OmniRoute server...")
         try:
-            subprocess.Popen([binary, "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except Exception as e:
-            print(f"[!] Ollama: could not start automatically ({e}) — start it manually")
-            return False
+            if sys.platform == "win32":
+                # Windows: DETACHED_PROCESS + CREATE_NEW_PROCESS_GROUP
+                creationflags = 0x00000008 | 0x00000200
+                _omniroute_proc = subprocess.Popen(
+                    "omniroute serve",
+                    shell=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    creationflags=creationflags,
+                )
+            else:
+                _omniroute_proc = subprocess.Popen(
+                    ["omniroute", "serve"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+        except Exception as err:
+            try:
+                # Fallback to npx if direct CLI command is not resolved
+                if sys.platform == "win32":
+                    _omniroute_proc = subprocess.Popen(
+                        "npx omniroute serve",
+                        shell=True,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        creationflags=0x00000008 | 0x00000200,
+                    )
+                else:
+                    _omniroute_proc = subprocess.Popen(
+                        ["npx", "omniroute", "serve"],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        start_new_session=True,
+                    )
+            except Exception as err2:
+                logger.error(f"[ai_classifier] Failed to auto-launch OmniRoute: {err2}")
+                return False
 
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + timeout
-        while loop.time() < deadline:
+        t_end = time.monotonic() + timeout_sec
+        while time.monotonic() < t_end:
             await asyncio.sleep(1.0)
-            ok, msg = await check_ollama_status()
+            ok, msg = await check_omniroute_status()
             if ok:
-                print(f"[+] Ollama: started ({msg})")
+                print(f"[+] OmniRoute server started successfully! ({msg})")
                 return True
 
-        print(f"[!] Ollama: could not start automatically — start it manually")
+        logger.warning(f"[ai_classifier] OmniRoute process started but did not respond within {timeout_sec}s")
         return False
-    finally:
-        if _session and not _session.closed:
-            await _session.close()
-            _session = None
 
 
-async def stop_ollama_if_running() -> bool:
-    """
-    Safely release Ollama RAM/VRAM resources when task finishes.
-    Sends keep_alive: 0 to Ollama API to unload models from RAM/VRAM immediately.
-    """
-    global _session
-    try:
-        session = await get_session()
-        for model in (OLLAMA_MODEL, OLLAMA_VALIDATOR_MODEL):
-            try:
-                async with session.post(
-                    f"{OLLAMA_BASE_URL}/api/generate",
-                    json={"model": model, "keep_alive": 0},
-                    timeout=aiohttp.ClientTimeout(total=3.0)
-                ):
-                    pass
-            except Exception:
-                pass
-        logger.info("[+] Ollama AI models unloaded from RAM/VRAM. Memory released.")
-    except Exception as e:
-        logger.warning(f"Error unloading Ollama models: {e}")
-    finally:
-        if _session and not _session.closed:
-            await _session.close()
-            _session = None
-    return True
+async def ensure_omniroute_ready() -> bool:
+    """Verify OmniRoute gateway is online, auto-starting it if currently offline."""
+    ok, msg = await check_omniroute_status()
+    if ok:
+        print(f"[+] AI Gateway: {msg}")
+        return True
+    # Auto-start if offline
+    if await start_omniroute_if_needed():
+        ok, msg = await check_omniroute_status()
+        if ok:
+            print(f"[+] AI Gateway: {msg}")
+            return True
+    print(f"[!] AI Gateway: Could not connect or auto-start OmniRoute on {OMNIROUTE_BASE_URL}")
+    print(f"    Please verify OmniRoute installation or run 'omniroute serve' manually.")
+    return False
 
 
 async def close_ai_session():
-    """Close HTTP session and unload Ollama AI models to free system memory."""
+    """Close HTTP session."""
     global _session
-    await stop_ollama_if_running()
     if _session is not None and not _session.closed:
         await _session.close()
-    _session = None
-
-
-async def classify_with_ai(
-    html: str,
-    url: str = "",
-) -> dict:
-    """Legacy compatibility wrapper — calls classify_with_challenge internally."""
-    return await classify_with_challenge(html, url)
+        _session = None
 
 
 async def _call_tiebreaker(url: str, title: str, body_text: str, analyst_verdict: dict, dispute_reason: str) -> dict | None:
-    """
-    Third opinion from a larger model (default qwen2.5:14b), invoked ONLY for the small
-    slice of genuinely disputed cases: the validator says "uncertain", or both validator
-    model attempts failed. This is deliberately not used on every domain — only a fraction
-    of the already-small `needs_ai` bucket ever reaches a dispute, so spending a bigger
-    model's extra inference time there is affordable even on a 16GB-RAM machine, whereas
-    running it on every domain would not be. Returns None on any failure so the caller can
-    fall back to its existing 'unconfirmed' behavior — this never lowers safety, it only
-    gives disputed cases a real decisive look instead of an automatic requeue.
-    """
+    """Third opinion from tiebreaker model for genuinely disputed cases."""
     key_triggers = analyst_verdict.get("key_triggers", [])
-    # NOTE: unlike the Analyst/Validator rounds, this call has no custom Ollama model with a
-    # baked-in SYSTEM prompt behind it -- it hits the raw base model directly via /api/generate
-    # with no "system" field in the payload below. That means every guardrail the tiebreaker
-    # will ever see has to live in THIS prompt. Because this is also the round consulted for the
-    # single hardest slice of cases (the ones two prior models couldn't resolve), it previously
-    # carried the thinnest rule set and the smallest page-text window (1500 chars vs 2000-2500
-    # for the Analyst/Validator) of the three AI stages -- backwards for the hardest cases.
-    # Widened to 2500 chars (matching clean_page_text's own extraction budget) and given the same
-    # false-positive guardrails as the Analyst/Validator Modelfiles, condensed for a single-shot
-    # prompt (2026-08-24).
     prompt = f"""You are the final decisive reviewer. Two prior AI passes could not agree on
 this website. Make a clear, final call.
 
@@ -1128,29 +984,7 @@ Rules:
   'deposit', 'bonus', 'win', or 'stake' appear in a non-gambling context.
 - Real-money online casinos, sportsbooks, poker/rummy/teen patti platforms, betting exchanges,
   crash games (Aviator), and lottery/satta-matka sites are GAMBLING.
-- A site that REVIEWS, RANKS, or COMPARES gambling operators (affiliate/SEO content: "editor
-  rating", "our review", "affiliate disclosure", "we may earn commission", multiple third-party
-  brand names being compared, links sending visitors OUT to a different brand's site to
-  register/play) is REGULAR — a media/affiliate site, not an operator — no matter how much
-  gambling vocabulary appears, AS LONG AS it has no Login/Register-to-play or deposit-to-wager
-  system of its OWN for this exact brand.
-- The regulator or independent testing lab ITSELF (e.g. eCOGRA, Gaming Laboratories
-  International, BMM Testlabs, a government Gambling/Gaming Commission's own official site) is
-  REGULAR, not an operator — such pages legitimately discuss "gambling commission" or "gaming
-  authority" about THEMSELVES; that is not operator evidence by itself.
-- A domain/business name merely containing a gambling-sounding fragment (e.g. "spin" in a
-  spinal clinic, "stake" in a stakeholder-relations page, "monopoly" in an antitrust watchdog
-  site) is NEVER evidence by itself — judge only the actual page content and purpose.
-- If the page states it is "licensed and regulated" by a gambling regulator, cites a gambling
-  license/account number, or links to self-exclusion/problem-gambling support bodies (GamStop,
-  GamCare, BeGambleAware, or similar) AND it has its own Login/Register-to-play system for this
-  exact brand — this is standard, legally required self-description for a real licensed
-  gambling operator. Do NOT treat "responsible gambling" language as evidence the site is a
-  support/advocacy site rather than an operator; it is the opposite. The bet-slip or game grid
-  is often hidden behind login and will not appear in this text — do not require it.
-- If the page mixes hospitality/travel/lifestyle wording WITH a genuine betting mechanism (live
-  odds, a place-bet button, a betting-ID funnel, a deposit-to-wager flow) on the same page, the
-  betting evidence wins — this is a known evasion tactic and must still be called gambling.
+- A site that REVIEWS, RANKS, or COMPARES gambling operators with outlinks and NO Login/Register of its OWN is REGULAR.
 - You must pick "gambling" or "regular" — do not say unconfirmed/uncertain.
 
 Respond ONLY in valid JSON:
@@ -1160,35 +994,27 @@ Respond ONLY in valid JSON:
   "reason": "final decisive reason"
 }}
 """
-    payload = {
-        "model": OLLAMA_TIEBREAKER_MODEL,
-        "prompt": prompt,
-        "stream": False,
-        "format": "json",
-        "options": {"temperature": 0.1, "top_p": 0.9, "num_ctx": 4096},
-    }
+    tb_messages = [
+        {"role": "system", "content": "You are a cyber intelligence referee making a decisive final ruling on gambling websites. Respond strictly in valid JSON."},
+        {"role": "user", "content": prompt}
+    ]
     try:
-        session = await get_session()
-        async with session.post(
-            f"{OLLAMA_BASE_URL}/api/generate",
-            json=payload,
-            timeout=aiohttp.ClientTimeout(total=max(60.0, AI_TIMEOUT_MAX * 2)),
-        ) as resp:
-            if resp.status == 200:
-                result = await resp.json()
-                tb = parse_ai_json_response(result.get("response", ""))
-                if tb and str(tb.get("verdict", "")).strip().lower() in ("gambling", "regular"):
-                    logger.info(f"[tiebreaker] Resolved disputed verdict for {url}: {tb.get('verdict')} ({dispute_reason})")
-                    return {
-                        "verdict": str(tb.get("verdict")).strip().lower(),
-                        "confidence": float(tb.get("confidence", 0.6)),
-                        "category": "tiebreaker_resolved",
-                        "key_triggers": key_triggers,
-                        "reason": f"Tie-breaker ({OLLAMA_TIEBREAKER_MODEL}) resolved dispute: {tb.get('reason', '')}",
-                        "challenge_override": True,
-                    }
-            elif resp.status == 404:
-                logger.warning(f"[tiebreaker] Model '{OLLAMA_TIEBREAKER_MODEL}' not found — run: ollama pull {OLLAMA_TIEBREAKER_MODEL}")
+        tb = await _call_omniroute(
+            tb_messages,
+            model=OMNIROUTE_TIEBREAKER_MODEL,
+            url=url,
+            timeout_override=max(45.0, AI_TIMEOUT_MAX * 1.5)
+        )
+        if tb and str(tb.get("verdict", "")).strip().lower() in ("gambling", "regular"):
+            logger.info(f"[tiebreaker] Resolved disputed verdict for {url}: {tb.get('verdict')} ({dispute_reason})")
+            return {
+                "verdict": str(tb.get("verdict")).strip().lower(),
+                "confidence": float(tb.get("confidence", 0.6)),
+                "category": "tiebreaker_resolved",
+                "key_triggers": key_triggers,
+                "reason": f"Tie-breaker resolved dispute: {tb.get('reason', '')}",
+                "challenge_override": True,
+            }
     except Exception as e:
         logger.warning(f"[tiebreaker] Failed for {url}: {type(e).__name__}: {e}")
     return None
@@ -1201,27 +1027,15 @@ async def validate_gambling_verdict(
     analyst_verdict: dict,
     cta_buttons: list | None = None,
 ) -> dict:
-    """
-    Validator (Judge) Model — challenges a gambling verdict from the analyst.
-
-    Sends the analyst's full output + original page content to gambling-validator,
-    which is prompted to act as a skeptic and find reasons the verdict is WRONG.
-    If gambling-validator model is missing (HTTP 404), falls back to OLLAMA_MODEL automatically.
-    """
+    """Validator (Judge) Model — challenges a gambling verdict from the analyst."""
     key_triggers = analyst_verdict.get("key_triggers", [])
     analyst_reason = analyst_verdict.get("reason", "")
     analyst_confidence = analyst_verdict.get("confidence", 0.5)
     licensed_operator_signals = detect_licensed_operator_signals(body_text)
     operator_cta_signals = detect_operator_cta_signals(cta_buttons)
-    # "licensed and regulated by", "malta gaming authority", "curacao egaming" etc. also
-    # appear on affiliate/review sites, gambling news, and the regulators' own pages. Only
-    # count that phrasing as hard operator evidence when the page ALSO exposes its own
-    # operator CTA (claim-bonus / bet-ID / demo-ID). Without that co-signal it must not be
-    # allowed to force a tie-breaker over a clean "regular" rejection.
+
     if licensed_operator_signals and not operator_cta_signals:
         licensed_operator_signals = []
-    # Combined hard-evidence red flags — any of these existing while the validator rejects
-    # "gambling" means the rejection is contradicting directly-checkable page evidence.
     hard_evidence_signals = licensed_operator_signals + operator_cta_signals
 
     validator_prompt = f"""URL: {url}
@@ -1242,8 +1056,8 @@ CRITICAL FALSE-POSITIVE CHECKS:
 - Do not confirm gambling solely because words like 'deposit', 'bonus', 'rewards', or 'win' appear in a banking, corporate, or retail context.
 
 CRITICAL FALSE-NEGATIVE CHECK (a real licensed operator must NOT be rejected):
-- If the page states it is "licensed and regulated" by a gambling regulator (e.g. Gambling Commission, Malta Gaming Authority, Curacao), cites a gambling license/account number, links to self-exclusion or problem-gambling support bodies (GamStop, GamCare, BeGambleAware, or similar), or says something like "you can register and place a bet" / "18+ to play" — this is standard, LEGALLY REQUIRED self-description for a real licensed gambling operator, not evidence of a support/advocacy site. Do NOT reject the gambling verdict just because the page talks about "responsible gambling" — every real licensed operator is required to include that exact language. Confirm "gambling" for these unless you find explicit evidence the SITE ITSELF is something else entirely (e.g. it is actually a hotel with rooms to book, or a bank with accounts to open) — the mere presence of compliance/regulatory language on an operator's own page is not that evidence.
-- The bet-slip or game grid is very often hidden behind login or loaded by JavaScript and will NOT appear in the page text you were given — do not require it to be visible before confirming gambling.
+- If the page states it is "licensed and regulated" by a gambling regulator, cites a gambling license/account number, links to self-exclusion or problem-gambling support bodies (GamStop, GamCare, BeGambleAware), or says something like "you can register and place a bet" — confirm "gambling".
+- The bet-slip or game grid is very often hidden behind login — do not require it to be visible before confirming gambling.
 
 Respond ONLY in valid JSON:
 {{
@@ -1256,148 +1070,102 @@ Respond ONLY in valid JSON:
 }}
 """
 
-    models_to_try = [OLLAMA_VALIDATOR_MODEL, OLLAMA_MODEL]
-    sem = get_semaphore()
-    async with sem:
-        for model in models_to_try:
-            payload = {
-                "model": model,
-                "prompt": validator_prompt,
-                "stream": False,
-                "format": "json",
-                "options": {"temperature": 0.15, "top_p": 0.90, "num_ctx": 4096},
-            }
-            try:
-                session = await get_session()
-                async with session.post(
-                    f"{OLLAMA_BASE_URL}/api/generate",
-                    json=payload,
-                    timeout=aiohttp.ClientTimeout(total=max(35.0, _timeout_mgr.compute_timeout(len(validator_prompt)) * 1.5)),
-                ) as resp:
-                    if resp.status == 200:
-                        result = await resp.json()
-                        val_result = parse_ai_json_response(result.get("response", ""))
-                        if val_result is None:
-                            continue
+    val_messages = [
+        {"role": "system", "content": VALIDATOR_SYSTEM_PROMPT},
+        {"role": "user", "content": validator_prompt},
+    ]
+    try:
+        val_result = await _call_omniroute(
+            val_messages,
+            model=OMNIROUTE_VALIDATOR_MODEL,
+            url=url,
+            timeout_override=max(35.0, _timeout_mgr.compute_timeout(len(validator_prompt)) * 1.5),
+        )
+        if val_result is not None:
+            val_verdict = str(val_result.get("verdict", "gambling")).strip().lower()
+            val_validation = str(val_result.get("validation", "confirmed")).strip().lower()
+            rejection_reason = val_result.get("rejection_reason")
 
-                        val_verdict = str(val_result.get("verdict", "gambling")).strip().lower()
-                        val_validation = str(val_result.get("validation", "confirmed")).strip().lower()
-                        rejection_reason = val_result.get("rejection_reason")
+            _self_contra = validator_reject_self_contradicts(val_result)
+            _hard = list(hard_evidence_signals) + _self_contra
 
-                        # The validator's OWN wording sometimes describes a gambling operator
-                        # ("...is a sports betting platform", "reputable online casino",
-                        # "slot gacor", "...which is a gambling site", "1xbet"/"1win"/"PG88")
-                        # while still rejecting -- a self-contradiction the body_text-based
-                        # hard_evidence check misses on non-English pages. Treat it like hard
-                        # evidence: don't trust the rejection, force a tie-break.
-                        _self_contra = validator_reject_self_contradicts(val_result)
-                        _hard = list(hard_evidence_signals) + _self_contra
-
-                        if val_validation == "rejected" and val_verdict == "regular" and not _hard:
-                            # Clean, confident rejection with no licensed-operator red flags —
-                            # trust it directly, no need for a tie-breaker.
-                            logger.info(
-                                f"[validator] REJECTED gambling for {url} ({model}): {rejection_reason}"
-                            )
-                            return {
-                                "verdict": val_verdict,
-                                "confidence": val_result.get("confidence", 0.4),
-                                "category": "validator_override",
-                                "key_triggers": key_triggers,
-                                "reason": f"Validator rejected: {rejection_reason or val_result.get('final_reason', '')}",
-                                "challenge_override": True,
-                            }
-                        elif val_validation == "rejected" and val_verdict == "regular" and _hard:
-                            # The validator rejected "gambling" despite the page itself citing a
-                            # gambling regulator, license number, or self-exclusion/problem-
-                            # gambling support body (GamStop/GamCare/BeGambleAware or similar) —
-                            # near-zero-noise signals a non-gambling site essentially never
-                            # contains. Small local models proved unreliable at weighing this
-                            # correctly even with explicit prompt instructions (live-reproduced
-                            # against a real licensed operator whose rejection reasoning
-                            # acknowledged the licensing language and still said "regular"). Do
-                            # not trust a single small model's confident-but-contradicted call —
-                            # force a decisive third look instead.
-                            dispute_reason = (
-                                f"Validator rejected despite operator evidence "
-                                f"({'page: ' + ', '.join(hard_evidence_signals[:3]) if hard_evidence_signals else ''}"
-                                f"{'; ' if hard_evidence_signals and _self_contra else ''}"
-                                f"{'validator self-contradiction: ' + ', '.join(_self_contra[:3]) if _self_contra else ''}) "
-                                f"(validator said: {rejection_reason or val_result.get('final_reason', '')})"
-                            )
-                            tb_result = await _call_tiebreaker(url, title, body_text, analyst_verdict, dispute_reason)
-                            if tb_result is not None:
-                                return tb_result
-                            return {
-                                "verdict": "unconfirmed",
-                                "confidence": 0.3,
-                                "category": "validator_uncertain",
-                                "key_triggers": key_triggers,
-                                "reason": f"Disputed: {dispute_reason} (tie-breaker also unavailable)",
-                                "challenge_override": False,
-                            }
-                        elif val_validation == "rejected" and val_verdict != "gambling":
-                            # Validator disagreed with "gambling" but didn't commit to "regular"
-                            # either (e.g. hedged with "unconfirmed") — this is functionally the
-                            # same kind of dispute as "uncertain" below (observed live: a resort
-                            # page with explicit "online casino games and sports betting" text
-                            # got hedged here instead of confirmed) and deserves the same
-                            # decisive third look rather than being silently finalized as a hedge.
-                            dispute_reason = rejection_reason or val_result.get('final_reason', '') or f"validator rejected but returned verdict={val_verdict!r}"
-                            if hard_evidence_signals:
-                                dispute_reason += f" (hard evidence signals present: {', '.join(hard_evidence_signals[:4])})"
-                            tb_result = await _call_tiebreaker(url, title, body_text, analyst_verdict, dispute_reason)
-                            if tb_result is not None:
-                                return tb_result
-                            return {
-                                "verdict": "unconfirmed",
-                                "confidence": 0.3,
-                                "category": "validator_uncertain",
-                                "key_triggers": key_triggers,
-                                "reason": f"Validator disputed but did not confirm: {dispute_reason} (tie-breaker also unavailable)",
-                                "challenge_override": False,
-                            }
-                        elif val_validation == "uncertain":
-                            dispute_reason = val_result.get('final_reason', '') or "validator uncertain"
-                            if hard_evidence_signals:
-                                dispute_reason += f" (hard evidence signals present: {', '.join(hard_evidence_signals[:4])})"
-                            tb_result = await _call_tiebreaker(url, title, body_text, analyst_verdict, dispute_reason)
-                            if tb_result is not None:
-                                return tb_result
-                            return {
-                                "verdict": "unconfirmed",
-                                "confidence": 0.4,
-                                "category": "validator_uncertain",
-                                "key_triggers": key_triggers,
-                                "reason": f"Validator uncertain: {dispute_reason} (tie-breaker also unavailable)",
-                                "challenge_override": False,
-                            }
-                        else:
-                            confirmed_result = dict(analyst_verdict)
-                            confirmed_result["reason"] = (
-                                f"{analyst_reason} [Validated: {val_result.get('evidence_check', '')[:100]}]"
-                            )
-                            return confirmed_result
-            except Exception as e:
-                logger.warning(
-                    f"[validator] Validation with model '{model}' failed for {url}: "
-                    f"{type(e).__name__}: {e or 'no error message'}"
+            if val_validation == "rejected" and val_verdict == "regular" and not _hard:
+                logger.info(f"[validator] REJECTED gambling for {url}: {rejection_reason}")
+                return {
+                    "verdict": val_verdict,
+                    "confidence": val_result.get("confidence", 0.4),
+                    "category": "validator_override",
+                    "key_triggers": key_triggers,
+                    "reason": f"Validator rejected: {rejection_reason or val_result.get('final_reason', '')}",
+                    "challenge_override": True,
+                }
+            elif val_validation == "rejected" and val_verdict == "regular" and _hard:
+                dispute_reason = (
+                    f"Validator rejected despite operator evidence "
+                    f"({'page: ' + ', '.join(hard_evidence_signals[:3]) if hard_evidence_signals else ''}"
+                    f"{'; ' if hard_evidence_signals and _self_contra else ''}"
+                    f"{'validator self-contradiction: ' + ', '.join(_self_contra[:3]) if _self_contra else ''}) "
+                    f"(validator said: {rejection_reason or val_result.get('final_reason', '')})"
                 )
+                tb_result = await _call_tiebreaker(url, title, body_text, analyst_verdict, dispute_reason)
+                if tb_result is not None:
+                    return tb_result
+                return {
+                    "verdict": "unconfirmed",
+                    "confidence": 0.3,
+                    "category": "validator_uncertain",
+                    "key_triggers": key_triggers,
+                    "reason": f"Disputed: {dispute_reason} (tie-breaker also unavailable)",
+                    "challenge_override": False,
+                }
+            elif val_validation == "rejected" and val_verdict != "gambling":
+                dispute_reason = rejection_reason or val_result.get('final_reason', '') or f"validator rejected but returned verdict={val_verdict!r}"
+                if hard_evidence_signals:
+                    dispute_reason += f" (hard evidence signals present: {', '.join(hard_evidence_signals[:4])})"
+                tb_result = await _call_tiebreaker(url, title, body_text, analyst_verdict, dispute_reason)
+                if tb_result is not None:
+                    return tb_result
+                return {
+                    "verdict": "unconfirmed",
+                    "confidence": 0.3,
+                    "category": "validator_uncertain",
+                    "key_triggers": key_triggers,
+                    "reason": f"Validator disputed but did not confirm: {dispute_reason} (tie-breaker also unavailable)",
+                    "challenge_override": False,
+                }
+            elif val_validation == "uncertain":
+                dispute_reason = val_result.get('final_reason', '') or "validator uncertain"
+                if hard_evidence_signals:
+                    dispute_reason += f" (hard evidence signals present: {', '.join(hard_evidence_signals[:4])})"
+                tb_result = await _call_tiebreaker(url, title, body_text, analyst_verdict, dispute_reason)
+                if tb_result is not None:
+                    return tb_result
+                return {
+                    "verdict": "unconfirmed",
+                    "confidence": 0.4,
+                    "category": "validator_uncertain",
+                    "key_triggers": key_triggers,
+                    "reason": f"Validator uncertain: {dispute_reason} (tie-breaker also unavailable)",
+                    "challenge_override": False,
+                }
+            else:
+                confirmed_result = dict(analyst_verdict)
+                confirmed_result["reason"] = (
+                    f"{analyst_reason} [Validated: {val_result.get('evidence_check', '')[:100]}]"
+                )
+                return confirmed_result
+    except Exception as e:
+        logger.warning(
+            f"[validator] Validation failed for {url}: {type(e).__name__}: {e or 'no error message'}"
+        )
 
-    # Every validator model attempt failed (timeout / offline / bad response).
-    # Do NOT silently trust the Analyst's unvalidated "gambling" verdict here — that
-    # would mean every validator outage becomes a single-model decision with no
-    # second opinion, which is exactly where both false positives (Analyst
-    # over-triggers on a borderline legit site) and false negatives (Analyst
-    # under-triggers on a real gambling site) go unchecked. Route to unconfirmed
-    # so it gets requeued instead of shipped straight into a report/ban decision.
     logger.warning(
-        f"[validator] All validator models unavailable for {url} — trying tie-breaker "
+        f"[validator] Validator model unavailable for {url} — trying tie-breaker "
         f"before falling back to 'unconfirmed' "
         f"(Analyst said '{analyst_verdict.get('verdict')}', "
         f"confidence={analyst_verdict.get('confidence')})"
     )
-    tb_result = await _call_tiebreaker(url, title, body_text, analyst_verdict, "validator model(s) unavailable")
+    tb_result = await _call_tiebreaker(url, title, body_text, analyst_verdict, "validator model unavailable")
     if tb_result is not None:
         return tb_result
     return {
@@ -1420,12 +1188,7 @@ async def classify_with_challenge(
     matched_keywords: list = None,
     fast_mode: bool = False,
 ) -> dict:
-    """
-    Anti-Hallucination 2-Round AI Challenge Classifier with Domain Anchors.
-
-    fast_mode=True: Skip Round 2 challenge — used for unconfirmed re-check to halve AI calls.
-    fast_mode=False (default): Full 2-round challenge.
-    """
+    """Anti-Hallucination 2-Round AI Challenge Classifier with Domain Anchors."""
     # ── 0. Pre-Flight Deterministic Checks ────────────────────────────────────
     is_g_domain, domain_signal = is_gambling_domain(url)
     detected_providers = detect_igaming_providers(html)
@@ -1482,7 +1245,7 @@ Determine if this is an online gambling, sports betting, real-money gaming (poke
 IMPORTANT RULES:
 - Real-money poker platforms, betting exchanges, sportsbooks, slot games, and rummy/card game platforms for cash are GAMBLING.
 - A hotel/resort/dining website that merely mentions a casino, gaming floor, or amenity nearby is REGULAR unless the site itself provides remote/online gambling.
-- Official commercial banks, financial institutions (savings, loans, fixed deposits, net banking, Agri/Personal/NRI banking), government websites, educational institutions, or utility calculators are STRICTLY REGULAR. NEVER classify a legitimate bank or financial institution as gambling.
+- Official commercial banks, financial institutions, government websites, educational institutions, or utility calculators are STRICTLY REGULAR.
 - Do NOT hallucinate features. Only evaluate what is present in the text above.
 
 Respond ONLY in valid JSON:
@@ -1495,15 +1258,12 @@ Respond ONLY in valid JSON:
 }}
 """
 
-    round1 = await _call_ollama(round1_prompt, url)
+    r1_messages = [
+        {"role": "system", "content": ANALYST_SYSTEM_PROMPT},
+        {"role": "user", "content": round1_prompt},
+    ]
+    round1 = await _call_omniroute(r1_messages, model=OMNIROUTE_MODEL, url=url)
 
-    # Ollama offline / timeout handler
-    # NOTE: Previously this defaulted straight to "gambling" whenever a domain anchor or
-    # strong keywords matched — meaning a large share of "gambling" verdicts under load
-    # (backlog/timeouts) reflected zero actual AI judgment. Now every timeout/offline case
-    # returns "unconfirmed" and gets re-queued (runner.py mode="unconfirmed") instead of
-    # being silently counted as a confirmed gambling result. The domain/keyword signal is
-    # still surfaced in key_triggers so a human reviewing "unconfirmed" items can prioritize.
     if round1 is None:
         if is_g_domain:
             return {
@@ -1511,7 +1271,7 @@ Respond ONLY in valid JSON:
                 "confidence": 0.0,
                 "category": "unconfirmed",
                 "key_triggers": [domain_signal],
-                "reason": f"ollama_timeout_domain_anchor_present({domain_signal})_requeue",
+                "reason": f"ai_timeout_domain_anchor_present({domain_signal})_requeue",
                 "challenge_override": False,
             }
         strong_matches = [k for k in (matched_keywords or []) if k in STRONG_GAMBLING_SIGNALS]
@@ -1521,7 +1281,7 @@ Respond ONLY in valid JSON:
                 "confidence": 0.0,
                 "category": "unconfirmed",
                 "key_triggers": strong_matches,
-                "reason": f"ollama_timeout_strong_keywords_present: {', '.join(strong_matches[:3])}_requeue",
+                "reason": f"ai_timeout_strong_keywords_present: {', '.join(strong_matches[:3])}_requeue",
                 "challenge_override": False,
             }
         return {
@@ -1529,7 +1289,7 @@ Respond ONLY in valid JSON:
             "confidence": 0.0,
             "category": "unconfirmed",
             "key_triggers": [],
-            "reason": "ollama_timeout_no_signals",
+            "reason": "ai_timeout_no_signals",
             "challenge_override": False,
         }
 
@@ -1553,17 +1313,10 @@ Respond ONLY in valid JSON:
 
     # ── ROUND 2: Challenge — AI must prove "regular" verdict with Ground Truth ──
     if verdict == "regular":
-        # Check hospitality gate before considering domain-anchor override
         is_hosp, _ = is_hospitality_site(body_text)
         has_providers = bool(detect_igaming_providers(html))
         has_funnels = bool(detect_gambling_funnels(html))
 
-        # Real gambling signals that make a bare AI "regular" untrustworthy. The weak
-        # local model routinely calls a JS-heavy casino (bet slip / game lobby behind
-        # login, thin extracted text) "regular"; when ANY of these are present it must be
-        # challenged, never fast-accepted. Parked / blog / affiliate / geo-block / physical-
-        # resort pages are already filtered out in classifier.classify() before we get
-        # here, so this no longer re-opens the false-positive classes it once did.
         _strong_kw = [k for k in (matched_keywords or []) if k in STRONG_GAMBLING_SIGNALS]
         _operator_ctas = detect_operator_cta_signals(cta_buttons)
         has_gambling_corroboration = bool(
@@ -1589,12 +1342,6 @@ Respond ONLY in valid JSON:
 
             operator_cta_signals = detect_operator_cta_signals(cta_buttons)
             if has_providers or has_funnels or operator_cta_signals:
-                # Domain anchor + an ACTUAL on-page operator mechanism (game-provider CDN
-                # assets, a betting/cashier funnel, or the page's own claim-bonus / bet-ID
-                # CTAs) -> route to skeptic validator. The bare domain NAME is no longer
-                # enough on its own: GAMBLING_DOMAIN_KEYWORDS substring-matches unrelated
-                # brands, and "domain looks gambling AND page isn't a hotel" was flipping
-                # parked / geo-blocked / blog / affiliate pages straight to "gambling".
                 analyst_verdict = {
                     "verdict": "gambling",
                     "confidence": 0.88,
@@ -1604,14 +1351,7 @@ Respond ONLY in valid JSON:
                     "challenge_override": True,
                 }
                 return await validate_gambling_verdict(url, title, body_text, analyst_verdict, cta_buttons)
-            # Domain name looks gambling but the live page shows no operator mechanism ->
-            # fall through to the normal Round 2 evidence challenge below. If Round 2 also
-            # finds no gambling evidence, it stays "regular" (was: overridden to gambling).
 
-        # Low confidence → send to Round 2 evidence challenge instead of an immediate flip
-        # fast_mode=True: skip Round 2 ONLY for non-anchored regular domains with no
-        # gambling corroboration whatsoever (never fast-accept a page that has a strong
-        # keyword / operator CTA / provider / funnel behind it).
         if fast_mode and confidence >= REGULAR_CONVICTION_THRESHOLD and not is_g_domain and not has_gambling_corroboration:
             return {
                 "verdict": "regular",
@@ -1622,7 +1362,6 @@ Respond ONLY in valid JSON:
                 "challenge_override": False,
             }
 
-        # High confidence "regular" → Challenge for specific proof
         round2_prompt = f"""URL: {url}
 Title: {title}
 Page Content Summary: {body_text[:1000]}
@@ -1647,7 +1386,11 @@ Respond ONLY in valid JSON:
 }}
 """
 
-        round2 = await _call_ollama(round2_prompt, url)
+        r2_messages = [
+            {"role": "system", "content": ANALYST_SYSTEM_PROMPT},
+            {"role": "user", "content": round2_prompt},
+        ]
+        round2 = await _call_omniroute(r2_messages, model=OMNIROUTE_MODEL, url=url)
 
         if round2 is None:
             strong_matches = [k for k in (matched_keywords or []) if k in STRONG_GAMBLING_SIGNALS]
@@ -1676,15 +1419,9 @@ Respond ONLY in valid JSON:
             }
             return await validate_gambling_verdict(url, title, body_text, r2_analyst, cta_buttons)
 
-        # Validate Ground Truth in HTML (Anti-Hallucination)
         evidence_convincing, eval_msg = _evaluate_regular_evidence(r2_reason, r2_evidence, body_text, html)
 
         if not evidence_convincing and has_gambling_corroboration:
-            # The AI couldn't substantiate "regular" AND there is a real gambling signal
-            # (gambling-anchored domain, strong gambling keyword in the page text, an
-            # operator CTA, a game-provider CDN, or a betting funnel) -> challenge as
-            # gambling via the skeptic validator. This is the recall safety net for a
-            # weak local model that keeps calling real casinos "regular".
             reject_analyst = {
                 "verdict": "gambling",
                 "confidence": 0.60,
@@ -1696,10 +1433,6 @@ Respond ONLY in valid JSON:
             return await validate_gambling_verdict(url, title, body_text, reject_analyst, cta_buttons)
 
         if not evidence_convincing:
-            # Not convincingly proven regular, and NO gambling signal either -> a thin /
-            # parked / geo-blocked / niche or foreign-language page. Precision-first: keep
-            # it "regular" at reduced confidence rather than flipping to "gambling" on the
-            # mere ABSENCE of a non-gambling proof.
             return {
                 "verdict": "regular",
                 "confidence": min(float(r2_confidence), 0.55),
@@ -1723,6 +1456,6 @@ Respond ONLY in valid JSON:
         "confidence": 0.0,
         "category": "unconfirmed",
         "key_triggers": [],
-        "reason": "ollama_unconfirmed",
+        "reason": "ai_unconfirmed",
         "challenge_override": False,
     }

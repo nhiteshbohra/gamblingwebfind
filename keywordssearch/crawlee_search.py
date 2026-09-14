@@ -1,7 +1,7 @@
 """
-keywordssearch/crawlee_search.py — Crawlee & Native Multi-Engine Harvester (Replaces SearXNG).
+keywordssearch/crawlee_search.py — Crawlee & Native Multi-Engine Harvester.
 
-Eliminates Docker Desktop, Redis, and port 8080 dependencies completely.
+Eliminates external search dependencies completely.
 Supports:
   1. Multi-Engine Keyword Search: Bing, DuckDuckGo, Yahoo, Mojeek via Crawlee / Playwright / curl_cffi.
   2. Casino Hub & Review Portal Spider: Crawls gambling aggregator/affiliate sites to extract live operator links.
@@ -16,11 +16,8 @@ import argparse
 import asyncio
 import functools
 import json
-import logging
 import os
-import re
 import sys
-import time
 import urllib.parse
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -32,8 +29,8 @@ import aiohttp
 import tldextract
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
-from pymongo import MongoClient, UpdateOne
-from pymongo.errors import ConnectionFailure, ServerSelectionTimeoutError
+from pymongo import UpdateOne
+from pymongo import UpdateOne
 
 # Load root .env
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -396,7 +393,7 @@ async def run_keyword_harvest(
     hub_urls: list[str] = None,
     save_batch: int = SAVE_EVERY_N_DOMAINS,
 ) -> int:
-    """Run full keyword harvesting & hub spidering without SearXNG or Docker."""
+    """Run full keyword harvesting & hub spidering natively."""
     coll, client = get_mongo_collection()
     print(f"\n[+] Connected to MongoDB. Target collection: '{coll.name}'")
     print(f"[+] Total keywords queued: {len(keywords)}")
@@ -427,7 +424,7 @@ async def run_keyword_harvest(
 
         # Phase 2: Multi-Engine Search for Keywords
         print("\n" + "═" * 70)
-        print("  PHASE 2: MULTI-ENGINE KEYWORD HARVESTING (No Docker / No SearXNG)")
+        print("  PHASE 2: MULTI-ENGINE KEYWORD HARVESTING")
         print("═" * 70)
 
         for kw_idx, kw in enumerate(keywords, 1):
@@ -473,7 +470,7 @@ async def run_keyword_harvest(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Crawlee & Native Multi-Engine Domain Harvester (SearXNG Replacement)"
+        description="Crawlee & Native Multi-Engine Domain Harvester"
     )
     parser.add_argument("--keyword", "-k", type=str, help="Single keyword to search")
     parser.add_argument("--keywords-file", "-f", type=str, default="gambling_top_944_keywords.json",

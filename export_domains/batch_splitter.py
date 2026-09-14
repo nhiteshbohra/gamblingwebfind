@@ -3,7 +3,6 @@ export_domains/batch_splitter.py — Size & link-bounded batch splitter for repo
 """
 import os
 import json
-import urllib.parse
 from pathlib import Path
 from typing import Any
 import pymupdf

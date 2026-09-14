@@ -21,6 +21,10 @@ New Architecture:
    - Round 2: If Round 1 says 'regular' -> Challenge: AI must prove with specific evidence
    - If evidence vague/low confidence -> override to gambling
    - If Ollama offline + keywords matched -> unconfirmed (re-queued for later)
+3. Layer 3: OmniRoute AI 2-Round Challenge System:
+   - Round 1 (Analyst): Standard deep semantic check with Indian domain knowledge
+   - Round 2 (Validator): Adversarial validation / skeptic challenge
+   - If OmniRoute offline + keywords matched -> unconfirmed (re-queued for later)
 4. Immediate Screenshot: If status is 'gambling', Playwright BrowserPool captures immediately.
 5. MongoDB sync: updates checked_domains and domain_Listed.
 """
@@ -29,13 +33,19 @@ import logging
 import os
 import sys
 import urllib.parse
-from datetime import datetime, timezone
 from pathlib import Path
 
 # Ensure project root is in sys.path
 _ROOT = str(Path(__file__).resolve().parent.parent)
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
+
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 from dotenv import load_dotenv
 from tqdm import tqdm
@@ -67,7 +77,7 @@ from db.mongo_client import (
 )
 from checking_url.fetcher import fetch, check_cloaking
 from checking_url.classifier import load_keywords, classify, is_gambling_domain, is_parked_or_for_sale, _extract_text
-from checking_url.ai_classifier import classify_with_challenge, close_ai_session, _timeout_mgr, classify_screenshot_vision, clean_page_text, prepare_page_context_for_ai, translate_to_english_if_needed, translate_preflight
+from checking_url.ai_classifier import classify_with_challenge, close_ai_session, _timeout_mgr, classify_screenshot_vision, prepare_page_context_for_ai, translate_to_english_if_needed, translate_preflight
 from checking_url.ml_classifier import predict_proba as ml_predict_proba, is_model_loaded as ml_model_loaded
 from export_domains.screenshot import BrowserPool, is_valid_screenshot, delete_screenshot, all_filename_candidates
 
@@ -176,6 +186,11 @@ async def run(concurrency: int = None, limit: int = 0, mode: str = "new", min_ag
     except Exception as e:
         print(f"[check FATAL] Could not start browser pool: {type(e).__name__}: {e}")
         print("[check FATAL] If Chromium is missing, run: playwright install chromium")
+        try:
+            await browser_pool.close()
+        except Exception:
+            pass
+        await close_ai_session()
         return {"error": str(e), "gambling": 0, "regular": 0, "for_sale": 0, "unconfirmed": 0, "blocked": 0, "dead": 0}
 
     fetch_sem = asyncio.Semaphore(concurrency)
@@ -337,27 +352,29 @@ async def run(concurrency: int = None, limit: int = 0, mode: str = "new", min_ag
             final_asn = None
             final_ai_context = None
 
-            # --- ML fast-path (only active once ml_trainer.py has been run) ---
-            # Uses domain-name features only: runs in <1ms, no network cost.
-            # High-confidence gambling: skip Ollama and confirm immediately.
-            # High-confidence regular: skip Ollama and reject immediately.
-            # Between those bands: fall through to the existing heuristic/AI logic.
+            # --- ML fast-path (active via trained 19k+ domain model) ---
+            # Uses domain-name features only: runs in <0.1ms, zero network cost.
+            # High-confidence gambling (>= 0.85): confirm immediately and bypass Ollama/Crawl4AI.
+            # High-confidence regular (<= 0.12) with no gambling keywords: reject immediately.
+            # Between those bands: fall through to the heuristic/AI challenge logic.
             _ml_prob = ml_predict_proba(domain) if ml_model_loaded() else 0.5
-            _ml_fast_gambling = _ml_prob >= 0.88 and decision == "gambling"
-            _ml_fast_regular  = _ml_prob <= 0.12 and num_matched == 0
+            _ml_fast_gambling = _ml_prob >= 0.85 and decision != "dead"
+            _ml_fast_regular  = _ml_prob <= 0.12 and num_matched == 0 and not is_gambling_domain(eval_url)[0]
 
             if _ml_fast_gambling:
-                # ML + heuristic both agree strongly: no need for Ollama
+                # High-confidence ML gambling prediction: instant confirm
                 final_status = "gambling"
-                final_reason = f"{num_matched} keywords matched [ML-confirmed: prob={_ml_prob:.2f}]"
-                final_decided_by = "ml_heuristic_combined"
+                final_reason = f"ML-confirmed gambling (prob={_ml_prob:.2f}, {num_matched} keywords)"
+                final_decided_by = "ml_classifier"
+                final_confidence = round(float(_ml_prob), 2)
                 run_stats["gambling"] += 1
 
             elif _ml_fast_regular and decision != "gambling":
-                # ML + zero keywords: safe to skip Ollama
+                # High-confidence ML non-gambling prediction: instant reject
                 final_status = "regular"
                 final_reason = f"0 keywords matched [ML-rejected: prob={_ml_prob:.2f}]"
-                final_decided_by = "ml_heuristic_combined"
+                final_decided_by = "ml_classifier"
+                final_confidence = round(float(1.0 - _ml_prob), 2)
                 run_stats["regular"] += 1
                 delete_screenshot(domain, output_screenshot_dir)
 
@@ -419,14 +436,14 @@ async def run(concurrency: int = None, limit: int = 0, mode: str = "new", min_ag
                     for cand in all_filename_candidates(eval_url, domain)
                 )
                 # Circuit breaker: if most of the last 10 AI calls already timed out,
-                # Ollama is clearly struggling right now -- skip waiting out another one.
+                # OmniRoute is clearly struggling right now -- skip waiting out another one.
                 # This only ever changes WHEN we give up (fast vs. after a full timeout),
                 # never WHAT gets decided: the outcome is still "unconfirmed" for a later
                 # retry, exactly what a real timeout would have produced anyway. Deciding
                 # gambling/regular from the heuristic alone here would skip the AI review
                 # this whole pipeline exists to provide -- not worth the time saved.
                 if _timeout_mgr.recent_timeout_rate() >= 0.6:
-                    ai_res = {"verdict": "unconfirmed", "reason": "AI circuit breaker: Ollama timing out on recent calls, skipped to avoid another wait"}
+                    ai_res = {"verdict": "unconfirmed", "reason": "AI circuit breaker: OmniRoute timing out on recent calls, skipped to avoid another wait"}
                 else:
                     ai_res = await classify_with_challenge(
                         classify_html,
@@ -613,7 +630,7 @@ async def run(concurrency: int = None, limit: int = 0, mode: str = "new", min_ag
     print(f" Total Domains Processed           : {total_pending:,}")
     print(f"  * Confirmed Gambling Sites       : {run_stats['gambling']:,}")
     print(f"    - Captured Screenshots         : {run_stats['screenshots_taken']:,}")
-    print(f"    - Evaluated by Ollama AI       : {run_stats['ai_evaluated']:,}")
+    print(f"    - Evaluated by OmniRoute AI    : {run_stats['ai_evaluated']:,}")
     print(f"    - AI Confirmed Gambling        : {run_stats['ai_gambling']:,}")
     print(f"    - Challenge Round Overrides    : {run_stats.get('challenge_overrides', 0):,}")
     print(f"  * Regular Sites (Verified)       : {run_stats['regular']:,}")
@@ -641,14 +658,23 @@ if __name__ == "__main__":
     parser.add_argument("--full-recheck", action="store_true", help="Force the full Round 2 AI challenge even in modes that default to fast_mode")
     args = parser.parse_args()
 
-    if args.file:
-        from db.mongo_client import seed_file_to_domain_listed
-        seed_file_to_domain_listed(args.file)
+    async def _main(runner_args):
+        if runner_args.file:
+            from db.mongo_client import seed_file_to_domain_listed
+            seed_file_to_domain_listed(runner_args.file)
 
-    from checking_url.ai_classifier import start_ollama_if_needed
-    try:
-        asyncio.run(start_ollama_if_needed())
-    except Exception as e:
-        print(f"[!] Local AI status check error: {e}")
+        from checking_url.ai_classifier import ensure_omniroute_ready
+        try:
+            await ensure_omniroute_ready()
+        except Exception as e:
+            print(f"[!] AI Gateway status check error: {e}")
 
-    asyncio.run(run(concurrency=args.concurrency, limit=args.limit, mode=args.mode, min_age_days=args.min_age_days, full_recheck=args.full_recheck))
+        await run(
+            concurrency=runner_args.concurrency,
+            limit=runner_args.limit,
+            mode=runner_args.mode,
+            min_age_days=runner_args.min_age_days,
+            full_recheck=runner_args.full_recheck,
+        )
+
+    asyncio.run(_main(args))

@@ -1,8 +1,8 @@
 from fastapi import APIRouter
 from datetime import datetime, timezone, timedelta
-from pathlib import Path
 import os
-from db.mongo_client import source_domains, checked_domains, get_db
+from db.mongo_client import source_domains, checked_domains
+from db.mongo_client import source_domains, checked_domains
 
 router = APIRouter(prefix="/api")
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -86,12 +86,12 @@ def get_stats():
         rate = round((gambling / total_checked * 100), 2) if total_checked > 0 else 0.0
 
         ai_classified = chk.count_documents({
-            "reason": {"$regex": "AI|ollama|Validator|Challenge|round1|round2", "$options": "i"}
+            "reason": {"$regex": "AI|omniroute|ollama|Validator|Challenge|round1|round2", "$options": "i"}
         })
         keyword_classified = max(0, total_checked - ai_classified)
 
     except Exception as e:
-        total_checked = gambling = regular = blocked = dead = unconfirmed = 0
+        total_checked = gambling = regular = for_sale = blocked = dead = unconfirmed = 0
         screenshot_taken = screenshot_pending = exported = pending_export = 0
         failed_reasons = {}
         rate = 0.0

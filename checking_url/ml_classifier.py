@@ -1,4 +1,4 @@
-﻿"""
+"""
 checking_url/ml_classifier.py -- Thin sklearn inference wrapper.
 
 Loads the pre-trained gambling domain classifier (trained by ml_trainer.py)
@@ -15,7 +15,6 @@ Train/refresh with:  python ml_trainer.py
 """
 from __future__ import annotations
 
-import os
 import re
 import sys
 from pathlib import Path

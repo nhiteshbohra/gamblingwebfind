@@ -149,14 +149,14 @@ def delete_screenshot(url_or_domain: str, output_dir: str = None) -> bool:
             except Exception:
                 pass
     return deleted
-
-
 class BrowserPool:
     def __init__(self, concurrency: int = 15):
         self.concurrency = concurrency
         self.playwright: Playwright | None = None
         self.browser: Browser | None = None
         self._lock = asyncio.Lock()
+        self._captures_count = 0
+        self._recycle_threshold = 25  # restart Chromium every 25 captures to prevent RAM leak
 
     async def start(self):
         async with self._lock:
@@ -173,12 +173,14 @@ class BrowserPool:
                         '--disable-blink-features=AutomationControlled'
                     ]
                 )
+                self._captures_count = 0
 
     async def ensure_browser(self):
         async with self._lock:
             if not self.playwright:
                 self.playwright = await async_playwright().start()
-            if not self.browser or not self.browser.is_connected():
+            should_recycle = self._captures_count >= self._recycle_threshold
+            if should_recycle or not self.browser or not self.browser.is_connected():
                 try:
                     if self.browser:
                         await self.browser.close()
@@ -194,6 +196,7 @@ class BrowserPool:
                         '--disable-blink-features=AutomationControlled'
                     ]
                 )
+                self._captures_count = 0
 
     async def close(self):
         async with self._lock:
@@ -237,14 +240,15 @@ class BrowserPool:
         if not url.startswith("https://www."):
             urls_to_try.append(f"https://www.{clean_dom}")
         urls_to_try.append(f"http://{clean_dom}")
-        urls_to_try.append(f"http://www.{clean_dom}")
+        urls_to_try.append(f"http://{clean_dom}")
 
         last_status = "timeout"
         last_reason = "No response after multiple protocol attempts"
 
-        for attempt in range(max(retries, len(urls_to_try))):
-            target_url = urls_to_try[attempt % len(urls_to_try)]
-            context = None
+        try:
+            for attempt in range(min(max(1, retries), len(urls_to_try))):
+                target_url = urls_to_try[attempt % len(urls_to_try)]
+                context = None
             try:
                 await self.ensure_browser()
                 try:
@@ -503,7 +507,9 @@ class BrowserPool:
                         pass
                 await asyncio.sleep(0.5)
 
-        return None, last_status, last_reason
+            return None, last_status, last_reason
+        finally:
+            self._captures_count += 1
 
 
 async def capture_async(url: str, output_dir: str) -> str | None:

@@ -10,7 +10,6 @@ Two-collection flow:
 import csv
 import json
 import os
-import urllib.parse
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
@@ -285,20 +284,6 @@ def checked_domains() -> Collection:
 
 
 # ── URL helpers ───────────────────────────────────────────────────────────────
-
-def normalize_url(raw_url: str) -> str:
-    parsed = urllib.parse.urlparse(raw_url.strip())
-    scheme = parsed.scheme.lower() or 'http'
-    netloc = parsed.netloc.lower()
-    if netloc.startswith('www.'):
-        netloc = netloc[4:]
-    if ':' in netloc:
-        host, port = netloc.split(':', 1)
-        if (scheme == 'http' and port == '80') or (scheme == 'https' and port == '443'):
-            netloc = host
-    path = parsed.path.rstrip('/') if len(parsed.path) > 1 else parsed.path
-    return urllib.parse.urlunparse((scheme, netloc, path, parsed.params, parsed.query, ''))
-
 
 def extract_domain(url: str) -> str:
     ext = tldextract.extract(url)
@@ -674,7 +659,7 @@ def write_result(
 
     update = {
         "$set": set_fields,
-        "$setOnInsert": {"added_date": today_date, "source": "searxng_search"},
+        "$setOnInsert": {"added_date": today_date, "source": "keyword_search"},
     }
 
     import time
@@ -715,7 +700,7 @@ def write_result(
                     {"_id": domain},
                     {
                         "$set": {"domain": domain, "processed": give_up_on_new_queue, "active": True},
-                        "$setOnInsert": {"added_date": today_date, "source": "searxng_search"},
+                        "$setOnInsert": {"added_date": today_date, "source": "keyword_search"},
                     },
                     upsert=True,
                 )
@@ -724,7 +709,7 @@ def write_result(
                     {"_id": domain},
                     {
                         "$set": {"domain": domain, "processed": True, "active": False},
-                        "$setOnInsert": {"added_date": today_date, "source": "searxng_search"},
+                        "$setOnInsert": {"added_date": today_date, "source": "keyword_search"},
                     },
                     upsert=True,
                 )
@@ -733,7 +718,7 @@ def write_result(
                     {"_id": domain},
                     {
                         "$set": {"domain": domain, "processed": True, "active": True},
-                        "$setOnInsert": {"added_date": today_date, "source": "searxng_search"},
+                        "$setOnInsert": {"added_date": today_date, "source": "keyword_search"},
                     },
                     upsert=True,
                 )
@@ -784,30 +769,6 @@ def find_unreviewed_gambling_domains(limit: int = 0):
             yield {"domain": domain, "_id": domain, "url": doc.get("url", f"https://{domain}")}
 
 
-def find_unexported_gambling_domains(limit: int = 0):
-    """Gambling domains that have valid screenshots captured and are pending report export."""
-    query = {
-        "status": "gambling",
-        "screenshot_taken": True,
-        "exported": {"$ne": True},
-    }
-    cur = checked_domains().find(query)
-    if limit:
-        cur = cur.limit(limit)
-    return cur
-
-
-def mark_domains_exported(domain_ids: list[str]):
-    """Mark domain list as exported with timestamp."""
-    if not domain_ids:
-        return
-    now_ts = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
-    checked_domains().update_many(
-        {"_id": {"$in": domain_ids}},
-        {"$set": {"exported": True, "exported_at": now_ts}},
-    )
-
-
 def seed_file_to_domain_listed(file_path: str) -> int:
     """Extract domains from any .xlsx, .csv, or .txt file and seed them into domain_Listed."""
     domains = extract_domains_from_file(file_path)
@@ -853,90 +814,6 @@ def seed_from_csv(path: str, active: bool = True):
             )
             inserted += 1
     print(f"[seed] {inserted} upserted into domain_Listed, {skipped} skipped")
-
-
-def ingest_true_positives(path_or_domains: str | list[str]) -> tuple[int, int]:
-    """Import confirmed gambling domains from an Excel (.xlsx/.xls), CSV, .txt file, or list of domain strings
-    directly into checked_domains as status='gambling', screenshot_taken=False.
-
-    Resets existing domains to status='gambling' for re-capture and re-export.
-    Returns (inserted, reset).
-    """
-    inserted = reset = 0
-    today_date = datetime.now(IST).strftime("%Y-%m-%d")
-
-    if isinstance(path_or_domains, (list, tuple, set)):
-        domains = []
-        for raw in path_or_domains:
-            if not raw:
-                continue
-            d = str(raw).strip().replace("https://", "").replace("http://", "").removeprefix("www.").rstrip("/").lower()
-            d = extract_domain(f"https://{d}") or d
-            if d and "." in d and d not in domains:
-                domains.append(d)
-    else:
-        domains = extract_domains_from_file(path_or_domains)
-
-    for domain in domains:
-        if not domain or "." not in domain:
-            continue
-
-        # If already exists, reset for re-capture, re-export, and ensure status='gambling'
-        existing = checked_domains().find_one({"_id": domain}, {"_id": 1})
-        if existing:
-            checked_domains().update_one(
-                {"_id": domain},
-                {
-                    "$set": {
-                        "status": "gambling",
-                        "reason": "Manual true positive import",
-                        "screenshot_taken": False,
-                        "exported": False,
-                        "screenshot_failed_reason": None,
-                    }
-                },
-            )
-            # Also ensure domain exists and is marked processed in source collection
-            source_domains().update_one(
-                {"_id": domain},
-                {
-                    "$set": {"domain": domain, "active": True, "processed": True},
-                    "$setOnInsert": {"added_date": today_date, "source": "manual_import"},
-                },
-                upsert=True,
-            )
-            reset += 1
-            continue
-
-        # Insert directly as confirmed gambling true positive
-        checked_domains().update_one(
-            {"_id": domain},
-            {
-                "$set": {
-                    "domain": domain,
-                    "url": f"https://{domain}",
-                    "status": "gambling",
-                    "reason": "Manual true positive import",
-                    "screenshot_taken": False,
-                    "screenshot_failed_reason": None,
-                    "source": "manual_import",
-                },
-                "$setOnInsert": {"added_date": today_date},
-            },
-            upsert=True,
-        )
-        # Also ensure domain exists and is marked processed in source collection
-        source_domains().update_one(
-            {"_id": domain},
-            {
-                "$set": {"domain": domain, "active": True, "processed": True},
-                "$setOnInsert": {"added_date": today_date, "source": "manual_import"},
-            },
-            upsert=True,
-        )
-        inserted += 1
-
-    return inserted, reset
 
 
 def seed_discovered_domains(domains: set, discovered_from: str) -> tuple[int, int]:
