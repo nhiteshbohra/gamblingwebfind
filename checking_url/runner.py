@@ -112,9 +112,16 @@ async def async_write_result(*args, **kwargs):
     return await asyncio.to_thread(write_result, *args, **kwargs)
 
 
-async def run(concurrency: int = None, limit: int = 0, mode: str = "new", min_age_days: int = 0, full_recheck: bool = False):
+async def run(
+    concurrency: int = None,
+    limit: int = 0,
+    mode: str = "new",
+    min_age_days: int = 0,
+    full_recheck: bool = False,
+    target_gambling_count: int = 0,
+):
     _prevent_sleep()
-    get_db()
+    db = get_db()
     # Flush any verdicts a previous run couldn't save (MongoDB was down mid-run).
     try:
         replay_pending_writes()
@@ -125,6 +132,16 @@ async def run(concurrency: int = None, limit: int = 0, mode: str = "new", min_ag
     concurrency = concurrency or int(os.getenv("MAX_CONCURRENT_FETCHES", 20))
     timeout = float(os.getenv("FETCH_TIMEOUT", 10))
     delay = float(os.getenv("PER_DOMAIN_DELAY", 2.0))
+    target_gambling_count = target_gambling_count or int(os.getenv("TARGET_GAMBLING_COUNT", 0))
+
+    initial_gambling_count = 0
+    if target_gambling_count > 0:
+        try:
+            initial_gambling_count = db["checked_domains"].count_documents({"status": "gambling"})
+            needed = max(0, target_gambling_count - initial_gambling_count)
+            print(f"[target] Stop condition active: target={target_gambling_count:,} total gambling sites | current={initial_gambling_count:,} | needed={needed:,}")
+        except Exception as e:
+            print(f"[target] Warning: could not count initial gambling domains: {e}")
 
     keywords = load_keywords()
 
@@ -210,7 +227,11 @@ async def run(concurrency: int = None, limit: int = 0, mode: str = "new", min_ag
         "gambling_screenshot_pending": 0,  # confirmed gambling, evidentiary screenshot still owed
     }
 
+    stop_event = asyncio.Event()
+
     async def process(doc):
+        if stop_event.is_set():
+            return
         try:
             raw_domain = doc.get("domain") or doc.get("_id") or ""
             if not raw_domain:
@@ -579,6 +600,13 @@ async def run(concurrency: int = None, limit: int = 0, mode: str = "new", min_ag
                     decided_by=final_decided_by, ai_context=final_ai_context, matched_keywords=matched_keywords,
                 )
 
+            if final_status == "gambling" and target_gambling_count > 0:
+                current_total_gambling = initial_gambling_count + run_stats["gambling"]
+                if current_total_gambling >= target_gambling_count:
+                    if not stop_event.is_set():
+                        stop_event.set()
+                        print(f"\n[✓ TARGET REACHED] Gambling sites reached {current_total_gambling:,} (target: {target_gambling_count:,})! Gracefully completing batch...")
+
         except Exception as e:
             domain = doc.get("domain", "")
             if domain:
@@ -595,14 +623,17 @@ async def run(concurrency: int = None, limit: int = 0, mode: str = "new", min_ag
                     pass
         finally:
             pbar.update(1)
-            pbar.set_postfix({"Left": max(0, total_pending - pbar.n)})
+            postfix = {"Left": max(0, total_pending - pbar.n)}
+            if target_gambling_count > 0:
+                postfix["Gambling"] = f"{initial_gambling_count + run_stats['gambling']}/{target_gambling_count}"
+            pbar.set_postfix(postfix)
 
     queue = asyncio.Queue()
     for doc in pending:
         queue.put_nowait(doc)
 
     async def worker():
-        while not queue.empty():
+        while not queue.empty() and not stop_event.is_set():
             try:
                 doc = queue.get_nowait()
             except asyncio.QueueEmpty:
@@ -611,6 +642,13 @@ async def run(concurrency: int = None, limit: int = 0, mode: str = "new", min_ag
                 await process(doc)
             finally:
                 queue.task_done()
+                if stop_event.is_set():
+                    while not queue.empty():
+                        try:
+                            queue.get_nowait()
+                            queue.task_done()
+                        except Exception:
+                            break
 
     try:
         workers = [asyncio.create_task(worker()) for _ in range(concurrency)]
@@ -656,6 +694,7 @@ if __name__ == "__main__":
     parser.add_argument("--min-age-days", type=int, default=int(os.getenv("RECHECK_MIN_AGE_DAYS", 0)), help="Cooldown age threshold in days for regular/dead rechecks")
     parser.add_argument("--file", "--seed-file", help="Path to Excel/CSV/txt file to seed into domain_Listed before running")
     parser.add_argument("--full-recheck", action="store_true", help="Force the full Round 2 AI challenge even in modes that default to fast_mode")
+    parser.add_argument("--target-gambling-count", type=int, default=int(os.getenv("TARGET_GAMBLING_COUNT", 0)), help="Stop when total gambling domains in database reaches this number (e.g. 119518)")
     args = parser.parse_args()
 
     async def _main(runner_args):
@@ -675,6 +714,7 @@ if __name__ == "__main__":
             mode=runner_args.mode,
             min_age_days=runner_args.min_age_days,
             full_recheck=runner_args.full_recheck,
+            target_gambling_count=runner_args.target_gambling_count,
         )
 
     asyncio.run(_main(args))
