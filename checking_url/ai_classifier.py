@@ -74,6 +74,7 @@ OMNIROUTE_TIEBREAKER_MODEL = os.getenv("OMNIROUTE_TIEBREAKER_MODEL", "auto")
 OMNIROUTE_VISION_MODEL = os.getenv("OMNIROUTE_VISION_MODEL", "auto")
 AI_CONCURRENCY = int(os.getenv("AI_CONCURRENCY", 8))
 USE_CRAWL4AI_FOR_AI = os.getenv("USE_CRAWL4AI_FOR_AI", "false").lower() == "true"
+ENABLE_VISION_AI = os.getenv("ENABLE_VISION_AI", "false").lower() == "true"
 
 # Dynamic timeout bounds (seconds)
 AI_TIMEOUT_MIN = float(os.getenv("AI_TIMEOUT_MIN", 10.0))   # fastest simple pages
@@ -797,9 +798,11 @@ async def _call_omniroute(
 async def _call_vision_model(image_path: str, prompt: str, log_ctx: str = "") -> dict | None:
     """
     OmniRoute vision-model call: reads the screenshot and formats it as an OpenAI
+    Call a vision-capable model using the standard OpenAI chat completions
     image_url data URI sent to the OmniRoute gateway.
     """
     if not image_path or not os.path.exists(image_path):
+    if not ENABLE_VISION_AI or not image_path or not os.path.exists(image_path):
         return None
     try:
         with open(image_path, "rb") as f:
