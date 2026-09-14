@@ -1,302 +1,311 @@
-# 🎰 Gambling Website Hunter
+# gamblingwebfind — Automated Online Gambling Discovery & Compliance Pipeline
 
-**Automated Detection & Intelligence Gathering Tool for Gambling/Betting Websites**
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.100%2B-009688.svg)](https://fastapi.tiangolo.com/)
+[![MongoDB](https://img.shields.io/badge/MongoDB-7.0%2B-green.svg)](https://www.mongodb.com/)
+[![OmniRoute](https://img.shields.io/badge/OmniRoute-AI_Gateway-6366f1.svg)](https://github.com/diegosouzapw/OmniRoute)
+[![Ollama](https://img.shields.io/badge/Ollama-Local_AI-black.svg)](https://ollama.ai/)
+[![Playwright](https://img.shields.io/badge/Playwright-Chromium-red.svg)](https://playwright.dev/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-An end-to-end automation pipeline that discovers, enumerates, verifies, and gathers intelligence on illegal online gambling and betting websites — saving everything into a structured CSV report with homepage screenshots.
+An enterprise-grade, high-performance intelligence pipeline for discovering, classifying, validating, and generating audit-ready compliance reports for online gambling and illegal wagering websites operating in India and globally.
 
 ---
 
-## 🚀 What It Does
+## 🏛️ Repository Architecture & Branches
+
+To provide maximum flexibility between **cloud speed** and **local privacy**, the codebase is organized into **two specialized production branches**:
 
 ```
-Google Dorking → DNS Resolution → Reverse IP Lookup → Liveness Check → Intel Gathering → Screenshots → CSV Report
+                                  MAIN BRANCH (Hub & Documentation)
+                                                 │
+                   ┌─────────────────────────────┴─────────────────────────────┐
+                   │                                                           │
+                   ▼                                                           ▼
+    BRANCH: gamblingwebfind-omniroute                       BRANCH: gamblingwebfind-core
+         (Cloud AI Gateway)                                      (100% Local AI)
+  • 1.5 Billion tokens/month                              • 100% offline & air-gapped
+  • Powered by OmniRoute Gateway                          • Powered by Ollama
+  • 490+ Cloud Models (Llama 3.3 70B, Qwen 72B)           • Local GPU Models (Qwen 3B/7B, Llama 8B)
+  • 150–400 tokens/second                                 • 20–40 tokens/second
+  • Auto-healing background daemon                        • Zero external network calls
+  • Best for: 740,000+ domain bulk processing             • Best for: Restricted environments / Air-gap
 ```
 
-| Phase | Description |
-|---|---|
-| **🔍 Dorking** | Searches Google with 130+ gambling-specific dork queries to auto-discover websites |
-| **🌐 DNS + Reverse IP** | Resolves domains ↔ IPs, finds all domains sharing the same server |
-| **✅ Liveness** | Checks if each domain is UP or DOWN (concurrent, fast) |
-| **📊 Intel** | Gathers WHOIS, SSL certs, HTTP headers, page content, IP geolocation, tech stack |
-| **📸 Screenshots** | Captures homepage screenshots using headless Chromium |
-| **💾 CSV Export** | Consolidates all data into a 26-column CSV report |
+| Branch Name | Primary AI Engine | Target Use Case | Recommended Command |
+| :--- | :--- | :--- | :--- |
+| **[`gamblingwebfind-omniroute`](#branch-1-omniroute-edition)** | **OmniRoute Cloud AI Gateway** | **Production & Bulk Scanning** (740,000+ domains, fast, low local hardware) | `git checkout gamblingwebfind-omniroute` |
+| **[`gamblingwebfind-core`](#branch-2-ollama-edition)** | **Ollama Local LLMs** | **Offline & Air-Gapped Scanning** (Zero API keys, private local inference) | `git checkout gamblingwebfind-core` |
+
+*(Note: `gamblingwebfind-ollama` is also available as an alias for `gamblingwebfind-core`)*
 
 ---
 
-## 📋 Features
+## ⚖️ Head-to-Head Comparison: OmniRoute vs. Ollama
 
-- **Auto-Discovery** — 130+ built-in Google dork queries covering casinos, betting, rummy, teen patti, poker, slots, crypto gambling, color prediction, fantasy sports, lottery, satta/matka, and more
-- **Reverse IP Enumeration** — Finds hidden domains hosted on the same server (HackerTarget + RapidDNS)
-- **Multi-Source Input** — Start from Google dorking, domain lists, IP lists, or forensic PDF reports
-- **Rich Intelligence** — WHOIS registration, SSL certificates, server technology, page titles, meta tags, IP geolocation
-- **Screenshot Capture** — Playwright-based headless Chrome renders JS-heavy gambling sites correctly
-- **Rate-Limited & Safe** — Configurable delays, random User-Agents, retry logic to avoid blocks
-- **Concurrent Processing** — Multi-threaded liveness checking (10+ threads)
-- **CSV Output** — 26-column report ready for Excel/Sheets analysis
+| Evaluation Criteria | ⚡ Branch 1: `gamblingwebfind-omniroute` | 🦙 Branch 2: `gamblingwebfind-core` (Ollama) |
+| :--- | :--- | :--- |
+| **Inference Engine** | Cloud AI Gateway via **OmniRoute** | Local LLM daemon via **Ollama** |
+| **Processing Speed** | **150 – 400+ tokens/sec** | **20 – 40 tokens/sec** (dependent on GPU) |
+| **Throughput (740k domains)**| **~1.5 to 2 days total** (concurrency 15–20) | **~12 to 15 days 24/7** (concurrency 2–3) |
+| **Monthly Cost / Quota** | **1.5 Billion tokens/month** (Free via API key) | **$0 / Free** (electricity & hardware only) |
+| **Tokens Required for 740k** | **~180M – 350M tokens** (*uses <25% of quota*) | N/A (runs on local hardware) |
+| **Available Models** | **70B+ Foundation Models** (Llama 3.3 70B, Qwen 2.5 72B, DeepSeek V3) | **3B – 8B Quantized Models** (`qwen2.5:3b`, `qwen2.5:7b-instruct`, `llama3:8b`) |
+| **Local Hardware Load** | **Near 0% GPU / CPU load**. PC runs cool and quiet | **100% GPU VRAM saturation**, fan noise, high temps |
+| **System Requirements** | Any basic PC / Laptop (4GB RAM, no GPU required) | Dedicated NVIDIA GPU (minimum 6GB–8GB+ VRAM) |
+| **Indian Slang & Nuances** | **Superior precision** on Satta Matka, Khai-Lagai, Mahadev Book funnels | Moderate; 3B/7B models can miss edge cases |
+| **JSON Schema Adherence** | **99.9%** (No markdown hallucination, valid JSON) | ~92–95% (Requires parsing fallbacks & retries) |
+| **Vision (Screenshots)** | Cloud vision (Llama 3.2 Vision / Qwen-VL) <1 sec | Local vision (LLaVA/MiniCPM) 4–8 sec (heavy VRAM) |
+| **Network Requirements** | Requires internet access to reach OmniRoute | **100% offline & air-gapped capable** |
+| **Self-Healing Capabilities**| **Built-in Auto-Start** (`start_omniroute_if_needed`) | Requires local Ollama service to stay active |
 
 ---
 
-## ⚡ Quick Start
+## 🎯 Which Branch Should You Use?
 
-### 1. Install
+### Choose **`gamblingwebfind-omniroute`** (Recommended ⭐) if:
+- You need to process large domain lists (**50,000 to 740,000+ domains**) in days rather than weeks.
+- You want higher accuracy from **70B+ models** without false positives on news sites, schools, or hotels.
+- You are running on a standard laptop or desktop without a high-end NVIDIA graphics card.
+- You have an OmniRoute API key (with your 1.5B token allocation).
 
+### Choose **`gamblingwebfind-core`** if:
+- You must operate in an air-gapped, offline, or highly classified environment.
+- You are strictly prohibited from transmitting website excerpts or domain names over the internet.
+- You have a dedicated machine with an NVIDIA GPU (RTX 3060/4060 12GB+) and want a 100% self-hosted setup.
+
+---
+
+## 🚀 Step-by-Step Installation & Usage Guide
+
+---
+
+### Branch 1: OmniRoute Edition (`gamblingwebfind-omniroute`)
+
+#### 1. Switch to Branch
 ```bash
-# Clone the repo
-git clone https://github.com/nhiteshbohra/gamblingwebfind.git
-cd gamblingwebfind
-
-# One-command setup (installs all dependencies + Chromium browser)
-python setup.py
+git checkout gamblingwebfind-omniroute
 ```
 
-### 2. Run
+#### 2. Install Prerequisites
+- **Python**: 3.11 or 3.12 (`python --version`)
+- **Node.js & NPM**: Node 18+ (`node --version`)
+- **MongoDB**: Local Community Server (port 27017) or MongoDB Atlas connection string.
 
+#### 3. Install OmniRoute Gateway
 ```bash
-# Full auto — dork + discover + enumerate + check + intel + screenshot + CSV
-python gambling_hunter.py --auto
-
-# From an IP list
-python gambling_hunter.py --ips iplist.txt
-
-# From a domain list
-python gambling_hunter.py --domains domains.txt
-
-# From a forensic PDF
-python gambling_hunter.py --pdf report.pdf
-
-# Custom dork query
-python gambling_hunter.py --dork "intitle:'cricket betting' site:.in"
+npm install -g omniroute
 ```
+*(Verify with `omniroute --help`)*
 
-> **Windows Users:** Prefix with `$env:PYTHONIOENCODING='utf-8';` for proper emoji display.
-
----
-
-## 📖 Usage Examples
-
+#### 4. Setup Python Virtual Environment
 ```bash
-# Full auto mode with all default dorks
-python gambling_hunter.py --auto
+# Create and activate venv
+python -m venv .venv
 
-# Combine multiple sources
-python gambling_hunter.py --auto --ips iplist.txt --domains extra_domains.txt
+# Windows (PowerShell):
+.venv\Scripts\Activate.ps1
+# Windows (CMD):
+.venv\Scripts\activate.bat
+# Linux / macOS:
+source .venv/bin/activate
 
-# Custom dork file
-python gambling_hunter.py --dork-file my_custom_dorks.txt
+# Install dependencies
+pip install --upgrade pip
+pip install -r requirements.txt
+```
 
-# Control scan scope
-python gambling_hunter.py --auto --max-domains 200 --max-reverse-ips 50
+#### 5. Install Playwright Chromium Browser
+```bash
+python -m playwright install chromium
+```
 
-# Skip screenshots (faster)
-python gambling_hunter.py --ips iplist.txt --no-screenshot
+#### 6. Configure Environment Variables
+Create `.env` from `.env.example`:
+```bash
+cp .env.example .env
+```
+Fill in your configuration:
+```env
+MONGO_URI=mongodb://localhost:27017/
+MONGO_DB_NAME=gambling_detector
 
-# Skip reverse IP lookup
-python gambling_hunter.py --domains domains.txt --skip-reverse-ip
+# OmniRoute Gateway Settings
+OMNIROUTE_BASE_URL=http://localhost:20128/v1
+OMNIROUTE_API_KEY=your_omniroute_api_key_here
+OMNIROUTE_MODEL=auto
+OMNIROUTE_VALIDATOR_MODEL=auto
+OMNIROUTE_TIEBREAKER_MODEL=auto
 
-# Increase threads for faster liveness checks
-python gambling_hunter.py --auto --threads 20
+# Performance Settings
+CHECK_CONCURRENCY=20
+AI_CONCURRENCY=12
+AI_FAST_MODE=false
+SCREENSHOT_DIR=data/screenshots
+```
 
-# Adjust rate limiting
-python gambling_hunter.py --auto --delay 5
+#### 7. Run the Pipeline
+```bash
+# A. Interactive Menu (All tools in one):
+python main.py
+
+# B. Direct High-Speed Classifier:
+python -m checking_url.runner --mode new --concurrency 20
+
+# C. Seed a CSV/Excel file of domains and run immediately:
+python -m checking_url.runner --mode new --file path/to/domains.csv
+
+# D. Launch Web Dashboard:
+uvicorn api.main:app --port 8000
+```
+*(Access web dashboard at `http://localhost:8000`)*
+
+#### 8. Run Automated Test Suite
+```bash
+pytest -v tests
+```
+*(23/23 unit and integration tests passing)*
+
+---
+
+### Branch 2: Ollama Edition (`gamblingwebfind-core`)
+
+#### 1. Switch to Branch
+```bash
+git checkout gamblingwebfind-core
+```
+*(or `git checkout gamblingwebfind-ollama`)*
+
+#### 2. Install Prerequisites
+- **Python**: 3.11 or 3.12
+- **MongoDB**: Local Community Server (port 27017)
+- **Ollama**: Download and install from [ollama.com](https://ollama.com/download)
+
+#### 3. Pull Required Ollama Models
+Open your terminal and pull the models:
+```bash
+# Lightweight fast model (Recommended for 6GB-8GB GPUs):
+ollama pull qwen2.5:3b
+
+# High reasoning model (Recommended for 12GB+ GPUs):
+ollama pull qwen2.5:7b-instruct
+```
+
+#### 4. Setup Python Virtual Environment
+```bash
+python -m venv .venv
+.venv\Scripts\Activate.ps1   # or source .venv/bin/activate
+pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+#### 5. Install Playwright Chromium Browser
+```bash
+python -m playwright install chromium
+```
+
+#### 6. Configure Environment Variables
+Create `.env`:
+```bash
+cp .env.example .env
+```
+Configure for local Ollama:
+```env
+MONGO_URI=mongodb://localhost:27017/
+MONGO_DB_NAME=gambling_detector
+
+# Local Ollama Settings
+OLLAMA_HOST=http://localhost:11434
+OLLAMA_MODEL=qwen2.5:3b
+OLLAMA_VALIDATOR_MODEL=qwen2.5:3b
+OLLAMA_TIEBREAKER_MODEL=qwen2.5:7b-instruct
+
+# Set concurrency based on your GPU VRAM:
+CHECK_CONCURRENCY=10
+AI_CONCURRENCY=3
+AI_FAST_MODE=true
+SCREENSHOT_DIR=data/screenshots
+```
+
+#### 7. Run the Pipeline
+```bash
+# A. Interactive Menu:
+python main.py
+
+# B. Direct Runner:
+python -m checking_url.runner --mode new --concurrency 10
+
+# C. Web Dashboard:
+uvicorn api.main:app --port 8000
 ```
 
 ---
 
-## 📁 Output
+## 🛠️ Common Workflows Across Both Branches
 
-After running, all results are saved to `output/`:
-
-```
-output/
-├── gambling_report_YYYYMMDD_HHMMSS.csv   # Main report (26 columns)
-├── discovered_domains.txt                 # Domains found by dorking
-├── live_domains.txt                       # Confirmed alive domains
-├── screenshots/                           # Homepage screenshots
-│   ├── example-casino.com.png
-│   ├── bet-site.net.png
-│   └── ...
-└── scan_log.txt                           # Detailed execution log
+### 1. Keyword Harvesting (Stage 0)
+Search engines (Bing, DuckDuckGo, Yahoo, Google) are automatically scraped for fresh gambling targets:
+```bash
+python main.py
+# Select Option 1: "Run Keyword Harvest"
 ```
 
-### CSV Columns
-
-| Column | Description |
-|---|---|
-| `domain` | Target domain name |
-| `ip` | Resolved IPv4 address |
-| `reverse_ip_domain_count` | Number of domains on same IP |
-| `reverse_ip_domains` | Other domains on same IP (up to 20) |
-| `status` | UP / DOWN / REDIRECT |
-| `http_code` | HTTP status code |
-| `response_time_ms` | Response time in milliseconds |
-| `final_url` | Final URL after redirects |
-| `page_title` | HTML page title |
-| `meta_description` | Meta description tag |
-| `meta_keywords` | Meta keywords tag |
-| `content_language` | HTML lang attribute |
-| `server` | Server header value |
-| `technologies` | Detected technologies |
-| `ssl_issuer` | SSL certificate issuer |
-| `ssl_expiry` | SSL certificate expiry date |
-| `whois_registrar` | Domain registrar |
-| `whois_created` | Domain creation date |
-| `whois_expires` | Domain expiry date |
-| `whois_country` | Registrant country |
-| `ip_country` | IP geolocation country |
-| `ip_city` | IP geolocation city |
-| `ip_isp` | Internet Service Provider |
-| `screenshot_path` | Path to saved screenshot |
-| `discovery_source` | How the domain was found |
-| `scan_timestamp` | When the scan was performed |
-
----
-
-## 🏗️ Architecture
-
+### 2. Exporting Compliance Reports (Stage 3)
+Generate official audit dossiers with clickable hyperlinks and embedded evidence:
+```bash
+python main.py
+# Select Option 3: "Generate PDF / Excel Export"
 ```
-gambling_hunter.py          # Main orchestrator (entry point)
-├── config.py               # Central configuration
-├── utils.py                # Shared utilities
-├── dorker.py               # Google dorking engine
-├── dorks.txt               # 130+ dork query templates
-├── liveness.py             # Domain up/down checker
-├── intel.py                # Intelligence gathering
-├── screenshotter.py        # Screenshot capture (Playwright)
-├── domain_ip.py            # Domain → IP resolution
-├── ip_domain.py            # IP → Domains (reverse lookup)
-├── datafrompdf.py          # PDF report extraction
-├── requirements.txt        # Python dependencies
-└── setup.py                # One-click installer
+- Bundles are saved in `output/` as `.pdf` and `.xlsx`.
+- Files automatically split at **24MB** or **1,000 links** to adhere to regulatory upload limits.
+
+### 3. Re-Checking Blocked Domains
+Monitor whether previously reported sites have been taken down by ISPs or authorities:
+```bash
+python -m checking_url.runner --mode blocked
 ```
 
-### Pipeline Flow
-
-```
-┌──────────────┐    ┌───────────────┐    ┌──────────────┐
-│  Dorking      │    │  Domain List  │    │  IP List     │
-│  (130+ dorks) │    │  (text file)  │    │  (text file) │
-└──────┬───────┘    └──────┬────────┘    └──────┬───────┘
-       │                   │                    │
-       └───────────┬───────┘                    │
-                   ▼                            │
-          ┌────────────────┐                    │
-          │ DNS Resolution │◄───────────────────┘
-          │ domain → IP    │
-          └───────┬────────┘
-                  ▼
-          ┌────────────────┐
-          │ Reverse IP     │
-          │ IP → domains   │
-          └───────┬────────┘
-                  ▼
-          ┌────────────────┐
-          │ Liveness Check │
-          │ UP / DOWN      │
-          └───────┬────────┘
-                  ▼
-          ┌────────────────┐
-          │ Intel Gather   │
-          │ WHOIS/SSL/Geo  │
-          └───────┬────────┘
-                  ▼
-          ┌────────────────┐
-          │ Screenshot     │
-          │ Headless Chrome│
-          └───────┬────────┘
-                  ▼
-          ┌────────────────┐
-          │ CSV Export     │
-          │ 26-col report  │
-          └────────────────┘
+### 4. Training the Machine Learning Fast-Path Model
+Update the sub-millisecond domain classifier (`data/domain_ml_model.joblib`) using your latest confirmed database records:
+```bash
+python ml_trainer.py
 ```
 
 ---
 
-## 🔍 Dork Categories
-
-The tool ships with **130+ Google dork queries** organized into categories:
-
-| Category | Examples |
-|---|---|
-| Rummy | Cash Rummy, Indian Rummy, 13 Card Rummy |
-| Teen Patti / 3 Patti | Teen Patti Gold, real cash |
-| Poker | Texas Holdem, Omaha, Live Poker |
-| Casino | Online Casino, Live Casino, Mobile Casino |
-| Slots / Jackpot | Slot Machine, Progressive Jackpot |
-| Table Games | Roulette, Blackjack, Baccarat, Dragon Tiger, Andar Bahar |
-| Sports Betting | Cricket, IPL, Football, Tennis, Horse Racing |
-| Fantasy Sports | Fantasy Cricket, Fantasy Football, Cash Contest |
-| Lottery | Online Lottery, Lucky Draw, Scratch Card |
-| Color Prediction / Crash | Aviator, WinGo, Plinko, Mines |
-| Crypto Casino | Bitcoin Casino, USDT Casino, Crypto Betting |
-| Satta / Matka | Satta King, Matka Result |
-| Bonus / Promo | Welcome Bonus, No Deposit Bonus, Promo Code |
-| APK Downloads | Betting APK, Casino App Download |
-
-You can add your own queries to `dorks.txt` (one per line).
-
----
-
-## 🛠️ Requirements
-
-- Python 3.10+
-- Internet connection
-
-### Python Packages
+## 📂 Repository Quick-Reference
 
 ```
-requests>=2.31.0
-beautifulsoup4>=4.12.0
-python-whois>=0.9.4
-googlesearch-python>=1.2.0
-playwright>=1.40.0
+.
+├── main branch                       # Master documentation & branch navigation hub
+│   └── README.md                     # You are here
+│
+├── gamblingwebfind-omniroute branch  # Cloud AI Gateway (Production)
+│   ├── api/                          # FastAPI REST application
+│   ├── checking_url/                 # Triple-lock verifier & OmniRoute engine
+│   ├── data/                         # Keywords, ML model, screenshot archives
+│   ├── db/                           # MongoDB client & queries
+│   ├── export_domains/               # PyMuPDF PDF/Excel batch exporter
+│   ├── keywordssearch/               # Crawlee search engine scraper
+│   ├── tests/                        # Full Pytest test suite (23 passing)
+│   ├── web/                          # Live web dashboard interface
+│   ├── ARCHITECTURE.md               # Cloud technical architecture specs
+│   └── README.md                     # OmniRoute branch guide
+│
+└── gamblingwebfind-core branch       # Local AI Engine (Air-Gapped)
+    ├── api/                          # FastAPI REST application
+    ├── checking_url/                 # Triple-lock verifier & Ollama engine
+    ├── data/                         # Keywords, ML model, screenshot archives
+    ├── db/                           # MongoDB client & queries
+    ├── export_domains/               # PyMuPDF PDF/Excel batch exporter
+    ├── keywordssearch/               # Crawlee search engine scraper
+    ├── web/                          # Live web dashboard interface
+    ├── ARCHITECTURE.md               # Local technical architecture specs
+    └── README.md                     # Ollama branch guide
 ```
 
-Installed automatically by `python setup.py`.
-
 ---
 
-## ⚙️ Configuration
+## 📜 License
 
-All settings are in [`config.py`](config.py):
-
-| Setting | Default | Description |
-|---|---|---|
-| `DORK_DELAY_MIN` | 10s | Min delay between Google dork queries |
-| `DORK_DELAY_MAX` | 30s | Max delay between dork queries |
-| `LIVENESS_THREADS` | 10 | Concurrent threads for liveness checks |
-| `LIVENESS_TIMEOUT` | 10s | Timeout per domain |
-| `DEFAULT_TIMEOUT` | 15s | HTTP request timeout |
-| `SCREENSHOT_WIDTH` | 1920 | Screenshot viewport width |
-| `SCREENSHOT_HEIGHT` | 1080 | Screenshot viewport height |
-| `SCREENSHOT_TIMEOUT` | 30s | Max time to capture screenshot |
-| `MAX_DORK_RESULTS_PER_QUERY` | 50 | Results per dork query |
-
----
-
-## ⚠️ Disclaimer
-
-This tool is intended for **cybersecurity research, law enforcement, and regulatory compliance** purposes only. It helps identify illegal gambling websites for takedown and investigation.
-
-- Always comply with local laws and regulations
-- Respect website terms of service
-- Use responsibly and ethically
-- The authors are not responsible for misuse of this tool
-
----
-
-## 📄 License
-
-This project is for research and educational purposes.
-
----
-
-## 🤝 Contributing
-
-1. Fork the repo
-2. Add your dork queries to `dorks.txt`
-3. Submit a Pull Request
-
----
-
-**Made with ❤️ for fighting illegal online gambling**
+Distributed under the MIT License. See `LICENSE` in the respective branches for details.

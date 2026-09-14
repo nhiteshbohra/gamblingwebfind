@@ -1,35 +1,34 @@
-# Output directory (reports, screenshots, logs)
-output/
-
-# PDF files (too large for git)
-*.pdf
-
-# Python
-__pycache__/
-*.pyc
-*.pyo
-*.egg-info/
-dist/
-build/
-*.egg
-.eggs/
-
-# Virtual environments
-venv/
-.venv/
-env/
+# Environment & secrets
+.env
+.env.*
+!.env.example
 
 # IDE
 .vscode/
 .idea/
-*.swp
-*.swo
 
-# OS
-Thumbs.db
+# Python & caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+.venv/
+env/
+venv/
+
+# Data, models & outputs
+data/
+output/
+downloads/
+*.log
+checking_url/
+*.pkl
+
+# Operating System
 .DS_Store
-desktop.ini
-
-# Temp files
-*.tmp
-*.bak
+Thumbs.db
